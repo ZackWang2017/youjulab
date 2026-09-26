@@ -1,0 +1,709 @@
+import { createUniver, LocaleType } from '@univerjs/presets';
+import { UniverSheetsCorePreset } from '@univerjs/preset-sheets-core';
+import ZhCN from '@univerjs/preset-sheets-core/locales/zh-CN';
+import { IMenuManagerService } from '@univerjs/ui';
+import '@univerjs/preset-sheets-core/lib/index.css';
+import { download, type EditorAdapter } from '../../context/types';
+import { launchAmountMomYoyChart, flattenMatrixNumbers, splitRangeSpecs, type SheetValueReader } from './custom-chart';
+import { openRemoteDataDialog, selectionMatrix, toUniverCells, coerceNumericString, inferOrKeepNumberFormat } from './remote-data';
+import { parseSheetStructure, serializeSheetStructure, STRUCTURE_JSON_MAX, type StructureCell } from './read-structure';
+import { patchSheetCache, putSheetCache, refreshSheetProfile } from './sheet-cache';
+import { computeSelectionStats, extractNumbers, formatStatsBrief } from './selection-stats';
+import { closeSelectDataPanel, getLockedSelectSurrounding, openSelectDataPanel } from './select-data';
+
+const SHEET_LOCALES = {
+  ...ZhCN,
+  ui: {
+    ...ZhCN.ui,
+    ribbon: {
+      ...ZhCN.ui?.ribbon,
+      ai: 'AI助手',
+      aiDesc: 'AI 助手相关能力',
+    },
+  },
+};
+
+function isSnapshot(content: unknown): content is Record<string, unknown> {
+  return Boolean(content && typeof content === 'object' && !Array.isArray(content)
+    && ('sheets' in content || 'sheetOrder' in content));
+}
+
+function rememberedSheetId(snapshot: Record<string, unknown>): string {
+  const custom = snapshot.custom;
+  if (!custom || typeof custom !== 'object' || Array.isArray(custom)) return '';
+  const id = (custom as { activeSheetId?: unknown }).activeSheetId;
+  return typeof id === 'string' ? id : '';
+}
+
+export function mountSheet(container: HTMLElement, changed: () => void, onDirty: (content: unknown) => void): EditorAdapter {
+  let univer: ReturnType<typeof createUniver>['univer'] | undefined;
+  let univerAPI: ReturnType<typeof createUniver>['univerAPI'] | undefined;
+  let workbook: ReturnType<ReturnType<typeof createUniver>['univerAPI']['createWorkbook']> | undefined;
+  let assetId = '';
+  let revision = 0;
+  let loading = false;
+  let restoring = false;
+  let lastSheetId = '';
+  let lastStructureJson = '';
+  let lastStructureSheetId = '';
+  let lastReadPayloadJson = '';
+  let syncedValues: StructureCell[][] = [];
+  let syncedSheetId = '';
+  let syncedRevision = -1;
+  let profileStale = false;
+  let cacheTimer: ReturnType<typeof setTimeout> | undefined;
+
+  function clearStructureCache() {
+    lastStructureJson = '';
+    lastStructureSheetId = '';
+    lastReadPayloadJson = '';
+    syncedValues = [];
+    syncedSheetId = '';
+    syncedRevision = -1;
+    profileStale = false;
+    if (cacheTimer) clearTimeout(cacheTimer);
+  }
+
+  function currentStructure() {
+    if (!workbook || !assetId) return null;
+    const sheet = workbook.getActiveSheet();
+    const structure = parseSheetStructure(sheet);
+    const json = serializeSheetStructure(structure);
+    const parsed = JSON.parse(json) as typeof structure;
+    lastStructureJson = json;
+    lastStructureSheetId = structure.sheet_id;
+    return parsed;
+  }
+
+  function diffCells(next: StructureCell[][]) {
+    const cells: { row: number; column: number; value: StructureCell }[] = [];
+    const rows = Math.max(syncedValues.length, next.length);
+    const cols = Math.max(syncedValues[0]?.length || 0, next[0]?.length || 0, 1);
+    let changed = 0;
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < Math.max(syncedValues[r]?.length || 0, next[r]?.length || 0); c++) {
+        const before = syncedValues[r]?.[c] ?? null;
+        const after = next[r]?.[c] ?? null;
+        if (before !== after) {
+          changed += 1;
+          cells.push({ row: r, column: c, value: after });
+        }
+      }
+    }
+    const ratio = changed / Math.max(rows * cols, 1);
+    return { cells, ratio, rows: next.length, cols: next[0]?.length || 0 };
+  }
+
+  async function publishSheetCache(regenerateProfile: boolean) {
+    if (!assetId || !workbook || loading) return;
+    const structure = currentStructure();
+    if (!structure?.sheet_id) return;
+    const sameSheet = syncedSheetId === structure.sheet_id && syncedValues.length > 0 && !regenerateProfile;
+    const diff = sameSheet ? diffCells(structure.values) : null;
+    let meta;
+    if (diff && diff.ratio <= 0.2 && diff.cells.length) {
+      meta = await patchSheetCache(assetId, {
+        sheet_id: structure.sheet_id,
+        revision,
+        cells: diff.cells,
+        rows: structure.rows,
+        cols: structure.cols,
+        range: structure.range,
+        merges: structure.merges,
+      });
+    } else if (diff && !diff.cells.length && !regenerateProfile) {
+      syncedRevision = revision;
+      return;
+    } else {
+      meta = await putSheetCache(assetId, structure, revision);
+    }
+    syncedValues = structure.values;
+    syncedSheetId = structure.sheet_id;
+    syncedRevision = revision;
+    profileStale = Boolean(meta.profile_stale || !meta.has_profile);
+    const incremental = Boolean(diff && diff.cells.length);
+    if (regenerateProfile || (!meta.has_profile && !incremental)) {
+      const refreshed = await refreshSheetProfile(assetId, structure.sheet_id);
+      profileStale = Boolean(refreshed.profile_stale || !refreshed.has_profile);
+    }
+    changed();
+  }
+
+  function scheduleSheetCache() {
+    if (loading || restoring || !assetId) return;
+    if (cacheTimer) clearTimeout(cacheTimer);
+    cacheTimer = setTimeout(() => {
+      void publishSheetCache(false).catch(err => {
+        window.dispatchEvent(new CustomEvent('office-error', {
+          detail: err instanceof Error ? err.message : String(err),
+        }));
+      });
+    }, 800);
+  }
+
+  function selectionHasContent(values: unknown[][]) {
+    return values.some(row => row.some(v => v != null && String(v).trim() !== ''));
+  }
+
+  function tagSurrounding(raw: string, scope: 'selection' | 'sheet'): string {
+    try {
+      const parsed = JSON.parse(raw) as Record<string, unknown>;
+      return JSON.stringify({ ...parsed, scope });
+    } catch {
+      return JSON.stringify({ scope, data: raw });
+    }
+  }
+
+  function cachedSurrounding(sheetId: string, scope: 'selection' | 'sheet'): string {
+    if (lastReadPayloadJson && lastStructureSheetId === sheetId) {
+      return tagSurrounding(lastReadPayloadJson, scope);
+    }
+    const locked = getLockedSelectSurrounding(sheetId);
+    if (locked) return locked;
+    if (lastStructureJson && lastStructureSheetId === sheetId) {
+      return tagSurrounding(lastStructureJson, scope);
+    }
+    return '';
+  }
+
+  function buildReadPayload(sheet: {
+    getSelection(): { getActiveRange(): {
+      getA1Notation(): string;
+      getValues(): unknown[][];
+    } | null | undefined } | null | undefined;
+  } & Parameters<typeof parseSheetStructure>[0]) {
+    const range = sheet.getSelection()?.getActiveRange();
+    const address = range?.getA1Notation() || '';
+    const selectionValues = range ? (range.getValues() as unknown[][]) : [];
+    const stats = computeSelectionStats(extractNumbers(selectionValues));
+    const structure = parseSheetStructure(sheet);
+    const structureJson = serializeSheetStructure(structure);
+    lastStructureJson = structureJson;
+    lastStructureSheetId = structure.sheet_id;
+    const payload = {
+      selection: {
+        address,
+        rows: selectionValues.length,
+        cols: selectionValues[0]?.length || 0,
+        stats,
+      },
+      structure: JSON.parse(structureJson) as Record<string, unknown>,
+      note: 'selection.address 为当前选区坐标；selection.stats 为选区数值特征；structure 为整表合并填充后的定位结构',
+    };
+    let json = JSON.stringify(payload);
+    if (json.length > STRUCTURE_JSON_MAX) {
+      const slim = {
+        ...payload,
+        structure: {
+          ...payload.structure,
+          values: [],
+          truncated: true,
+        },
+      };
+      json = JSON.stringify(slim);
+    }
+    lastReadPayloadJson = json;
+    return { address, stats, payload, json };
+  }
+
+  function rememberActiveSheet(persist: boolean) {
+    if (!workbook) return;
+    const id = workbook.getActiveSheet()?.getSheetId();
+    if (!id || id === lastSheetId) return;
+    lastSheetId = id;
+    const custom = { ...(workbook.getCustomMetadata() || {}), activeSheetId: id };
+    workbook.setCustomMetadata(custom);
+    if (persist && !loading && !restoring && assetId) {
+      revision++;
+      onDirty(workbook.save());
+    }
+  }
+
+  function restoreActiveSheet() {
+    if (!workbook || !lastSheetId) return;
+    const current = workbook.getActiveSheet()?.getSheetId();
+    if (current === lastSheetId) return;
+    const sheet = workbook.getSheetBySheetId(lastSheetId);
+    if (!sheet) {
+      lastSheetId = current || '';
+      return;
+    }
+    restoring = true;
+    workbook.setActiveSheet(sheet);
+    restoring = false;
+  }
+
+  const markReady = () => {
+    if (!univerAPI) return;
+    if (univerAPI.getCurrentLifecycleStage() >= univerAPI.Enum.LifecycleStages.Rendered) {
+      restoreActiveSheet();
+      loading = false;
+      container.inert = false;
+      container.dataset.ready = 'true';
+      changed();
+      if (assetId) {
+        void publishSheetCache(false).catch(err => {
+          window.dispatchEvent(new CustomEvent('office-error', {
+            detail: err instanceof Error ? err.message : String(err),
+          }));
+        });
+      }
+    }
+  };
+
+  function chartReader(): SheetValueReader {
+    return {
+      getActiveRangeA1: () => {
+        if (!workbook) return '';
+        const range = workbook.getActiveSheet().getSelection()?.getActiveRange();
+        return range?.getA1Notation() || '';
+      },
+      readNumbersByA1: (a1) => {
+        if (!workbook) throw new Error('表格尚未打开。');
+        const sheet = workbook.getActiveSheet();
+        const specs = splitRangeSpecs(a1);
+        if (!specs.length) throw new Error('请录入单元格坐标。');
+        const numbers: number[] = [];
+        for (const spec of specs) {
+          try {
+            const values = sheet.getRange(spec).getValues() as unknown[][];
+            numbers.push(...flattenMatrixNumbers(values));
+          } catch {
+            throw new Error(`无法解析区域「${spec}」。`);
+          }
+        }
+        return numbers;
+      },
+    };
+  }
+
+  function openReadDataDialog() {
+    if (!workbook) return;
+    const sheet = workbook.getActiveSheet();
+    const overlay = document.createElement('div');
+    overlay.className = 'dialog-overlay';
+    const dialog = document.createElement('div');
+    dialog.className = 'name-dialog';
+    dialog.style.width = 'min(420px, 92vw)';
+    const title = document.createElement('h2');
+    title.textContent = '读数据';
+
+    const field = document.createElement('label');
+    field.className = 'field-label';
+    field.style.display = 'grid';
+    field.style.gap = '6px';
+    field.style.margin = '0';
+    const fieldName = document.createElement('span');
+    fieldName.textContent = '选区';
+    const fieldValue = document.createElement('input');
+    fieldValue.type = 'text';
+    fieldValue.readOnly = true;
+    fieldValue.style.cssText = 'min-height:34px;border:1px solid #d8dde1;border-radius:5px;padding:6px 10px;font:inherit;background:#f6f8f9;color:#24282d';
+    field.append(fieldName, fieldValue);
+
+    const hint = document.createElement('p');
+    hint.style.cssText = 'margin:8px 0 0;font-size:12px;line-height:1.5;color:#66707a';
+
+    try {
+      const { address, stats } = buildReadPayload(sheet);
+      fieldValue.value = address || '（未选中单元格）';
+      hint.textContent = address
+        ? `已缓存整表结构供 AI 定位。${formatStatsBrief(stats)}`
+        : '请先框选单元格，再点读数据。';
+    } catch (err) {
+      clearStructureCache();
+      fieldValue.value = sheet.getSelection()?.getActiveRange()?.getA1Notation() || '（未选中单元格）';
+      hint.textContent = err instanceof Error ? err.message : String(err);
+    }
+
+    const actions = document.createElement('div');
+    actions.className = 'dialog-actions';
+    actions.innerHTML = '<button type="button" class="primary" data-close>关闭</button>';
+    dialog.append(title, field, hint, actions);
+    overlay.append(dialog);
+    document.body.append(overlay);
+    const close = () => overlay.remove();
+    actions.querySelector('[data-close]')!.addEventListener('click', close);
+    overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
+  }
+
+  function ensureAiRibbonTab() {
+    if (!univer) return;
+    const menuManager = univer.__getInjector().get(IMenuManagerService);
+    menuManager.appendRootMenu({
+      ribbon: {
+        'ribbon.ai': {
+          order: 3.5,
+          title: 'ui.ribbon.ai',
+          'ribbon.ai.others': { order: 0 },
+        },
+      },
+    });
+  }
+
+  function bindApi() {
+    if (!univerAPI) return;
+    ensureAiRibbonTab();
+    univerAPI.addEvent(univerAPI.Event.LifeCycleChanged, markReady);
+    univerAPI.addEvent(univerAPI.Event.SelectionChanged, changed);
+    univerAPI.addEvent(univerAPI.Event.ActiveSheetChanged, () => {
+      if (loading || restoring) return;
+      clearStructureCache();
+      rememberActiveSheet(true);
+      changed();
+      scheduleSheetCache();
+    });
+    univerAPI.createMenu({
+      id: 'office.sheet.remote-data',
+      title: '动态数据',
+      tooltip: '用当前选区调用远程接口，结果写入光标单元格',
+      action: () => {
+        if (!workbook) return;
+        const wb = workbook;
+        const sheet = wb.getActiveSheet();
+        const range = sheet.getSelection()?.getActiveRange();
+        if (!range) return;
+        openRemoteDataDialog({
+          selectionValues: () => selectionMatrix(range),
+          selectionAddress: () => range.getA1Notation(),
+          writeFromCursor: values => {
+            const cursor = sheet.getActiveCell() || range;
+            const start = cursor.getRange();
+            const cells = toUniverCells(values);
+            sheet.getRange(start.startRow, start.startColumn, cells.length, cells[0].length).setValues(cells);
+            onDirty(wb.save());
+            changed();
+            return {
+              address: sheet.getRange(start.startRow, start.startColumn, 1, 1).getA1Notation(),
+              rows: cells.length,
+              cols: cells[0].length,
+            };
+          },
+        });
+      },
+    }).appendTo('ribbon.data.others');
+    univerAPI.createMenu({
+      id: 'office.sheet.text-to-number',
+      title: '文本转数值',
+      tooltip: '将选区内「看起来像数字」的文本转为数值，并保留原数字格式',
+      action: () => {
+        if (!workbook) return;
+        const sheet = workbook.getActiveSheet();
+        const range = sheet.getSelection()?.getActiveRange();
+        if (!range) return;
+        const cells = range.getCellDatas();
+        const formats = range.getNumberFormats?.() || [];
+        const nextFormats: string[][] = [];
+        let converted = 0;
+        const next = cells.map((row, r) => {
+          const formatRow = formats[r] || [];
+          const outFormats: string[] = [];
+          const outRow = (row || []).map((cell, c) => {
+            const prevFmt = formatRow[c] || '';
+            if (!cell || cell.f) {
+              outFormats.push(prevFmt);
+              return cell ?? null;
+            }
+            if (cell.t !== 1 && cell.t !== 4) {
+              outFormats.push(prevFmt);
+              return cell;
+            }
+            if (typeof cell.v !== 'string' && typeof cell.v !== 'number') {
+              outFormats.push(prevFmt);
+              return cell;
+            }
+            const raw = typeof cell.v === 'number' ? String(cell.v) : cell.v;
+            const num = coerceNumericString(raw);
+            if (num === null) {
+              outFormats.push(prevFmt);
+              return cell;
+            }
+            converted += 1;
+            outFormats.push(inferOrKeepNumberFormat(raw, prevFmt));
+            return { ...cell, v: num, t: 2 };
+          });
+          nextFormats.push(outFormats);
+          return outRow;
+        });
+        if (!converted) return;
+        range.setValues(next as Parameters<typeof range.setValues>[0]);
+        if (typeof range.setNumberFormats === 'function') {
+          range.setNumberFormats(nextFormats);
+        }
+        onDirty(workbook.save());
+        changed();
+      },
+    }).appendTo('ribbon.data.others');
+
+    univerAPI.createMenu({
+      id: 'office.sheet.select-data',
+      title: '选数据',
+      tooltip: '右上角面板收集选区（支持多选），可改数后锁定并记住近三次',
+      action: () => {
+        if (!workbook || !univerAPI) return;
+        const api = univerAPI;
+        openSelectDataPanel({
+          getActiveSheet: () => workbook!.getActiveSheet(),
+          onSelectionChange: cb => {
+            const disposable = api.addEvent(api.Event.SelectionChanged, () => cb());
+            return () => {
+              if (disposable && typeof (disposable as { dispose?: () => void }).dispose === 'function') {
+                (disposable as { dispose: () => void }).dispose();
+              }
+            };
+          },
+          onDirty: () => {
+            if (!workbook) return;
+            onDirty(workbook.save());
+            changed();
+          },
+        });
+      },
+    }).appendTo('ribbon.data.others');
+
+    // 数据栏：自定义图表（点击即打开配置）
+    univerAPI.createMenu({
+      id: 'office.sheet.custom-charts',
+      title: '自定义图表',
+      tooltip: '自定义图表配置与生成',
+      action: () => {
+        if (!workbook) return;
+        launchAmountMomYoyChart(chartReader());
+      },
+    }).appendTo('ribbon.data.others');
+
+    // AI助手（一级，位于数据之后）→ 读数据
+    univerAPI.createMenu({
+      id: 'office.sheet.ai.read-data',
+      title: '读数据',
+      tooltip: '显示当前选区坐标，并缓存整表结构与选区统计供 AI',
+      action: () => openReadDataDialog(),
+    }).appendTo('ribbon.ai.others');
+
+    univerAPI.onCommandExecuted(command => {
+      if (loading || restoring || command.type !== 2 || !assetId || !workbook) return;
+      rememberActiveSheet(false);
+      revision++;
+      onDirty(workbook.save());
+      changed();
+      scheduleSheetCache();
+    });
+  }
+
+  function boot(snapshot: Record<string, unknown>) {
+    univer?.dispose();
+    univer = undefined;
+    univerAPI = undefined;
+    workbook = undefined;
+    clearStructureCache();
+    closeSelectDataPanel();
+    container.replaceChildren();
+    container.inert = true;
+    container.dataset.ready = 'false';
+    document.querySelectorAll('.sheet-chart-window').forEach(el => el.remove());
+    const created = createUniver({
+      locale: LocaleType.ZH_CN, locales: { [LocaleType.ZH_CN]: SHEET_LOCALES },
+      presets: [UniverSheetsCorePreset({
+        container,
+        // 隐藏内置「文本转数字」（工具栏 + 右键），改用自定义「文本转数值」
+        menu: {
+          'sheet.toolbar.text-to-number': { hidden: true },
+          'sheet.contextMenu.text-to-number': { hidden: true },
+        },
+        sheets: {
+          disableForceStringAlert: true,
+          disableForceStringMark: true,
+        },
+      })],
+    });
+    univer = created.univer;
+    univerAPI = created.univerAPI;
+    bindApi();
+    workbook = univerAPI.createWorkbook(snapshot);
+    markReady();
+  }
+
+  boot({ name: '未命名表格' });
+  return {
+    async load(asset) {
+      loading = true;
+      clearStructureCache();
+      assetId = asset.id;
+      revision = asset.revision;
+      const snapshot = isSnapshot(asset.content)
+        ? asset.content
+        : { id: asset.id, name: asset.name || '未命名表格' };
+      lastSheetId = isSnapshot(asset.content) ? rememberedSheetId(snapshot) : '';
+      boot(snapshot);
+      restoreActiveSheet();
+      if (workbook && !isSnapshot(asset.content)) onDirty(workbook.save());
+      markReady();
+    },
+    context() {
+      if (container.inert || !assetId || !workbook) return null;
+      const sheet = workbook.getActiveSheet();
+      const range = sheet.getSelection()?.getActiveRange();
+      if (!range) return null;
+      const target = range.getRange();
+      const rows = target.endRow - target.startRow + 1;
+      const cols = target.endColumn - target.startColumn + 1;
+      if (rows * cols > 2000) throw new Error('请将选区缩小到 2000 个单元格以内。');
+      const cells = range.getCellDatas();
+      const values = Array.from({ length: rows }, (_, r) => Array.from({ length: cols }, (_, c) => {
+        const cell = cells[r]?.[c];
+        return cell?.f || cell?.v || (cell?.v === 0 ? 0 : cell?.v === false ? false : null);
+      }));
+      const sheetId = sheet.getSheetId();
+      const surrounding = lastReadPayloadJson && lastStructureSheetId === sheetId
+        ? lastReadPayloadJson
+        : lastStructureJson && lastStructureSheetId === sheetId
+          ? lastStructureJson
+          : JSON.stringify(sheet.getRange(0, target.startColumn, 1, cols).getValues());
+      return { document_id: assetId, surface: 'sheet' as const, revision,
+        selection: { sheet_id: sheetId, row: target.startRow, column: target.startColumn,
+          rows, cols, address: range.getA1Notation(), values },
+        surrounding,
+      };
+    },
+    anchor() {
+      const ctx = this.context();
+      if (!ctx) return null;
+      const value = ctx.selection.values[0][0];
+      return { ...ctx, selection: { ...ctx.selection, rows: 1, cols: 1, values: [[value]] } };
+    },
+    resolveContext() {
+      if (container.inert || !assetId || !workbook) return null;
+      const sheet = workbook.getActiveSheet();
+      const sheetId = sheet.getSheetId();
+      const range = sheet.getSelection()?.getActiveRange();
+      if (range) {
+        const target = range.getRange();
+        const rows = target.endRow - target.startRow + 1;
+        const cols = target.endColumn - target.startColumn + 1;
+        if (rows * cols <= 2000) {
+          const cells = range.getCellDatas();
+          const values = Array.from({ length: rows }, (_, r) => Array.from({ length: cols }, (_, c) => {
+            const cell = cells[r]?.[c];
+            return cell?.f || cell?.v || (cell?.v === 0 ? 0 : cell?.v === false ? false : null);
+          }));
+          if (selectionHasContent(values)) {
+            const headerFallback = JSON.stringify(sheet.getRange(0, target.startColumn, 1, cols).getValues());
+            const surrounding = cachedSurrounding(sheetId, 'selection')
+              || tagSurrounding(headerFallback, 'selection');
+            return {
+              document_id: assetId,
+              surface: 'sheet' as const,
+              revision,
+              selection: {
+                sheet_id: sheetId,
+                row: target.startRow,
+                column: target.startColumn,
+                rows,
+                cols,
+                address: range.getA1Notation(),
+                values,
+              },
+              surrounding,
+            };
+          }
+        }
+      }
+      const structure = parseSheetStructure(sheet);
+      const structureJson = serializeSheetStructure(structure);
+      lastStructureJson = structureJson;
+      lastStructureSheetId = sheetId;
+      return {
+        document_id: assetId,
+        surface: 'sheet' as const,
+        revision,
+        selection: {
+          sheet_id: sheetId,
+          row: 0,
+          column: 0,
+          rows: 1,
+          cols: 1,
+          address: '',
+          values: [[null]],
+        },
+        surrounding: tagSurrounding(structureJson, 'sheet'),
+      };
+    },
+    askContext(includeSelection: boolean) {
+      if (container.inert || !assetId || !workbook) return null;
+      const sheet = workbook.getActiveSheet();
+      const sheetId = sheet.getSheetId();
+      const empty = {
+        document_id: assetId,
+        surface: 'sheet' as const,
+        revision,
+        selection: {
+          sheet_id: sheetId,
+          row: 0,
+          column: 0,
+          rows: 1,
+          cols: 1,
+          address: '',
+          values: [[null]] as unknown[][],
+        },
+        surrounding: '',
+      };
+      if (!includeSelection) return empty;
+      const range = sheet.getSelection()?.getActiveRange();
+      if (!range) return empty;
+      const target = range.getRange();
+      const rows = target.endRow - target.startRow + 1;
+      const cols = target.endColumn - target.startColumn + 1;
+      if (rows * cols > 2000) return empty;
+      const cells = range.getCellDatas();
+      const values = Array.from({ length: rows }, (_, r) => Array.from({ length: cols }, (_, c) => {
+        const cell = cells[r]?.[c];
+        return cell?.f || cell?.v || (cell?.v === 0 ? 0 : cell?.v === false ? false : null);
+      }));
+      if (!selectionHasContent(values) && rows === 1 && cols === 1) return empty;
+      return {
+        ...empty,
+        selection: {
+          sheet_id: sheetId,
+          row: target.startRow,
+          column: target.startColumn,
+          rows,
+          cols,
+          address: range.getA1Notation(),
+          values,
+        },
+      };
+    },
+    syncSheetCache(opts) {
+      return publishSheetCache(Boolean(opts?.regenerateProfile));
+    },
+    cacheStale() {
+      return profileStale || syncedRevision !== revision;
+    },
+    apply(patch) {
+      if (!workbook || !univerAPI) throw new Error('表格尚未打开。');
+      if (patch.revision !== revision) throw new Error('表格已更改，请重新生成建议。');
+      const s = patch.selection;
+      const sheet = workbook.getSheetBySheetId(s.sheet_id);
+      if (!sheet) throw new Error('工作表不存在。');
+      const values = patch.replacement as (string | number | boolean | null)[][];
+      sheet.getRange(s.row, s.column, values.length, values[0].length).setValues(values.map(row => row.map(v => {
+        if (typeof v === 'string' && v.startsWith('=')) return { f: v };
+        if (typeof v === 'number') return { v, t: 2, f: null };
+        if (typeof v === 'boolean') return { v, t: 3, f: null };
+        if (typeof v === 'string') {
+          const coerced = coerceNumericString(v);
+          if (coerced !== null) return { v: coerced, t: 2, f: null };
+        }
+        return { v, f: null };
+      })));
+      onDirty(workbook.save());
+      changed();
+    },
+    snapshot() { return workbook?.save(); },
+    undo() { void univerAPI?.undo(); },
+    export() {
+      if (!workbook) return;
+      download('workbook.univer.json', JSON.stringify(workbook.save(), null, 2));
+    },
+  };
+}

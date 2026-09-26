@@ -1,0 +1,10 @@
+# 投研数据 MCP 服务依赖
+# 安装：pip install -r requirements.txt
+# 注意：mcp 2.x 移除了 fastmcp 模块，钉在 1.x（FastMCP 标准 API）
+mcp>=1.2.0,<2.0.0
+pyyaml>=6.0
+pymupdf>=1.24   # PDF 财报解析（读财报）
+psycopg[binary]>=3.1  # PostgreSQL 持久化
+openpyxl>=3.1         # 港交所证券列表 xlsx 解析
+httpx>=0.27           # 东方财富 datacenter HTTP 客户端
+python-dotenv>=1.0,<2

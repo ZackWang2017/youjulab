@@ -1,0 +1,1016 @@
+#calendar {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+  background: #f6f7f8;
+}
+
+#calendar .calendar-stage {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  padding: 10px 14px 14px;
+  overflow: auto;
+}
+
+#calendar .fc {
+  --fc-border-color: #dde1e5;
+  --fc-page-bg-color: #fff;
+  --fc-neutral-bg-color: #f0f3f4;
+  --fc-today-bg-color: #d8efe9;
+  --fc-button-bg-color: #168274;
+  --fc-button-border-color: #168274;
+  --fc-button-hover-bg-color: #11685d;
+  --fc-button-hover-border-color: #11685d;
+  --fc-button-active-bg-color: #0f5c52;
+  --fc-button-active-border-color: #0f5c52;
+  --fc-event-bg-color: transparent;
+  --fc-event-border-color: transparent;
+  --fc-event-text-color: #24282d;
+  height: 100%;
+  min-height: 480px;
+  font-size: 13px;
+}
+
+#calendar .fc .fc-toolbar-title {
+  font-size: 1.15rem;
+  font-weight: 600;
+  text-align: center;
+}
+
+#calendar .fc-toolbar.fc-header-toolbar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+}
+
+#calendar .fc-toolbar.fc-header-toolbar > .fc-toolbar-chunk:nth-child(1) {
+  justify-content: flex-start;
+}
+
+#calendar .fc-toolbar.fc-header-toolbar > .fc-toolbar-chunk:nth-child(2) {
+  justify-content: center;
+}
+
+#calendar .fc-toolbar.fc-header-toolbar > .fc-toolbar-chunk:nth-child(3) {
+  justify-content: flex-end;
+}
+
+#calendar .fc-direction-ltr .fc-toolbar .fc-todos-button {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+#calendar .fc-direction-ltr .fc-toolbar .fc-monthlyManage-button {
+  margin-left: calc(-6px - 1px);
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+}
+
+#calendar .fc .fc-button {
+  border-radius: 5px;
+  text-transform: none;
+  font-weight: 500;
+  box-shadow: none;
+}
+
+#calendar .fc-daygrid-day.fc-day-selected {
+  background: #d6e4f5;
+}
+
+#calendar .fc-daygrid-day.fc-day-selected .fc-day-num {
+  font-weight: 700;
+  color: #1a4f8c;
+}
+
+#calendar .fc-day-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+  width: 100%;
+  min-width: 0;
+  padding: 2px 2px 0;
+  line-height: 1.2;
+}
+
+#calendar .fc-day-left {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+}
+
+#calendar .fc-day-lunar,
+#calendar .fc-day-fest {
+  font-size: 10px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+#calendar .fc-day-lunar {
+  color: #88929c;
+  flex-shrink: 0;
+  max-width: 4.5em;
+}
+
+#calendar .fc-day-fest {
+  color: #c0392b;
+  min-width: 0;
+}
+
+#calendar .fc-day-badge {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1;
+  color: #fff;
+}
+
+#calendar .fc-day-badge.is-work {
+  background: #1a4f8c;
+}
+
+#calendar .fc-day-badge.is-rest {
+  background: #168274;
+}
+
+#calendar .fc-day-num {
+  flex-shrink: 0;
+  margin-left: auto;
+  text-align: right;
+  font-size: 13px;
+  font-weight: 600;
+  color: #24282d;
+}
+
+#calendar .fc-daygrid-day.fc-day-today .fc-day-num {
+  color: #0f5c52;
+}
+
+.calendar-day-dialog {
+  min-width: min(720px, calc(100vw - 48px));
+  width: min(720px, calc(100vw - 48px));
+  max-height: min(88vh, 780px);
+  overflow: auto;
+  background: white;
+  border-radius: 8px;
+  padding: 18px 20px 16px;
+  box-shadow: 0 12px 40px rgba(20, 28, 36, 0.18);
+  display: grid;
+  gap: 10px;
+}
+
+.calendar-day-dialog h2,
+.calendar-day-dialog .calendar-day-title {
+  margin: 0;
+  font-size: 1.1rem;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.calendar-day-dialog .calendar-day-solar {
+  font-weight: 700;
+  color: #24282d;
+}
+
+.calendar-day-dialog .calendar-day-title-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.calendar-day-dialog .calendar-day-title-meta .fc-day-lunar {
+  color: #88929c;
+  max-width: none;
+}
+
+.calendar-day-dialog .calendar-day-title-meta .fc-day-fest {
+  color: #c0392b;
+}
+
+.calendar-day-dialog .calendar-day-title-meta .fc-day-badge {
+  width: 16px;
+  height: 16px;
+  font-size: 10px;
+}
+
+.calendar-day-dialog .md-editor-host {
+  min-height: 320px;
+  border: 1px solid #d8dde1;
+  border-radius: 6px;
+  overflow: hidden;
+  background: #fff;
+}
+
+.calendar-day-dialog .dialog-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.calendar-create-dialog .scope-field {
+  display: grid;
+  gap: 8px;
+  margin: 10px 0 4px;
+}
+
+.calendar-create-dialog .scope-field legend {
+  font-size: 12px;
+  color: #4a5560;
+  padding: 0;
+}
+
+.calendar-create-dialog .scope-options {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.calendar-create-dialog .scope-options label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+/* —— Markdown 编辑器（编写 / 预览） —— */
+.plan-md-editor {
+  display: flex;
+  flex-direction: column;
+  height: 340px;
+  min-height: 280px;
+}
+
+.plan-md-toolbar {
+  display: flex;
+  gap: 0;
+  border-bottom: 1px solid #e4e8eb;
+  background: #f7f8f9;
+  flex-shrink: 0;
+}
+
+.plan-md-toolbar button {
+  border: 0 !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  min-height: 34px;
+  padding: 6px 14px;
+  color: #66707a;
+  font-size: 13px;
+}
+
+.plan-md-toolbar button:hover {
+  background: #eef1f3 !important;
+  color: #24282d;
+}
+
+.plan-md-toolbar button.is-active {
+  color: #0f5c52;
+  font-weight: 600;
+  box-shadow: inset 0 -2px 0 #168274;
+  background: #fff !important;
+}
+
+.plan-md-panes {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+}
+
+.plan-md-input,
+.plan-md-preview {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  box-sizing: border-box;
+}
+
+.plan-md-input {
+  border: 0;
+  resize: none;
+  padding: 12px 14px;
+  font: inherit;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.55;
+  color: #24282d;
+  background: #fff;
+  outline: none;
+}
+
+.plan-md-preview {
+  overflow: auto;
+  padding: 12px 14px;
+  background: #fff;
+}
+
+/* 叠层切换：避免 hidden/grid 导致预览区高度为 0 或仍显示编辑框 */
+.plan-md-editor[data-mode="edit"] .plan-md-preview {
+  display: none !important;
+}
+
+.plan-md-editor[data-mode="preview"] .plan-md-input {
+  display: none !important;
+}
+
+.plan-md-editor[data-mode="preview"] .plan-md-preview {
+  display: block !important;
+}
+
+.plan-md-empty {
+  margin: 0;
+  color: #88929c;
+  font-size: 13px;
+}
+
+.plan-md-live {
+  height: 340px;
+  min-height: 280px;
+}
+
+.plan-md-live-input {
+  height: 100%;
+  overflow: auto;
+  padding: 12px 14px;
+  outline: none;
+  background: #fff;
+}
+
+.plan-md-live-input:focus {
+  outline: none;
+}
+
+.plan-md-live-input:empty::before {
+  content: attr(data-placeholder);
+  color: #88929c;
+}
+
+.plan-line {
+  min-height: 1.5em;
+  padding-left: 1.6em;
+  text-indent: -1.6em;
+}
+
+.plan-line[data-level="0"]::before {
+  content: attr(data-num) ". ";
+}
+
+.fc-day-plan {
+  counter-reset: plan-num;
+}
+
+.fc-day-plan ol {
+  list-style: none;
+  padding-left: 1.25em;
+}
+
+.fc-day-plan ol > li {
+  counter-increment: plan-num;
+}
+
+.fc-day-plan ol > li::before {
+  content: counter(plan-num) ". ";
+}
+
+.fc-day-plan ol ul,
+.plan-md ol ul {
+  list-style: disc;
+}
+
+.fc-day-plan ol ul ul,
+.plan-md ol ul ul {
+  list-style: circle;
+}
+
+.plan-line[data-level="1"] {
+  padding-left: 3.5em;
+  text-indent: -1.15em;
+}
+
+.plan-line[data-level="1"]::before {
+  content: "• ";
+  font-size: 0.85em;
+}
+
+.plan-line[data-level="2"] {
+  padding-left: 5.2em;
+  text-indent: -1.15em;
+}
+
+.plan-line[data-level="2"]::before {
+  content: "◦ ";
+  font-size: 0.85em;
+}
+
+/* —— 统一 Markdown 正文样式（预览 + 月历） —— */
+.plan-md {
+  color: #24282d;
+  font-size: 13px;
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+.plan-md :is(p, ul, ol, pre, blockquote, table) {
+  margin: 0.35em 0;
+}
+
+.plan-md :is(h1, h2, h3, h4) {
+  margin: 0.45em 0 0.25em;
+  line-height: 1.3;
+  font-weight: 700;
+  color: #1a1f24;
+}
+
+.plan-md h1 { font-size: 1.15em; }
+.plan-md h2 { font-size: 1.08em; }
+.plan-md h3, .plan-md h4 { font-size: 1em; }
+
+.plan-md ul, .plan-md ol {
+  padding-left: 1.25em;
+}
+
+.plan-md li + li {
+  margin-top: 0.15em;
+}
+
+.plan-md code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.92em;
+  padding: 0.05em 0.3em;
+  border-radius: 3px;
+  background: rgba(22, 130, 116, 0.08);
+}
+
+.plan-md pre {
+  padding: 8px 10px;
+  border-radius: 4px;
+  background: rgba(22, 130, 116, 0.06);
+  overflow: auto;
+}
+
+.plan-md pre code {
+  padding: 0;
+  background: transparent;
+}
+
+.plan-md a {
+  color: #11685d;
+}
+
+.plan-md blockquote {
+  margin-left: 0;
+  padding-left: 0.75em;
+  border-left: 3px solid #c5ddd8;
+  color: #4a5560;
+}
+
+.plan-md strong {
+  font-weight: 700;
+}
+
+.plan-md hr {
+  border: 0;
+  border-top: 1px solid #e4e8eb;
+  margin: 0.6em 0;
+}
+
+/* 月历摘要：保留 MD 结构，透明底，超出省略 */
+#calendar .fc-event,
+#calendar .fc-daygrid-event,
+#calendar .fc-daygrid-block-event,
+#calendar .fc-h-event {
+  background: transparent !important;
+  background-color: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+  color: #24282d !important;
+}
+
+#calendar .fc-daygrid-event .fc-event-main,
+#calendar .fc-h-event .fc-event-main {
+  background: transparent !important;
+  color: inherit !important;
+  padding: 1px 2px;
+}
+
+#calendar .fc-daygrid-event:hover,
+#calendar .fc-daygrid-event:focus {
+  background: transparent !important;
+}
+
+#calendar .fc-daygrid-event {
+  white-space: normal !important;
+  margin: 1px 2px !important;
+}
+
+#calendar .fc-day-plan {
+  max-height: 4.6em;
+  overflow: hidden;
+  position: relative;
+  font-size: 11px;
+  line-height: 1.35;
+  background: transparent !important;
+  color: #2a3138;
+}
+
+#calendar .fc-day-plan :is(p, ul, ol, pre, blockquote, h1, h2, h3, h4) {
+  margin: 0.15em 0;
+}
+
+#calendar .fc-day-plan :is(h1, h2, h3, h4) {
+  font-size: 1em;
+  font-weight: 700;
+}
+
+#calendar .fc-day-plan ul,
+#calendar .fc-day-plan ol {
+  padding-left: 1.05em;
+}
+
+#calendar .fc-day-plan code,
+#calendar .fc-day-plan pre {
+  background: transparent;
+  padding: 0;
+}
+
+#calendar .fc-day-plan a {
+  color: inherit;
+  text-decoration: underline;
+  pointer-events: none;
+}
+
+#calendar .fc-list-event .fc-day-plan {
+  max-height: 3.2em;
+}
+
+#calendar .fc-list-event-graphic,
+#calendar .fc-list-event-dot {
+  display: none !important;
+}
+
+#calendar .fc-list-event td {
+  background: transparent !important;
+}
+
+/* —— 月度事件：今天按钮后的滚动条 + 管理弹窗 —— */
+#calendar .fc-toolbar-chunk {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+#calendar .cal-month-events-strip {
+  display: inline-flex;
+  align-items: stretch;
+  gap: 6px;
+  max-width: min(420px, 46vw);
+  min-width: 140px;
+  width: min(360px, 42vw);
+  height: 32px;
+  margin-left: 4px;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  box-sizing: border-box;
+}
+
+.cal-me-month-select {
+  flex-shrink: 0;
+  height: 28px;
+  min-width: 7.5em;
+  max-width: 9em;
+  border: 1px solid #cfd6dc;
+  border-radius: 4px;
+  background: #fff;
+  color: #24282d;
+  font-size: 12px;
+  padding: 0 6px;
+}
+
+#calendar .cal-month-events-scroll {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  overflow-y: auto;
+  overflow-x: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  padding-right: 2px;
+  scrollbar-width: thin;
+  scroll-snap-type: y mandatory;
+}
+
+#calendar .cal-month-events-empty {
+  font-size: 11px;
+  color: #88929c;
+  line-height: 28px;
+  padding: 0 4px;
+  white-space: nowrap;
+}
+
+#calendar .cal-month-event-chip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  width: 100%;
+  flex: 0 0 28px;
+  height: 28px;
+  min-height: 28px;
+  max-height: 28px;
+  margin: 0;
+  padding: 0 6px;
+  border: 0 !important;
+  border-radius: 4px !important;
+  background: transparent !important;
+  text-align: left;
+  cursor: pointer;
+  color: #24282d;
+  scroll-snap-align: start;
+  box-sizing: border-box;
+}
+
+#calendar .cal-month-event-chip:hover {
+  background: rgba(22, 130, 116, 0.1) !important;
+}
+
+#calendar .cal-month-event-title {
+  min-width: 0;
+  flex: 1;
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cal-me-badge {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1;
+  padding: 3px 5px;
+  border-radius: 3px;
+  white-space: nowrap;
+}
+
+.cal-me-badge-once {
+  color: #1a4f8c;
+  background: rgba(26, 79, 140, 0.12);
+}
+
+.cal-me-badge-monthly {
+  color: #0f5c52;
+  background: rgba(22, 130, 116, 0.14);
+}
+
+.cal-me-badge-yearly {
+  color: #8a5a12;
+  background: rgba(196, 140, 40, 0.16);
+}
+
+.calendar-me-dialog {
+  min-width: min(560px, calc(100vw - 48px));
+  width: min(640px, calc(100vw - 48px));
+  max-height: min(88vh, 820px);
+  overflow: auto;
+  background: white;
+  border-radius: 8px;
+  padding: 18px 20px 16px;
+  box-shadow: 0 12px 40px rgba(20, 28, 36, 0.18);
+  display: grid;
+  gap: 12px;
+}
+
+.calendar-todo-dialog {
+  position: relative;
+}
+
+#calendar-todo-close {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  width: 28px;
+  height: 28px;
+  min-height: 28px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: #66707a;
+  font-size: 22px;
+  line-height: 28px;
+  cursor: pointer;
+}
+
+#calendar-todo-close:hover {
+  background: #f0f3f4;
+  color: #24282d;
+}
+
+.calendar-todo-dialog .cal-todo-add {
+  margin-top: 12px;
+}
+
+.calendar-me-dialog h2 {
+  margin: 0;
+  font-size: 1.1rem;
+}
+
+.calendar-me-dialog .md-editor-host {
+  min-height: 240px;
+  border: 1px solid #d8dde1;
+  border-radius: 6px;
+  overflow: hidden;
+  background: #fff;
+}
+
+.calendar-me-dialog .dialog-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.cal-me-field {
+  display: grid;
+  gap: 6px;
+}
+
+.cal-me-field-label {
+  font-size: 12px;
+  color: #4a5560;
+}
+
+.cal-me-field input,
+.cal-me-field select {
+  min-height: 34px;
+  border: 1px solid #d8dde1;
+  border-radius: 5px;
+  padding: 6px 10px;
+  font: inherit;
+}
+
+.cal-me-year-month {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.calendar-me-detail .cal-me-detail-head {
+  display: grid;
+  gap: 6px;
+  grid-template-columns: 1fr auto;
+  align-items: start;
+}
+
+.calendar-me-detail .cal-me-detail-head h2 {
+  grid-column: 1;
+}
+
+.calendar-me-detail .cal-me-detail-head .cal-me-badge {
+  grid-column: 2;
+  grid-row: 1;
+}
+
+.calendar-me-detail .cal-me-detail-meta {
+  grid-column: 1 / -1;
+  margin: 0;
+  font-size: 12px;
+  color: #66707a;
+}
+
+.calendar-me-detail .cal-me-detail-body {
+  min-height: 120px;
+  max-height: 48vh;
+  overflow: auto;
+  padding: 12px 14px;
+  border: 1px solid #e4e8eb;
+  border-radius: 6px;
+  background: #fafbfc;
+}
+
+.cal-me-manager-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.cal-me-manager-toolbar-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.cal-me-view-year {
+  flex-shrink: 0;
+  height: 34px;
+  padding: 0 10px;
+  font-size: 12px;
+}
+
+.cal-todo-hint {
+  margin: 0;
+  font-size: 12px;
+  color: #66707a;
+}
+
+.cal-todo-list {
+  display: grid;
+  align-content: start;
+  align-items: start;
+  gap: 6px;
+  max-height: 52vh;
+  overflow: auto;
+  min-height: 80px;
+}
+
+.cal-todo-row {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: flex-start;
+  align-self: start;
+  gap: 8px;
+  min-height: 40px;
+  padding: 4px 8px;
+  border: 1px solid #e4e8eb;
+  border-radius: 6px;
+  background: #fafbfc;
+}
+
+.cal-todo-row input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  margin: 8px 0 0;
+  flex: 0 0 16px;
+  accent-color: #168274;
+}
+
+.cal-todo-row textarea {
+  flex: 1 1 auto;
+  align-self: stretch;
+  min-width: 0;
+  min-height: 32px;
+  height: 32px;
+  margin: 0;
+  padding: 5px 2px;
+  border: 0;
+  resize: none;
+  overflow: hidden;
+  background: transparent;
+  font: inherit;
+  line-height: 22px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: #24282d;
+}
+
+.cal-todo-row.is-done textarea {
+  text-decoration: line-through;
+  color: #88929c;
+}
+
+.cal-todo-delete {
+  flex: 0 0 auto;
+  align-self: flex-start;
+  height: 32px;
+  min-height: 32px;
+  margin: 0;
+  border: 0;
+  background: transparent;
+  color: #8a4b4b;
+  font-size: 12px;
+  line-height: 32px;
+  cursor: pointer;
+  padding: 0 6px;
+}
+
+.cal-todo-add {
+  display: flex;
+  align-items: center;
+  flex-wrap: nowrap;
+  gap: 8px;
+}
+
+.cal-todo-add button {
+  flex: 0 0 auto;
+}
+
+.cal-todo-add input {
+  flex: 1;
+  min-width: 0;
+  min-height: 34px;
+  border: 1px solid #d8dde1;
+  border-radius: 5px;
+  padding: 6px 10px;
+  font: inherit;
+}
+
+.cal-me-manager-list {
+  display: grid;
+  gap: 8px;
+  max-height: 52vh;
+  overflow: auto;
+  min-height: 120px;
+}
+
+.cal-me-empty {
+  margin: 24px 0;
+  text-align: center;
+  color: #88929c;
+  font-size: 13px;
+}
+
+.cal-me-manager-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid #e4e8eb;
+  border-radius: 6px;
+  background: #fafbfc;
+}
+
+.cal-me-manager-main {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 6px 8px;
+  min-width: 0;
+}
+
+.cal-me-manager-main strong {
+  font-size: 13px;
+}
+
+.cal-me-manager-meta {
+  font-size: 12px;
+  color: #66707a;
+  width: 100%;
+}
+
+.cal-me-manager-ops {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+  align-items: flex-start;
+  padding-top: 1px;
+}
+
+.cal-me-overview-row {
+  cursor: pointer;
+}
+
+.cal-me-overview-row:hover {
+  border-color: #c5ddd8;
+  background: #f3faf8;
+}
+
+.cal-me-overview-preview {
+  width: 100%;
+  max-height: 4.8em;
+  overflow: hidden;
+  margin-top: 2px;
+  font-size: 12px;
+  color: #4a5560;
+}
+
+.cal-me-overview-preview :is(p, ul, ol, h1, h2, h3, h4) {
+  margin: 0.15em 0;
+}
+
+@media (max-width: 900px) {
+  #calendar .cal-month-events-strip {
+    max-width: min(280px, 55vw);
+    width: min(240px, 50vw);
+    height: 32px;
+  }
+}

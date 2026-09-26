@@ -1,0 +1,105 @@
+#pdf { position: relative; display: flex; flex-direction: column; min-height: 0; }
+#pdf .pdf-toolbar { flex-shrink: 0; height: auto; min-height: 52px; flex-wrap: wrap; gap: 6px; }
+#pdf .pdf-stage { position: relative; flex: 1; min-height: 0; display: flex; --pdf-copy-width: 50%; }
+#pdf .pdf-pane {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+}
+#pdf .pdf-stage.is-split .pdf-pane[data-pane="copy"] {
+  flex: 0 0 var(--pdf-copy-width, 50%);
+}
+#pdf .pdf-stage.is-split .pdf-pane[data-pane="main"] {
+  flex: 1 1 auto;
+}
+#pdf .pdf-split {
+  display: none;
+  flex: 0 0 8px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: col-resize;
+  position: relative;
+  z-index: 6;
+  touch-action: none;
+  outline: none;
+}
+#pdf .pdf-stage.is-split .pdf-split:not([hidden]) {
+  display: block;
+}
+#pdf .pdf-split::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 2px;
+  transform: translateX(-50%);
+  border-radius: 1px;
+  background: transparent;
+  pointer-events: none;
+}
+#pdf .pdf-split:hover::after,
+#pdf .pdf-split:focus-visible::after,
+#pdf.resizing-split .pdf-split::after {
+  background: #2b7cff;
+}
+#pdf .pdf-pane.is-active {
+  box-shadow: inset 0 0 0 2px #168274;
+}
+#pdf .pdf-pane[hidden],
+#pdf .pdf-split[hidden] { display: none !important; }
+#pdf .pdf-scroll {
+  position: absolute;
+  inset: 0;
+  height: auto;
+  overflow: auto;
+  padding: 12px 0;
+  touch-action: pan-x pan-y;
+  outline: none;
+}
+#pdf .pdfViewer .page { margin: 8px auto 16px; box-sizing: content-box; }
+#pdf .textLayer,
+#pdf .textLayer :is(span, br) { box-sizing: content-box; }
+#pdf .pdf-nav, #pdf .pdf-zoom { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+#pdf [data-page] { min-width: 0; }
+#pdf [data-page-input] { width: 54px; height: 34px; flex: 0 0 54px; border: 1px solid #d8dde1; border-radius: 4px; text-align: center; background: white; }
+#pdf [data-page-total] { flex-shrink: 0; min-width: 28px; color: #6f7c84; font-size: 12px; }
+#pdf [data-zoom] { min-width: 44px; text-align: center; color: #6f7c84; font-size: 12px; font-variant-numeric: tabular-nums; }
+#pdf [data-split-view] { flex-shrink: 0; white-space: nowrap; }
+#pdf .pdf-annotate { display: flex; align-items: center; gap: 4px; flex-shrink: 0; padding: 0 6px; border-left: 1px solid #e1e5e8; border-right: 1px solid #e1e5e8; }
+#pdf .pdf-annotate button { min-width: auto; padding: 6px 8px; gap: 4px; font-size: 12px; }
+#pdf .pdf-annotate button span { line-height: 1; }
+#pdf .annotationLayer .textAnnotation.pdf-note-badge.pdf-ai-badge,
+#pdf .pdf-live-note.pdf-ai-badge {
+  border-color: #2f6fed; background: #dce9ff; color: #1d4fbf;
+}
+#pdf .annotationLayer { pointer-events: none; overflow: visible; }
+#pdf .annotationLayer .popupAnnotation,
+#pdf .annotationLayer .popup { display: none !important; }
+#pdf .annotationLayer .textAnnotation { pointer-events: auto; cursor: pointer; }
+#pdf .annotationLayer .textAnnotation.pdf-note-badge {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: auto !important; height: auto !important; min-width: 0; min-height: 0;
+  padding: 1px 5px; border: 1px solid #8a7a2a; border-radius: 3px;
+  background: #f3e28a; color: #5c4d12; font-size: 11px; line-height: 1.2;
+  font-weight: 600; white-space: nowrap; box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.85);
+}
+#pdf .pdf-annot-handle {
+  position: absolute; z-index: 6; width: 12px; height: 12px; padding: 0; min-height: 0;
+  border: 1px solid #c9a227; border-radius: 99px; background: #f5d76e; box-shadow: 0 0 0 1px #fff;
+}
+#pdf .pdf-live-highlight {
+  position: absolute; z-index: 4; pointer-events: none;
+  background: rgba(255, 217, 51, 0.35); mix-blend-mode: multiply;
+}
+#pdf .pdf-live-note,
+#pdf .annotationLayer .textAnnotation.pdf-note-badge {
+  position: absolute; z-index: 6; display: inline-flex; align-items: center; justify-content: center;
+  width: auto; height: auto; min-height: 0; padding: 1px 5px;
+  border: 1px solid #8a7a2a; border-radius: 3px; background: #f3e28a;
+  color: #5c4d12; font-size: 11px; line-height: 1.2; font-weight: 600; white-space: nowrap;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.85);
+}

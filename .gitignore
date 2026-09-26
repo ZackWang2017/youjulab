@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.venv/
+__pycache__/
+*.pyc
+.env
+uploads/
+data/office-files/
+backup/archives/
+.DS_Store
+test-results/
+apps/office-copilot-web/public/pdfjs/
