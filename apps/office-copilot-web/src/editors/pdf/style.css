@@ -69,9 +69,30 @@
 #pdf [data-page-total] { flex-shrink: 0; min-width: 28px; color: #6f7c84; font-size: 12px; }
 #pdf [data-zoom] { min-width: 44px; text-align: center; color: #6f7c84; font-size: 12px; font-variant-numeric: tabular-nums; }
 #pdf [data-split-view] { flex-shrink: 0; white-space: nowrap; }
-#pdf .pdf-annotate { display: flex; align-items: center; gap: 4px; flex-shrink: 0; padding: 0 6px; border-left: 1px solid #e1e5e8; border-right: 1px solid #e1e5e8; }
+#pdf .pdf-annotate { display: flex; align-items: center; gap: 4px; flex-shrink: 0; padding: 0 6px; border-right: 1px solid #e1e5e8; }
 #pdf .pdf-annotate button { min-width: auto; padding: 6px 8px; gap: 4px; font-size: 12px; }
 #pdf .pdf-annotate button span { line-height: 1; }
+#pdf [data-pdf-shot].is-active { background: #e7f5f2; border-color: #168274; color: #0f5c52; }
+#pdf .pdf-shots { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; min-width: 0; }
+#pdf .pdf-shot-name { min-height: 28px; padding: 2px 8px; font-size: 12px; }
+#pdf .pdf-shot-name.is-open { background: #e7f5f2; border-color: #168274; color: #0f5c52; }
+#pdf .pdf-shot-mask { position: absolute; inset: 0; z-index: 8; cursor: crosshair; touch-action: none; background: rgba(22, 40, 60, 0.08); }
+#pdf .pdf-shot-rect { position: fixed; z-index: 9; border: 1px solid #168274; background: rgba(22, 130, 116, 0.18); pointer-events: none; }
+.pdf-shot-window { position: fixed; z-index: 40; top: 120px; left: 28px; width: max-content; max-width: calc(100vw - 16px); display: flex; flex-direction: column; background: #fff; border: 1px solid #dde1e5; border-radius: 8px; box-shadow: 0 16px 40px rgba(20, 28, 36, .18); overflow: hidden; }
+.pdf-shot-title { display: flex; align-items: center; gap: 4px; min-width: 0; padding: 8px 10px; cursor: grab; background: #f6f7f8; border-bottom: 1px solid #e4e8eb; user-select: none; }
+.pdf-shot-title strong { flex: 1 1 auto; min-width: 0; overflow: hidden; font-size: 14px; text-overflow: ellipsis; white-space: nowrap; }
+.pdf-shot-title input { flex: 1 1 auto; min-width: 0; min-height: 28px; padding: 2px 6px; font-size: 14px; user-select: text; cursor: text; }
+button.pdf-shot-rename:not(#sheet button),
+button.pdf-shot-delete:not(#sheet button),
+button.pdf-shot-close:not(#sheet button) { flex: 0 0 auto; min-height: 28px; height: 28px; padding: 0 6px; border: 0; background: transparent; font-size: 12px; line-height: 28px; }
+button.pdf-shot-close:not(#sheet button) { width: 28px; min-width: 28px; padding: 0; font-size: 20px; }
+button.pdf-shot-rename:not(#sheet button):hover,
+button.pdf-shot-delete:not(#sheet button):hover,
+button.pdf-shot-close:not(#sheet button):hover { background: #e7ebed; }
+.pdf-shot-window img { display: block; width: auto; height: auto; background: #f3f6f8; }
+button.pdf-shot-resize:not(#sheet button) { position: absolute; right: 0; bottom: 0; z-index: 2; width: 16px; height: 16px; min-width: 16px; min-height: 16px; padding: 0; border: 0; background: transparent; cursor: nwse-resize; touch-action: none; }
+button.pdf-shot-resize:not(#sheet button):hover { background: transparent; }
+.pdf-shot-resize::before { content: ""; position: absolute; right: 3px; bottom: 3px; width: 8px; height: 8px; border-right: 2px solid #8b98a3; border-bottom: 2px solid #8b98a3; }
 #pdf .annotationLayer .textAnnotation.pdf-note-badge.pdf-ai-badge,
 #pdf .pdf-live-note.pdf-ai-badge {
   border-color: #2f6fed; background: #dce9ff; color: #1d4fbf;
@@ -88,12 +109,29 @@
   font-weight: 600; white-space: nowrap; box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.85);
 }
 #pdf .pdf-annot-handle {
-  position: absolute; z-index: 6; width: 12px; height: 12px; padding: 0; min-height: 0;
-  border: 1px solid #c9a227; border-radius: 99px; background: #f5d76e; box-shadow: 0 0 0 1px #fff;
+  display: none !important;
 }
 #pdf .pdf-live-highlight {
   position: absolute; z-index: 4; pointer-events: none;
   background: rgba(255, 217, 51, 0.35); mix-blend-mode: multiply;
+  border: 0; padding: 0; margin: 0; appearance: none; -webkit-appearance: none;
+}
+#pdf button.pdf-live-highlight.pdf-highlight-mark {
+  min-width: 0; min-height: 0; border-radius: 0; box-shadow: none;
+  display: block; color: transparent; font-size: 0; line-height: 0;
+}
+#pdf .pdf-live-highlight.pdf-highlight-mark,
+#pdf .annotationLayer .highlightAnnotation.pdf-highlight-mark {
+  pointer-events: auto; cursor: pointer;
+  background-color: rgba(255, 217, 51, 0.35);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='3' viewBox='0 0 10 3' preserveAspectRatio='none'%3E%3Cpath d='M0 2.2 Q2.5 0.2 5 2.2 T10 2.2' fill='none' stroke='%232f6fed' stroke-width='1.15' stroke-linecap='round'/%3E%3C/svg%3E");
+  background-repeat: repeat-x;
+  background-position: left bottom;
+  background-size: 10px 3px;
+  mix-blend-mode: multiply;
+}
+#pdf .annotationLayer .highlightAnnotation.pdf-highlight-mark {
+  z-index: 4;
 }
 #pdf .pdf-live-note,
 #pdf .annotationLayer .textAnnotation.pdf-note-badge {

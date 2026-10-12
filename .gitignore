@@ -1,12 +1,15 @@
 node_modules/
 dist/
+wewe-rss/
 .venv/
 __pycache__/
 *.pyc
 .env
 uploads/
-data/office-files/
+data/
 backup/archives/
 .DS_Store
 test-results/
 apps/office-copilot-web/public/pdfjs/
+wewe-rss/
+we-mp-rss/

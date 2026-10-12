@@ -12,6 +12,9 @@ routes:
   mindmap:
     explain: mindmap-editor.agent.yaml
     generate: mindmap-writer.agent.yaml
+  research:
+    explain: research-diagram-editor.agent.yaml
+    generate: research-diagram-writer.agent.yaml
   calendar:
     explain: calendar-editor.agent.yaml
     generate: calendar-writer.agent.yaml

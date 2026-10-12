@@ -66,6 +66,25 @@ function topicEl(id: string) {
   return (MindElixir as unknown as { E: (nodeId: string) => HTMLElement | null }).E(id);
 }
 
+function mindmapTree(node: NodeObj): Record<string, unknown> {
+  return {
+    id: node.id,
+    topic: plainTopic(node.topic),
+    ...(node.note?.trim() ? { note: node.note.trim() } : {}),
+    children: (node.children || []).map(mindmapTree),
+  };
+}
+
+function cloneMapData(data: MapData): MapData {
+  return JSON.parse(JSON.stringify(data)) as MapData;
+}
+
+function makeNodeId() {
+  return typeof crypto.randomUUID === 'function'
+    ? `ai-${crypto.randomUUID()}`
+    : `ai-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
 export function mountMindmap(
   container: HTMLElement,
   changed: () => void,
@@ -393,12 +412,66 @@ export function mountMindmap(
         parent_id: parentId,
         is_root: node.id === root.id,
       },
-      surrounding: [
-        `路径：${path.join(' › ')}`,
-        siblings.length ? `同级：${siblings.join('、')}` : '',
-        node.note?.trim() ? `备注：\n${node.note.trim().slice(0, 4000)}` : '',
-      ].filter(Boolean).join('\n'),
+      surrounding: JSON.stringify({
+        format: 'mind-elixir-v1',
+        selected_id: node.id,
+        selected_path: path,
+        siblings,
+        tree: mindmapTree(root),
+      }),
     };
+  }
+
+  function applyMindmapOps(patch: Patch) {
+    const ops = patch.mindmap_ops || [];
+    if (!ops.length) throw new Error('导图修改为空。');
+    const raw = cloneMapData({ format: 'mind-elixir-v1', ...mind.getData() });
+    const root = raw.nodeData;
+    const detach = (id: string): NodeObj | null => {
+      const parentId = findParentId(root, id);
+      if (!parentId) return null;
+      const parent = findNode(root, parentId);
+      const children = parent?.children || [];
+      const index = children.findIndex(child => child.id === id);
+      return index < 0 ? null : children.splice(index, 1)[0];
+    };
+    for (const op of ops) {
+      if (op.op === 'add') {
+        const parent = findNode(root, String(op.parent_id || ''));
+        const topic = String(op.topic || '').trim();
+        if (!parent || !topic) throw new Error('新增节点缺少父节点或标题。');
+        const child = { id: makeNodeId(), topic, children: [] } as NodeObj;
+        const index = Math.max(0, Math.min(Number.isInteger(op.index) ? Number(op.index) : parent.children?.length || 0, parent.children?.length || 0));
+        (parent.children ||= []).splice(index, 0, child);
+        selectedId = child.id;
+      } else if (op.op === 'update') {
+        const node = findNode(root, String(op.id || ''));
+        const topic = String(op.topic || '').trim();
+        if (!node || !topic) throw new Error('修改节点不存在或标题为空。');
+        node.topic = topic;
+        selectedId = node.id;
+      } else if (op.op === 'delete') {
+        const id = String(op.id || '');
+        if (!id || id === root.id) throw new Error('不能删除根节点。');
+        if (!detach(id)) throw new Error('删除节点不存在。');
+        selectedId = root.id;
+      } else if (op.op === 'move') {
+        const id = String(op.id || '');
+        const node = findNode(root, id);
+        const parent = findNode(root, String(op.parent_id || ''));
+        if (!node || !parent || id === root.id || node === parent || findNode(node, parent.id)) {
+          throw new Error('导图父子关系调整无效。');
+        }
+        const moved = detach(id);
+        if (!moved) throw new Error('调整节点不存在。');
+        const index = Math.max(0, Math.min(Number.isInteger(op.index) ? Number(op.index) : parent.children?.length || 0, parent.children?.length || 0));
+        (parent.children ||= []).splice(index, 0, moved);
+        selectedId = moved.id;
+      }
+    }
+    applyMapData(raw);
+    markNotes();
+    emitDirty();
   }
 
   return {
@@ -435,6 +508,10 @@ export function mountMindmap(
     },
     apply(patch: Patch) {
       if (patch.revision !== revision) throw new Error('导图已更改，请重新生成建议。');
+      if (patch.mindmap_ops?.length) {
+        applyMindmapOps(patch);
+        return;
+      }
       const id = String(patch.selection?.id || '');
       if (!id) throw new Error('缺少导图节点。');
       const el = topicEl(id);

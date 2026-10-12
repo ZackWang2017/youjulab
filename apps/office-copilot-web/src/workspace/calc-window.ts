@@ -1,7 +1,7 @@
 import jspreadsheet from 'jspreadsheet-ce';
 import 'jspreadsheet-ce/dist/jspreadsheet.css';
 import 'jsuites/dist/jsuites.css';
-import { persist, saved } from '../context/types';
+import { saved } from '../context/types';
 
 const COLS = 6;
 const ROWS = 12;
@@ -13,6 +13,7 @@ const formatNames: NumFormat[] = ['accounting', 'number', 'percent', 'general'];
 const formats = new Map<string, NumFormat>();
 let windowEl: HTMLElement | null = null;
 let sheet: jspreadsheet.WorksheetInstance | null = null;
+let persistRemote: ((content: unknown) => void) | null = null;
 
 function formatKey(x: number, y: number) {
   return `${x},${y}`;
@@ -74,8 +75,7 @@ function editorInput(cell: HTMLTableCellElement) {
   return input instanceof HTMLInputElement || input instanceof HTMLTextAreaElement ? input : null;
 }
 
-function loadStore() {
-  const raw = saved(STORAGE_KEY);
+function readGrid(raw: unknown) {
   if (!raw || typeof raw !== 'object') return { data: [] as string[][], formats: {} as Record<string, NumFormat> };
   const record = raw as { data?: unknown; formats?: unknown };
   const data = Array.isArray(record.data)
@@ -90,6 +90,10 @@ function loadStore() {
   return { data, formats: storedFormats };
 }
 
+function gridHasValues(data: string[][]) {
+  return data.some(row => row.some(cell => cell !== ''));
+}
+
 function saveStore() {
   if (!sheet) return;
   const data = sheet.getData();
@@ -97,10 +101,16 @@ function saveStore() {
   formats.forEach((value, key) => {
     if (value !== 'accounting') storedFormats[key] = value;
   });
-  persist(STORAGE_KEY, { data, formats: storedFormats });
+  const body = { format: 'invp-calc-v1', data, formats: storedFormats };
+  if (persistRemote) persistRemote(body);
+  else localStorage.setItem(STORAGE_KEY, JSON.stringify({ data, formats: storedFormats }));
 }
 
-export function openCalcWindow() {
+export function openCalcWindow(
+  asset?: { content?: unknown } | null,
+  onDirty?: (content: unknown) => void,
+) {
+  persistRemote = onDirty ?? null;
   if (windowEl) {
     windowEl.hidden = false;
     return;
@@ -122,6 +132,7 @@ export function openCalcWindow() {
         <option value="percent">百分比</option>
         <option value="general">常规</option>
       </select>
+      <button type="button" class="calc-clear" id="calc-clear">清空</button>
     </div>
     <div class="calc-sheet"></div>
     <p class="calc-hint">Jspreadsheet：输入 = 后点选单元格作为计算因子，Shift+点选形成区域</p>`;
@@ -131,7 +142,11 @@ export function openCalcWindow() {
   const host = win.querySelector<HTMLDivElement>('.calc-sheet')!;
   const addr = win.querySelector<HTMLElement>('.calc-addr')!;
   const formatSelect = win.querySelector<HTMLSelectElement>('.calc-format')!;
-  const stored = loadStore();
+  const remote = asset ? readGrid(asset.content) : null;
+  const local = readGrid(saved(STORAGE_KEY));
+  const useLocal = Boolean(remote && !gridHasValues(remote.data) && gridHasValues(local.data));
+  const stored = useLocal || !remote ? local : remote;
+  if (useLocal) localStorage.removeItem(STORAGE_KEY);
   formats.clear();
   for (const [key, value] of Object.entries(stored.formats)) formats.set(key, value);
   const columnCount = Math.max(COLS, ...stored.data.map(row => row.length), 0);
@@ -166,6 +181,7 @@ export function openCalcWindow() {
   });
   sheet = worksheets[0];
   ready = true;
+  if (useLocal) saveStore();
 
   host.addEventListener('mousedown', event => {
     if (!sheet?.edition) return;
@@ -186,6 +202,19 @@ export function openCalcWindow() {
     input.focus();
     input.setSelectionRange(next.length, next.length);
   }, true);
+
+  win.querySelector('#calc-clear')!.addEventListener('click', () => {
+    if (!sheet) return;
+    if (sheet.edition) sheet.closeEditor(sheet.edition[0], false);
+    formats.clear();
+    const current = sheet.getData();
+    const width = Math.max(COLS, ...current.map(row => row.length), 0);
+    const height = Math.max(ROWS, current.length);
+    sheet.setData(Array.from({ length: height }, () => Array.from({ length: width }, () => '')));
+    formatSelect.value = 'accounting';
+    addr.textContent = 'A1';
+    saveStore();
+  });
 
   formatSelect.addEventListener('change', () => {
     if (!sheet?.selectedCell) return;

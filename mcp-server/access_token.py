@@ -23,8 +23,12 @@ def is_document_path(path: str) -> bool:
     return path == "/mcp/documents" or path.startswith("/mcp/documents/") or path.startswith("/api/documents")
 
 
+def is_mindmap_path(path: str) -> bool:
+    return path == "/mcp/mindmaps" or path.startswith("/mcp/mindmaps/") or path.startswith("/api/mindmaps")
+
+
 def is_user_office_path(path: str) -> bool:
-    return is_sheet_path(path) or is_document_path(path)
+    return is_sheet_path(path) or is_document_path(path) or is_mindmap_path(path)
 
 
 _incoming_access_token: contextvars.ContextVar[str] = contextvars.ContextVar("incoming_access_token", default="")

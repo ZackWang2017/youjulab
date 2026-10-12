@@ -57,22 +57,49 @@
   justify-content: flex-end;
 }
 
-#calendar .fc-direction-ltr .fc-toolbar .fc-todos-button {
-  border-top-right-radius: 0;
-  border-bottom-right-radius: 0;
-}
-
-#calendar .fc-direction-ltr .fc-toolbar .fc-monthlyManage-button {
-  margin-left: calc(-6px - 1px);
-  border-top-left-radius: 0;
-  border-bottom-left-radius: 0;
-}
-
 #calendar .fc .fc-button {
   border-radius: 5px;
   text-transform: none;
   font-weight: 500;
   box-shadow: none;
+}
+
+#calendar .fc .fc-button-group > .fc-button:not(#sheet button) {
+  border-radius: 0;
+  background: #fff;
+  border: 1px solid #e4e8eb;
+  color: inherit;
+}
+
+#calendar .fc .fc-button-group > .fc-button:not(#sheet button):not(:first-child) {
+  margin-left: -1px;
+}
+
+#calendar .fc .fc-button-group > .fc-button:not(#sheet button):first-child {
+  border-top-left-radius: 5px;
+  border-bottom-left-radius: 5px;
+}
+
+#calendar .fc .fc-button-group > .fc-button:not(#sheet button):last-child {
+  border-top-right-radius: 5px;
+  border-bottom-right-radius: 5px;
+}
+
+#calendar .fc .fc-button-group > .fc-button:not(#sheet button):hover {
+  position: relative;
+  z-index: 1;
+  background: #f0f3f4;
+  border-color: #e4e8eb;
+  color: inherit;
+}
+
+#calendar .fc .fc-button-group > .fc-button-active:not(#sheet button),
+#calendar .fc .fc-button-group > .fc-button-active:not(#sheet button):hover {
+  position: relative;
+  z-index: 1;
+  background: #e7f4f2;
+  border-color: #e4e8eb;
+  color: #0f6f64;
 }
 
 #calendar .fc-daygrid-day.fc-day-selected {
@@ -223,32 +250,6 @@
   display: flex;
   gap: 8px;
   justify-content: flex-end;
-}
-
-.calendar-create-dialog .scope-field {
-  display: grid;
-  gap: 8px;
-  margin: 10px 0 4px;
-}
-
-.calendar-create-dialog .scope-field legend {
-  font-size: 12px;
-  color: #4a5560;
-  padding: 0;
-}
-
-.calendar-create-dialog .scope-options {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.calendar-create-dialog .scope-options label {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 13px;
-  cursor: pointer;
 }
 
 /* —— Markdown 编辑器（编写 / 预览） —— */
@@ -706,18 +707,49 @@
   gap: 12px;
 }
 
-.calendar-todo-dialog {
-  position: relative;
+.calendar-todo-window {
+  position: fixed;
+  z-index: 250;
+  top: 88px;
+  right: 48px;
+  width: min(420px, calc(100vw - 24px));
+  height: min(480px, calc(100vh - 100px));
+  min-width: 280px;
+  min-height: 240px;
+  max-width: calc(100vw - 16px);
+  max-height: calc(100vh - 16px);
+  resize: both;
+  overflow: hidden;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  background: #fff;
+  border: 1px solid #d9dfe2;
+  border-radius: 8px;
+  box-shadow: 0 16px 42px rgba(20, 28, 36, 0.2);
 }
 
-#calendar-todo-close {
-  position: absolute;
-  top: 12px;
-  right: 12px;
+.calendar-todo-titlebar {
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px 8px 14px;
+  cursor: grab;
+  background: #f6f8f7;
+  border-bottom: 1px solid #e1e6e4;
+  user-select: none;
+}
+
+.calendar-todo-titlebar strong {
+  font-size: 14px;
+  color: #21433c;
+}
+
+.calendar-todo-window .cal-todo-close {
+  margin-left: auto;
   width: 28px;
-  height: 28px;
+  min-width: 28px;
   min-height: 28px;
-  margin: 0;
   padding: 0;
   border: 0;
   border-radius: 4px;
@@ -728,13 +760,27 @@
   cursor: pointer;
 }
 
-#calendar-todo-close:hover {
+.calendar-todo-window .cal-todo-close:hover {
   background: #f0f3f4;
   color: #24282d;
 }
 
-.calendar-todo-dialog .cal-todo-add {
-  margin-top: 12px;
+.calendar-todo-window .cal-todo-list {
+  min-height: 0;
+  overflow: auto;
+  display: grid;
+  align-content: start;
+  align-items: start;
+  gap: 6px;
+  padding: 10px 12px;
+  background: #fff;
+}
+
+.calendar-todo-window .cal-todo-add {
+  margin: 0;
+  padding: 10px 12px 12px;
+  border-top: 1px solid #e8ebed;
+  background: #fff;
 }
 
 .calendar-me-dialog h2 {
@@ -850,6 +896,11 @@
   max-height: 52vh;
   overflow: auto;
   min-height: 80px;
+}
+
+.calendar-todo-window .cal-todo-list {
+  max-height: none;
+  min-height: 0;
 }
 
 .cal-todo-row {

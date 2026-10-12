@@ -4,8 +4,10 @@ import { mountSheet } from './editors/sheet';
 import { mountDocument } from './editors/document';
 import { mountPdf } from './editors/pdf';
 import { openTermsDialog } from './editors/pdf/terms-dialog';
+import { mountDiagram } from './editors/diagram';
 import { mountMindmap } from './editors/mindmap';
-import { askCalendarCreate, mountCalendar } from './editors/calendar';
+import { mountResearchDiagram } from './editors/research';
+import { mountCalendar } from './editors/calendar';
 import { office, AuthError } from './office-client/client';
 import { renderPatch } from './patches/preview';
 import type { Context, EditorAdapter, Patch, Surface } from './context/types';
@@ -14,12 +16,15 @@ import {
   bootstrap, createAsset, createProject, flushSave, getAsset, hasUnsavedWork, login, logout, openAsset, queueSave,
   register, rememberRevision, renameAsset, renameProject, retrySave, selectProject, uploadPdf, type Asset, type Kind, type Workspace,
 } from './workspace/session';
-import { alertSaveError, askConfirm, askText, renderAuth, renderChrome, renderNav } from './workspace/nav';
+import { alertSaveError, askConfirm, askDocumentCreate, askText, renderAuth, renderChrome, renderNav } from './workspace/nav';
+import { openCalcWindow } from './workspace/calc-window';
+import { openNotebookWindow, showNotebookLoadError, notebookContainsFocus, saveNotebookNow } from './workspace/notebook-window';
 import { loadPdfFolders, placePdf, savePdfFolders } from './workspace/pdf-folders';
 import {
   mountAssistantSessions, restoreLastSession, type AssistantSession, type SessionController,
 } from './assistant-sessions';
 import { markdownToHtml } from './editors/document/markdown';
+import { appendThinkingBlock, mountThinkingStatus, type ThinkingStatus } from './ui/thinking-status';
 import './style.css';
 
 const $ = <T extends HTMLElement = HTMLElement>(selector: string) => document.querySelector<T>(selector)!;
@@ -51,7 +56,7 @@ window.addEventListener('wheel', event => {
   event.preventDefault();
 }, { passive: false, capture: true });
 
-const ALL_KINDS: Kind[] = ['sheet', 'document', 'pdf', 'mindmap', 'calendar'];
+const ALL_KINDS: Kind[] = ['sheet', 'document', 'pdf', 'mindmap', 'research', 'diagram', 'calendar'];
 
 function fail(e: unknown) {
   const box = document.querySelector<HTMLElement>('#error');
@@ -75,21 +80,36 @@ function taskMode(): 'explain' | 'generate' {
   return $<HTMLInputElement>('#task-generate')?.checked ? 'generate' : 'explain';
 }
 
+function isStructuredAssistant() {
+  return surface === 'sheet' || surface === 'mindmap';
+}
+
 function isSheetAssistant() {
   return surface === 'sheet';
 }
 
+function assistantContext(editorsRef: Record<Surface, EditorAdapter>): Context {
+  if (surface === 'sheet') return sheetAssistantContext(editorsRef);
+  const context = editorsRef.mindmap.anchor();
+  if (!context) throw new Error('导图尚未就绪。');
+  return context;
+}
+
 function syncTaskModes() {
   const app = document.querySelector<HTMLElement>('#app');
-  app?.classList.toggle('sheet-assistant-mode', isSheetAssistant());
+  app?.classList.toggle('sheet-assistant-mode', isStructuredAssistant());
   const bar = document.querySelector<HTMLElement>('#assistant-sessions-bar');
-  if (bar) bar.hidden = !isSheetAssistant();
+  if (bar) bar.hidden = !isStructuredAssistant();
   const generate = document.querySelector<HTMLInputElement>('#task-generate');
   if (!generate) return;
   generate.disabled = surface === 'pdf';
   if (surface === 'pdf') $<HTMLInputElement>('#task-explain').checked = true;
   if (isSheetAssistant()) {
     $<HTMLTextAreaElement>('#intent').placeholder = '默认按整张表的含义回答；提到所选单元格时才看当前选区';
+    return;
+  }
+  if (surface === 'mindmap') {
+    $<HTMLTextAreaElement>('#intent').placeholder = '粘贴内容后可让我新增、修改、删除节点，或整理父子关系';
     return;
   }
   $<HTMLTextAreaElement>('#intent').placeholder = taskMode() === 'generate'
@@ -106,7 +126,7 @@ function resetAssistantThread(clearAnswer = true) {
   document.querySelector('.assistant-stale-hint')?.remove();
   if (clearAnswer) {
     $('#answer').replaceChildren();
-    $('#result-meta').textContent = '';
+    assistantStatus().clear();
   }
 }
 
@@ -114,8 +134,8 @@ function loadSessionThread(session: AssistantSession) {
   sessionSummary = session.summary || '';
   const turns = (session.turns || []).map(turn => ({ role: turn.role, content: turn.content }));
   let anchor = session.anchor?.document_id ? session.anchor as Context : assistantThread?.anchor ?? null;
-  if (!anchor?.document_id && editors && isSheetAssistant()) {
-    try { anchor = sheetAssistantContext(editors); } catch { /* 表格未就绪 */ }
+  if (!anchor?.document_id && editors && isStructuredAssistant()) {
+    try { anchor = assistantContext(editors); } catch { /* 编辑器未就绪 */ }
   }
   if (!turns.length && !anchor?.document_id) {
     assistantThread = null;
@@ -141,7 +161,7 @@ function updateStaleHint() {
 function formatResultMeta(base: string, trimmed?: { dropped_turns?: number; surrounding_truncated?: boolean }) {
   const parts = [base].filter(Boolean);
   if (trimmed?.dropped_turns) parts.push(`已省略较早 ${trimmed.dropped_turns} 轮对话`);
-  if (trimmed?.surrounding_truncated) parts.push('表结构已截断');
+  if (trimmed?.surrounding_truncated) parts.push('当前工作区结构已截断');
   return parts.join(' · ');
 }
 
@@ -165,7 +185,7 @@ function stripThinking(raw: string) {
 }
 
 async function persistAssistantSession() {
-  if (!sessionController || !assistantThread || !workspace?.selected.sheet) return;
+  if (!sessionController || !assistantThread || !workspace?.selected[surface]) return;
   await sessionController.save({
     anchor: assistantThread.anchor,
     turns: assistantThread.turns.slice(-40).map(turn => ({
@@ -176,17 +196,15 @@ async function persistAssistantSession() {
   });
 }
 
-function setAssistantBusy(busy: boolean, hint = '') {
-  const meta = $('#result-meta');
-  if (busy && isSheetAssistant()) {
-    if (meta.textContent === '正在思考…') meta.textContent = '';
-    return;
-  }
-  if (busy) {
-    meta.textContent = hint || '正在思考…';
-  } else if (meta.textContent === '正在思考…') {
-    meta.textContent = '';
-  }
+let panelThinking: ThinkingStatus | null = null;
+
+function assistantStatus() {
+  if (!panelThinking) panelThinking = mountThinkingStatus($('#result-meta'));
+  return panelThinking;
+}
+
+function setAssistantBusy(busy: boolean) {
+  if (busy && !isStructuredAssistant()) assistantStatus().begin();
 }
 
 function normalizeAssistantAnswer(raw: string) {
@@ -225,34 +243,13 @@ function renderAssistantPlainAnswer(text: string) {
 }
 
 function appendThinking(wrap: HTMLElement, text: string, opts: { live: boolean; open: boolean; boundToLive: boolean }) {
-  const block = document.createElement('div');
-  block.className = 'assistant-thinking';
-  block.dataset.live = opts.live ? 'true' : 'false';
-  block.dataset.open = opts.open ? 'true' : 'false';
-  const toggle = document.createElement('button');
-  toggle.type = 'button';
-  toggle.className = 'assistant-thinking-toggle';
-  const chevron = document.createElement('span');
-  chevron.className = 'assistant-thinking-chevron';
-  chevron.textContent = '›';
-  const dot = document.createElement('span');
-  dot.className = 'assistant-thinking-dot';
-  const label = document.createElement('span');
-  label.textContent = opts.live ? 'Thinking' : 'Thought';
-  toggle.append(chevron, dot, label);
-  const body = document.createElement('div');
-  body.className = 'assistant-thinking-body';
-  body.textContent = text;
-  toggle.onclick = () => {
-    const open = block.dataset.open !== 'true';
-    block.dataset.open = open ? 'true' : 'false';
-    if (opts.boundToLive && liveAssistant) liveAssistant.thinkingOpen = open;
-    if (open) body.scrollTop = body.scrollHeight;
-  };
-  block.append(toggle);
-  if (text.trim()) block.append(body);
-  wrap.append(block);
-  if (opts.open && text.trim()) body.scrollTop = body.scrollHeight;
+  appendThinkingBlock(wrap, text, {
+    live: opts.live,
+    open: opts.open,
+    onToggle: open => {
+      if (opts.boundToLive && liveAssistant) liveAssistant.thinkingOpen = open;
+    },
+  });
 }
 
 function renderAssistantThread(streaming = '', streamingRole: 'user' | 'assistant' = 'assistant') {
@@ -320,7 +317,10 @@ function refresh() {
 
 function footer() {
   const current = workspace?.selected[surface];
-  $('#footer-surface').textContent = current ? `${workspace!.project.name} · ${current.name}` : workspace?.project.name || '工作区';
+  const label = surface === 'calendar' && current
+    ? current.name
+    : current ? `${workspace!.project.name} · ${current.name}` : workspace?.project.name || '工作区';
+  $('#footer-surface').textContent = label;
   $('#footer-user').textContent = workspace?.user.email || '本地工作区';
 }
 
@@ -338,6 +338,11 @@ function noteSaved(text?: string) {
 }
 
 window.addEventListener('office-saved', () => noteSaved());
+window.addEventListener('office-document-replaced', event => {
+  const detail = (event as CustomEvent<{ id?: string; archived_name?: string }>).detail || {};
+  if (!detail.id) return;
+  void showWrittenDocument(detail.id, detail.archived_name ? `文档已归档为${detail.archived_name}` : '已换新文档');
+});
 
 window.addEventListener('office-save-error', e => {
   const detail = String((e as CustomEvent).detail || '无法写入工作区服务。');
@@ -357,6 +362,17 @@ window.addEventListener('beforeunload', e => {
 
 async function saveNow() {
   if (!ready || !workspace || !editors) return;
+  if (notebookContainsFocus()) {
+    try {
+      await saveNotebookNow();
+      const box = document.querySelector<HTMLElement>('#error');
+      if (box) box.hidden = true;
+    } catch (e) {
+      if (e instanceof AuthError) { logout(); void boot(); return; }
+      fail(e);
+    }
+    return;
+  }
   const current = workspace.selected[surface];
   if (!current) return;
   try {
@@ -391,6 +407,19 @@ function run(action: () => Promise<void>) {
   });
 }
 
+async function showWrittenDocument(id: string, note: string) {
+  const asset = await getAsset(id);
+  if (workspace) {
+    const listed = await office.json<{ assets: Asset[] }>(`/projects/${workspace.project.id}/assets?kind=document`);
+    workspace.assets.document = listed.assets;
+    workspace.selected.document = asset;
+    rememberRevision(asset.id, asset.revision);
+    paintNav();
+  }
+  editors?.document.load(asset);
+  noteSaved(note);
+}
+
 function paintNav() {
   if (!workspace) return;
   renderNav(workspace, surface, {
@@ -402,10 +431,42 @@ function paintNav() {
       try { return await deletePdf(id); }
       catch (e) { fail(e); return false; }
     },
+    onDeleteAsset: (kind, id) => { void run(() => deleteAsset(kind, id)); },
     onSelectProject: id => { void run(() => chooseProject(id)); },
     onNewProject: () => { void run(() => addProject()); },
     onRenameProject: id => { void run(() => editProject(id)); },
     onLogout: () => { void flushSave().catch(() => {}).finally(() => { logout(); void boot(); }); },
+    onOpenCalc: () => {
+      const calc = workspace?.calc;
+      openCalcWindow(calc, calc ? content => queueSave(calc.id, content) : undefined);
+    },
+    onOpenNotebook: () => {
+      void run(async () => {
+        if (!workspace) return;
+        let notebook = workspace.notebook;
+        if (!notebook) {
+          openNotebookWindow({ id: '', revision: 0 });
+          try {
+            const response = await office.json<{ assets: Asset[] }>(
+              `/projects/${workspace.project.id}/assets?kind=notebook`,
+            );
+            let listed = response.assets[0];
+            if (!listed) {
+              listed = await office.json<Asset>(`/projects/${workspace.project.id}/assets`, {
+                method: 'POST',
+                body: JSON.stringify({ kind: 'notebook', name: '笔记本', visibility: 'user' }),
+              });
+            }
+            notebook = await getAsset(listed.id);
+            workspace.notebook = notebook;
+          } catch (error) {
+            showNotebookLoadError(error instanceof Error ? error.message : String(error));
+            throw error;
+          }
+        }
+        openNotebookWindow(notebook);
+      });
+    },
   });
 }
 
@@ -416,9 +477,9 @@ async function switchSurface(kind: Kind) {
   document.querySelectorAll<HTMLElement>('.surface').forEach(el => { el.hidden = el.id !== surface; });
   paintNav(); footer();
   syncTaskModes();
-  if (kind === 'sheet' && sessionController && workspace?.selected.sheet) {
+  if ((kind === 'sheet' || kind === 'mindmap') && sessionController && workspace?.selected[kind]) {
     await sessionController.refreshList();
-    await restoreLastSession(workspace.selected.sheet.id, sessionController);
+    await restoreLastSession(workspace.selected[kind]!.id, sessionController);
   }
   window.dispatchEvent(new Event('resize'));
   refresh();
@@ -432,7 +493,7 @@ async function loadEditor(kind: Kind) {
   }
   rememberRevision(meta.id, meta.revision);
   const hasBody = Boolean(meta.content && (
-    meta.content.sheets || meta.content.sheetOrder || meta.content.nodeData || meta.content.type === 'doc'
+    meta.content.sheets || meta.content.sheetOrder || meta.content.nodeData || meta.content.type === 'doc' || meta.content.format === 'drawio-v1' || meta.content.format === 'mermaid-v1' || meta.content.format === 'invp-research-diagram-v1'
   ));
   const asset = kind === 'pdf' ? meta : (hasBody ? meta : await getAsset(meta.id));
   if (workspace) workspace.selected[kind] = asset;
@@ -455,30 +516,42 @@ async function addAsset(kind: Kind) {
     $('#pdf input[type="file"]').click();
     return;
   }
-  if (kind === 'calendar') {
-    const created = await askCalendarCreate('日常工作');
-    if (!created) return;
-    const asset = await createAsset(workspace.project.id, kind, created.name, { scope: created.scope });
-    workspace.assets[kind] = [asset, ...workspace.assets[kind]];
-    workspace.selected[kind] = asset;
-    paintNav();
-    footer();
-    await editors![kind].load(asset);
-    await switchSurface(kind);
-    return;
-  }
-  const name = await askText(
-    kind === 'sheet' ? '新建表格' : kind === 'document' ? '新建文档' : '新建导图',
-    kind === 'sheet' ? '表格名称' : kind === 'document' ? '文档名称' : '导图名称',
+  const documentCreate = kind === 'document' ? await askDocumentCreate() : null;
+  if (kind === 'document' && !documentCreate) return;
+  const name = documentCreate?.name || await askText(
+    kind === 'sheet' ? '新建表格' : kind === 'document' ? '新建文档' : kind === 'research' ? '新建研究图' : kind === 'diagram' ? '新建绘图' : '新建导图',
+    kind === 'sheet' ? '表格名称' : kind === 'document' ? '文档名称' : kind === 'research' ? '研究图名称' : kind === 'diagram' ? '绘图名称' : '导图名称',
   );
   if (!name) return;
-  const asset = await createAsset(workspace.project.id, kind, name);
+  const asset = await createAsset(workspace.project.id, kind, name, documentCreate?.visibility);
   workspace.assets[kind] = [asset, ...workspace.assets[kind]];
   workspace.selected[kind] = asset;
   paintNav();
   footer();
   await editors![kind].load(asset);
   await switchSurface(kind);
+}
+
+async function deleteAsset(kind: Kind, id: string) {
+  if (!workspace || !editors || kind !== 'document') return;
+  const current = workspace.assets[kind].find(item => item.id === id);
+  if (!current) return;
+  const ok = await askConfirm(`删除「${current.name}」？删除后无法恢复。`);
+  if (!ok) return;
+  await office.json(`/assets/${id}`, { method: 'DELETE' });
+  workspace.assets[kind] = workspace.assets[kind].filter(item => item.id !== id);
+  if (workspace.selected[kind]?.id === id) {
+    const next = workspace.assets[kind][0] || null;
+    workspace.selected[kind] = next;
+    if (next) {
+      const { asset } = await openAsset(next.id);
+      workspace.selected[kind] = asset;
+      workspace.assets[kind] = workspace.assets[kind].map(item => item.id === asset.id ? asset : item);
+      await editors[kind].load(asset);
+    }
+  }
+  paintNav();
+  footer();
 }
 
 async function chooseProject(id: string) {
@@ -671,15 +744,23 @@ function bindWorkspace() {
             topics: job.topics,
           }),
         }),
-        runJob: id => office.json(`/assets/${id}/digest-job/run`, { method: 'POST', body: '{}' }),
+        runJob: (id, onEvent) => office.stream(`/assets/${id}/digest-job/run`, {}, onEvent),
         reloadDocument: async id => {
-          const asset = await getAsset(id);
-          if (workspace) {
-            workspace.selected.document = { ...workspace.selected.document!, ...asset };
-            rememberRevision(asset.id, asset.revision);
-          }
-          editors?.document.load(asset);
-          noteSaved('资讯已写入文档');
+          await showWrittenDocument(id, '资讯已写入文档');
+        },
+      },
+      {
+        types: async () => (await office.json('/document-skill-types')).types,
+        searchSecurities: query => office.json(`/securities/search?q=${encodeURIComponent(query)}`),
+        list: async id => (await office.json(`/assets/${id}/skills`)).skills,
+        save: (id, skill) => office.json(skill.id ? `/assets/${id}/skills/${skill.id}` : `/assets/${id}/skills`, {
+          method: skill.id ? 'PUT' : 'POST',
+          body: JSON.stringify({ name: skill.name, type: skill.type, params: skill.params }),
+        }),
+        remove: async (id, skillId) => { await office.json(`/assets/${id}/skills/${skillId}`, { method: 'DELETE' }); },
+        run: (id, skillId, onEvent) => office.stream(`/assets/${id}/skills/${skillId}/run`, {}, onEvent),
+        reloadDocument: async id => {
+          await showWrittenDocument(id, '技能已写入文档');
         },
       },
     ),
@@ -705,6 +786,12 @@ function bindWorkspace() {
     mindmap: mountMindmap($('#mindmap'), refresh, (id, content) => {
       queueSave(id, content);
     }),
+    research: mountResearchDiagram($('#research'), refresh, (id, content) => {
+      queueSave(id, content);
+    }),
+    diagram: mountDiagram($('#diagram'), refresh, (id, content) => {
+      queueSave(id, content);
+    }),
     calendar: mountCalendar($('#calendar'), refresh, content => {
       if (workspace?.selected.calendar) queueSave(workspace.selected.calendar.id, content);
     }),
@@ -720,14 +807,16 @@ function bindWorkspace() {
   });
   sessionController = mountAssistantSessions(
     document.querySelector<HTMLElement>('#assistant-sessions-bar')!,
-    () => workspace?.selected.sheet?.id || null,
+    () => workspace?.selected[surface]?.id || null,
     {
       onLoad: loadSessionThread,
       onNew: () => resetAssistantThread(),
       onRefreshAnchor: async () => {
-        await editors!.sheet.syncSheetCache?.({ regenerateProfile: true });
-        updateStaleHint();
-        return sheetAssistantContext(editors!);
+        if (surface === 'sheet') {
+          await editors!.sheet.syncSheetCache?.({ regenerateProfile: true });
+          updateStaleHint();
+        }
+        return assistantContext(editors!);
       },
       currentTurns: () => assistantThread?.turns || [],
       isStreaming: () => running,
@@ -746,7 +835,7 @@ function bindWorkspace() {
   $('#new-assistant-thread').onclick = () => {
     void (async () => {
       try {
-        if (sessionController && isSheetAssistant()) await sessionController.startNew();
+        if (sessionController && isStructuredAssistant()) await sessionController.startNew();
         else resetAssistantThread();
       } catch (err) { fail(err); }
     })();
@@ -772,17 +861,17 @@ function bindWorkspace() {
     let streamStarted = false;
     let answer = '';
     try {
-      const task = isSheetAssistant() ? 'explain' : taskMode();
+      const task = isStructuredAssistant() ? 'explain' : taskMode();
       const intent = $<HTMLTextAreaElement>('#intent').value.trim();
       if (!intent) throw new Error('请输入任务描述。');
       let context: Context;
       let history: AssistantTurn[] = [];
-      const sheetChat = isSheetAssistant();
-      if (sheetChat && !sessionController?.currentId()) {
+      const structuredChat = isStructuredAssistant();
+      if (structuredChat && !sessionController?.currentId()) {
         await sessionController!.startNew({ resetUi: false });
       }
-      if (sheetChat) {
-        context = sheetAssistantContext(editors);
+      if (structuredChat) {
+        context = assistantContext(editors);
         if (assistantThread) {
           history = assistantThread.turns
             .filter(turn => turn.content.trim())
@@ -802,9 +891,9 @@ function bindWorkspace() {
       }
       running = true; refresh(); pending = null;
       $('#patch-actions').hidden = true; $('#patch-preview').replaceChildren();
-      const followUp = Boolean(sheetChat && history.length);
-      if (!followUp) $('#result-meta').textContent = '';
-      if (sheetChat) {
+      const followUp = Boolean(structuredChat && history.length);
+      if (!followUp) assistantStatus().clear();
+      if (structuredChat) {
         assistantThread!.turns.push({ role: 'user', content: intent });
         liveAssistant = { answer: '', thinking: '', thinkingOpen: true, answerStarted: false };
         renderAssistantThread();
@@ -818,20 +907,24 @@ function bindWorkspace() {
         context,
         intent,
         task,
-        summary: sheetChat ? sessionSummary : '',
-        use_sheet_cache: sheetChat,
+        summary: structuredChat ? sessionSummary : '',
+        use_sheet_cache: isSheetAssistant(),
         history: history.map(turn => ({ role: turn.role, content: turn.content })),
       }, event => {
         if (event.type === 'delta' && event.text) {
-          if (sheetChat && event.part === 'reasoning') {
-            if (!liveAssistant) {
-              liveAssistant = { answer: '', thinking: '', thinkingOpen: true, answerStarted: false };
+          if (event.part === 'reasoning') {
+            if (structuredChat) {
+              if (!liveAssistant) {
+                liveAssistant = { answer: '', thinking: '', thinkingOpen: true, answerStarted: false };
+              }
+              liveAssistant.thinking += String(event.text);
+              renderAssistantThread();
+            } else {
+              assistantStatus().append(String(event.text));
             }
-            liveAssistant.thinking += String(event.text);
-            renderAssistantThread();
           } else {
             answer += event.text;
-            if (sheetChat) {
+            if (structuredChat) {
               if (!liveAssistant) {
                 liveAssistant = { answer: '', thinking: '', thinkingOpen: false, answerStarted: true };
               }
@@ -842,6 +935,7 @@ function bindWorkspace() {
               liveAssistant.answer = answer;
               renderAssistantThread();
             } else {
+              assistantStatus().finish();
               renderAssistantPlainAnswer(answer);
             }
           }
@@ -855,7 +949,7 @@ function bindWorkspace() {
           );
           if (finalAnswer) {
             answer = finalAnswer;
-            if (sheetChat) {
+            if (structuredChat) {
               const last = assistantThread!.turns.at(-1);
               const stored = clipTurn(finalAnswer);
               if (last?.role === 'assistant') {
@@ -868,22 +962,23 @@ function bindWorkspace() {
             } else {
               renderAssistantPlainAnswer(finalAnswer);
             }
-          } else if (sheetChat) {
+          } else if (structuredChat) {
             liveAssistant = null;
             assistantThread!.turns.push({ role: 'assistant', content: '（模型未返回内容）', thinking: thought || undefined });
             renderAssistantThread();
           } else {
             renderAssistantPlainAnswer('（模型未返回内容）');
           }
+          if (!structuredChat) assistantStatus().finish();
           if (event.agent || event.context_trimmed) {
-            $('#result-meta').textContent = formatResultMeta(
+            assistantStatus().note(formatResultMeta(
               typeof event.agent === 'string' ? event.agent : '',
               event.context_trimmed as { dropped_turns?: number; surrounding_truncated?: boolean } | undefined,
-            );
-          } else if (!sheetChat) {
+            ));
+          } else if (!structuredChat) {
             setAssistantBusy(false);
           }
-          if (sheetChat) {
+          if (structuredChat) {
             void persistAssistantSession().then(() => updateStaleHint()).catch(fail);
           }
           if (event.patch) {
@@ -898,8 +993,8 @@ function bindWorkspace() {
     } catch (e) {
       if (!streamStarted && assistantThread?.turns.at(-1)?.role === 'user') {
         assistantThread.turns.pop();
-        if (isSheetAssistant()) renderAssistantThread();
-      } else if (streamStarted && isSheetAssistant() && assistantThread?.turns.at(-1)?.role === 'user') {
+        if (isStructuredAssistant()) renderAssistantThread();
+      } else if (streamStarted && isStructuredAssistant() && assistantThread?.turns.at(-1)?.role === 'user') {
         const streamed = answer.trim();
         const thought = liveAssistant?.thinking.trim() || '';
         liveAssistant = null;
@@ -935,7 +1030,7 @@ function bindWorkspace() {
       if (JSON.stringify(latest) !== JSON.stringify(current)) throw new Error('等待期间文档已改变，请重新生成建议。');
       editors[surface].apply(proposal.patch);
       pending = null; $('#patch-actions').hidden = true;
-      if (isSheetAssistant() && assistantThread) {
+      if (isStructuredAssistant() && assistantThread) {
         assistantThread.turns.push({ role: 'assistant', content: '已接受修改。' });
         renderAssistantThread();
       } else {
@@ -999,11 +1094,11 @@ async function boot() {
   createIcons({ icons });
   bindWorkspace();
   const last = saved('office-surface');
-  await switchSurface(last === 'document' || last === 'pdf' || last === 'mindmap' || last === 'calendar' ? last : 'sheet');
+  await switchSurface(last === 'document' || last === 'pdf' || last === 'mindmap' || last === 'research' || last === 'diagram' || last === 'calendar' ? last : 'sheet');
   await Promise.all(ALL_KINDS.map(kind => loadEditor(kind).catch(fail)));
-  if (sessionController && workspace?.selected.sheet) {
+  if (sessionController && isStructuredAssistant() && workspace?.selected[surface]) {
     await sessionController.refreshList();
-    await restoreLastSession(workspace.selected.sheet.id, sessionController);
+    await restoreLastSession(workspace.selected[surface]!.id, sessionController);
   }
   footer();
   refresh();

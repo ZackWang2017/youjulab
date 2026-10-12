@@ -8,9 +8,12 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 HERE = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(HERE / "external-tools" / "repository"))
+sys.path.insert(0, str(HERE / "external-tools" / "service"))
 
-from external_tools import search_engine, usage  # noqa: E402
+import search_repository  # noqa: E402
+import search_service  # noqa: E402
+import usage  # noqa: E402
 
 
 def _ok_gate(engine="baidu", used=1, limit=100):
@@ -43,9 +46,9 @@ def _status_ok(engine="baidu", used=0, limit=100):
 class SearchEngineTests(unittest.TestCase):
     def test_baidu_missing_key(self):
         with patch.dict(os.environ, {"BAIDU_QIANFAN_API_KEY": ""}, clear=False), patch(
-            "external_tools.search_engine.usage.status", return_value=_status_ok()
+            "search_service.usage.status", return_value=_status_ok()
         ):
-            out = search_engine.baidu_web_search("宁德时代 毛利率")
+            out = search_service.baidu_web_search("宁德时代 毛利率")
         self.assertIn("error", out)
         self.assertEqual(out["results"], [])
         self.assertEqual(out["engine"], "baidu")
@@ -55,8 +58,8 @@ class SearchEngineTests(unittest.TestCase):
             os.environ,
             {"GOOGLE_CSE_API_KEY": "", "GOOGLE_CSE_CX": ""},
             clear=False,
-        ), patch("external_tools.search_engine.usage.status", return_value=_status_ok("google")):
-            out = search_engine.google_web_search("Tesla margin")
+        ), patch("search_service.usage.status", return_value=_status_ok("google")):
+            out = search_service.google_web_search("Tesla margin")
         self.assertIn("error", out)
         self.assertEqual(out["results"], [])
 
@@ -65,7 +68,7 @@ class SearchEngineTests(unittest.TestCase):
             "SEARCH_SITES_FINANCE": "a.example.com, https://B.Example.com/path ,a.example.com",
         }
         with patch.dict(os.environ, env, clear=False):
-            sites = search_engine.topic_sites("finance")
+            sites = search_repository.topic_sites("finance")
         self.assertEqual(sites, ["a.example.com", "b.example.com"])
 
     def test_all_sites_merges_topics(self):
@@ -76,7 +79,7 @@ class SearchEngineTests(unittest.TestCase):
             "SEARCH_SITES_ENCYCLOPEDIA": "c.com",
         }
         with patch.dict(os.environ, env, clear=False):
-            self.assertEqual(search_engine.all_sites(), ["a.com", "b.com", "c.com"])
+            self.assertEqual(search_repository.all_sites(), ["a.com", "b.com", "c.com"])
 
     def test_baidu_parses_references_and_topic_sites(self):
         mock_resp = MagicMock()
@@ -101,13 +104,13 @@ class SearchEngineTests(unittest.TestCase):
             "SEARCH_SITES_ENCYCLOPEDIA": "baike.baidu.com,wiki.mbalib.com",
         }
         with patch.dict(os.environ, env, clear=False), patch(
-            "external_tools.search_engine.usage.status", return_value=_status_ok()
+            "search_service.usage.status", return_value=_status_ok()
         ), patch(
-            "external_tools.search_engine.usage.try_consume", return_value=_ok_gate()
+            "search_service.usage.try_consume", return_value=_ok_gate()
         ), patch(
-            "external_tools.search_engine.httpx.Client", return_value=mock_client
+            "search_repository.httpx.Client", return_value=mock_client
         ):
-            out = search_engine.baidu_web_search("市盈率", num=3, topic="encyclopedia")
+            out = search_service.baidu_web_search("市盈率", num=3, topic="encyclopedia")
 
         self.assertNotIn("error", out)
         self.assertEqual(len(out["results"]), 1)
@@ -136,21 +139,21 @@ class SearchEngineTests(unittest.TestCase):
         mock_client.get.return_value = mock_resp
 
         with patch.dict(os.environ, {"BAIDU_QIANFAN_API_KEY": "test-key"}, clear=False), patch(
-            "external_tools.search_engine.usage.status", return_value=_status_ok("baike")
+            "search_service.usage.status", return_value=_status_ok("baike")
         ), patch(
-            "external_tools.search_engine.usage.try_consume",
+            "search_service.usage.try_consume",
             return_value=_ok_gate("baike"),
         ), patch(
-            "external_tools.search_engine.httpx.Client", return_value=mock_client
+            "search_repository.httpx.Client", return_value=mock_client
         ):
-            out = search_engine.baidu_baike_search("市盈率", num=3)
+            out = search_service.baidu_baike_search("市盈率", num=3)
 
         self.assertNotIn("error", out)
         self.assertEqual(out["engine"], "baike")
         self.assertEqual(out["results"][0]["link"], "https://baike.baidu.com/item/市盈率")
         self.assertIn("每股市价", out["results"][0]["snippet"])
         called = mock_client.get.call_args
-        self.assertEqual(called.args[0], search_engine.BAIKE_CONTENT_URL)
+        self.assertEqual(called.args[0], search_repository.BAIKE_CONTENT_URL)
         self.assertEqual(called.kwargs["params"]["search_type"], "lemmaTitle")
         self.assertEqual(called.kwargs["params"]["search_key"], "市盈率")
         mock_client.post.assert_not_called()
@@ -178,14 +181,14 @@ class SearchEngineTests(unittest.TestCase):
             "SEARCH_SITES_FINANCE": "finance.eastmoney.com,www.cninfo.com.cn",
         }
         with patch.dict(os.environ, env, clear=False), patch(
-            "external_tools.search_engine.usage.status", return_value=_status_ok("google")
+            "search_service.usage.status", return_value=_status_ok("google")
         ), patch(
-            "external_tools.search_engine.usage.try_consume",
+            "search_service.usage.try_consume",
             return_value=_ok_gate("google"),
         ), patch(
-            "external_tools.search_engine.httpx.Client", return_value=mock_client
+            "search_repository.httpx.Client", return_value=mock_client
         ):
-            out = search_engine.google_web_search("毛利率", num=5, topic="finance")
+            out = search_service.google_web_search("毛利率", num=5, topic="finance")
 
         params = mock_client.get.call_args.kwargs["params"]
         self.assertEqual(params["cx"], "one-cx")
@@ -203,14 +206,14 @@ class SearchEngineTests(unittest.TestCase):
 
         env = {"GOOGLE_CSE_API_KEY": "gk", "GOOGLE_CSE_CX": "one-cx"}
         with patch.dict(os.environ, env, clear=False), patch(
-            "external_tools.search_engine.usage.status", return_value=_status_ok("google")
+            "search_service.usage.status", return_value=_status_ok("google")
         ), patch(
-            "external_tools.search_engine.usage.try_consume",
+            "search_service.usage.try_consume",
             return_value=_ok_gate("google"),
         ), patch(
-            "external_tools.search_engine.httpx.Client", return_value=mock_client
+            "search_repository.httpx.Client", return_value=mock_client
         ):
-            search_engine.google_web_search("P/E", num=5, topic="")
+            search_service.google_web_search("P/E", num=5, topic="")
 
         params = mock_client.get.call_args.kwargs["params"]
         self.assertEqual(params["q"], "P/E")
@@ -218,7 +221,7 @@ class SearchEngineTests(unittest.TestCase):
 
     def test_invalid_topic(self):
         with patch.dict(os.environ, {"BAIDU_QIANFAN_API_KEY": "k"}, clear=False):
-            out = search_engine.baidu_web_search("x", topic="sports")
+            out = search_service.baidu_web_search("x", topic="sports")
         self.assertIn("error", out)
 
     def test_switch_off_refuses(self):
@@ -227,9 +230,9 @@ class SearchEngineTests(unittest.TestCase):
         st["switch_on"] = False
         st["closed_reason"] = "switch_off"
         with patch.dict(os.environ, {"BAIDU_QIANFAN_API_KEY": "k"}, clear=False), patch(
-            "external_tools.search_engine.usage.status", return_value=st
+            "search_service.usage.status", return_value=st
         ):
-            out = search_engine.baidu_web_search("hello")
+            out = search_service.baidu_web_search("hello")
         self.assertIn("关闭", out["error"])
         self.assertEqual(out["results"], [])
 

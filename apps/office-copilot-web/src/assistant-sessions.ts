@@ -34,7 +34,7 @@ export type SessionController = {
 };
 
 function lastSessionKey(assetId: string) {
-  return `office-sheet-session:${assetId}`;
+  return `office-assistant-session:${assetId}`;
 }
 
 function rememberSession(assetId: string, sessionId: string) {
@@ -42,7 +42,10 @@ function rememberSession(assetId: string, sessionId: string) {
 }
 
 function recalledSession(assetId: string) {
-  try { return localStorage.getItem(lastSessionKey(assetId)); } catch { return null; }
+  try {
+    return localStorage.getItem(lastSessionKey(assetId))
+      || localStorage.getItem(`office-sheet-session:${assetId}`);
+  } catch { return null; }
 }
 
 function formatWhen(iso?: string) {
@@ -71,6 +74,7 @@ export function mountAssistantSessions(
   let currentId: string | null = null;
   let currentSummary = '';
   let sessions: AssistantSession[] = [];
+  let activeAssetId: string | null = null;
   let suppressSelectChange = false;
 
   const renderOptions = () => {
@@ -102,21 +106,35 @@ export function mountAssistantSessions(
       sessions = [];
       currentId = null;
       currentSummary = '';
+      activeAssetId = null;
       renderOptions();
       return;
     }
+    if (assetId !== activeAssetId) {
+      // 会话严格归属当前资产；不能让上一张表或另一份导图的 currentId 继续参与保存。
+      activeAssetId = assetId;
+      sessions = [];
+      currentId = null;
+      currentSummary = '';
+      renderOptions();
+    }
     const data = await office.json<{ sessions: AssistantSession[] }>(`/assets/${assetId}/assistant-sessions`);
+    if (getAssetId() !== assetId || activeAssetId !== assetId) return;
     sessions = data.sessions || [];
     renderOptions();
   };
 
   const load = async (sessionId: string, opts?: { notify?: boolean }) => {
     const assetId = getAssetId();
-    if (!assetId) throw new Error('表格尚未打开。');
+    if (!assetId) throw new Error('当前工作区尚未打开。');
+    if (assetId !== activeAssetId) throw new Error('工作区已切换，请重新选择会话。');
     if (sessionId === currentId && opts?.notify === false) return sessions.find(item => item.id === sessionId) as AssistantSession;
     const data = await office.json<{ session: AssistantSession }>(
       `/assets/${assetId}/assistant-sessions/${sessionId}`,
     );
+    if (getAssetId() !== assetId || activeAssetId !== assetId) {
+      throw new Error('工作区已切换，请重新选择会话。');
+    }
     currentId = data.session.id;
     currentSummary = data.session.summary || '';
     rememberSession(assetId, currentId);
@@ -130,11 +148,15 @@ export function mountAssistantSessions(
 
   const startNew = async (opts?: { resetUi?: boolean }) => {
     const assetId = getAssetId();
-    if (!assetId) throw new Error('表格尚未打开。');
+    if (!assetId) throw new Error('当前工作区尚未打开。');
+    if (assetId !== activeAssetId) throw new Error('工作区已切换，请稍后重试。');
     const data = await office.json<{ session: AssistantSession }>(
       `/assets/${assetId}/assistant-sessions`,
       { method: 'POST', body: '{}' },
     );
+    if (getAssetId() !== assetId || activeAssetId !== assetId) {
+      throw new Error('工作区已切换，请稍后重试。');
+    }
     currentId = data.session.id;
     currentSummary = '';
     rememberSession(assetId, currentId);
@@ -152,6 +174,7 @@ export function mountAssistantSessions(
   }) => {
     const assetId = getAssetId();
     if (!assetId || !currentId) return;
+    if (assetId !== activeAssetId) return;
     const body: Record<string, unknown> = { turns: payload.turns };
     if (payload.anchor) body.anchor = payload.anchor;
     if (payload.title !== undefined) body.title = payload.title;
@@ -171,6 +194,7 @@ export function mountAssistantSessions(
   const rename = async (title: string) => {
     const assetId = getAssetId();
     if (!assetId || !currentId) throw new Error('请先选择会话。');
+    if (assetId !== activeAssetId) throw new Error('工作区已切换，请重新选择会话。');
     const name = title.trim();
     if (!name) throw new Error('请输入会话名。');
     const data = await office.json<{ session: AssistantSession }>(
@@ -185,6 +209,7 @@ export function mountAssistantSessions(
   const remove = async (sessionId: string) => {
     const assetId = getAssetId();
     if (!assetId) return;
+    if (assetId !== activeAssetId) return;
     await office.json(`/assets/${assetId}/assistant-sessions/${sessionId}`, { method: 'DELETE' });
     if (currentId === sessionId) {
       currentId = null;

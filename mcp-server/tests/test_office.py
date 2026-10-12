@@ -7,11 +7,13 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "office-api"))
+_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_ROOT / "local-office-tools" / "service"))
+sys.path.insert(0, str(_ROOT / "local-office-tools" / "repository"))
 
-from office_agent import run_office_agent
-from office_context import OfficeContext
-from office_patch import create_patch, validate_office_patch
+from office_agent_service import run_office_agent
+from office_context_service import OfficeContext
+from office_patch_service import create_patch, validate_office_patch
 
 
 def sheet():
@@ -65,7 +67,7 @@ class OfficeTests(unittest.IsolatedAsyncioTestCase):
         mock_client = AsyncMock()
         mock_client.__aenter__.return_value = mock_client
         mock_client.post.return_value = mock_response
-        with patch.dict(os.environ, {"OFFICE_MODEL_BASE_URL": "https://example.test/v1", "OFFICE_MODEL_NAME": "test"}), patch("office_agent.httpx.AsyncClient", return_value=mock_client):
+        with patch.dict(os.environ, {"OFFICE_MODEL_BASE_URL": "https://example.test/v1", "OFFICE_MODEL_NAME": "test"}), patch("office_model_repository.httpx.AsyncClient", return_value=mock_client):
             result = await run_office_agent(sheet(), "rewrite", "model")
         self.assertEqual(result["patch"]["selection"], sheet()["selection"])
         sent = mock_client.post.call_args.kwargs["json"]
@@ -76,6 +78,20 @@ class OfficeTests(unittest.IsolatedAsyncioTestCase):
             "selection": {"from": 1, "to": 8, "text": "abc\ndef", "single_block": False}})
         patch = create_patch(context, "新的段落")
         self.assertEqual(patch["replacement"], "新的段落")
+
+    def test_research_diagram_context_and_patch(self):
+        source = '{"format":"invp-research-diagram-v1","type":"timeline","title":"事件","events":[]}'
+        context = OfficeContext.model_validate({
+            "document_id": "research-1",
+            "surface": "research",
+            "revision": 2,
+            "selection": {"text": source, "diagram_type": "timeline"},
+            "surrounding": source,
+        })
+        replacement = source.replace('"事件"', '"关键事件"')
+        patch = create_patch(context, replacement)
+        self.assertEqual(patch["replacement"], replacement)
+        self.assertTrue(validate_office_patch(patch, context.model_dump())["valid"])
 
 
 if __name__ == "__main__":

@@ -7,7 +7,7 @@ import listPlugin from '@fullcalendar/list';
 import './style.css';
 import { download, type EditorAdapter, type Patch } from '../../context/types';
 import { getDayBadge } from './day-meta';
-import { mountMarkdownEditor, renderMarkdown, type MdEditorHandle } from './markdown';
+import { bindRenderedPlanCopy, mountMarkdownEditor, renderMarkdown, type MdEditorHandle } from './markdown';
 import {
   eventsForMonth,
   normalizeMonthlyEvents,
@@ -17,8 +17,6 @@ import {
   type MonthlyEvent,
 } from './monthly-events';
 import { openTodoList } from './todos';
-
-export type CalendarScope = 'personal' | 'project';
 
 /** 按日工作计划：key 为 YYYY-MM-DD，value 为 Markdown 正文。 */
 export interface CalendarContent {
@@ -108,47 +106,6 @@ function plainPreview(md: string, max = 80) {
     .replace(/\s+/g, ' ')
     .trim()
     .slice(0, max);
-}
-
-export function askCalendarCreate(defaultName = '日常工作') {
-  return new Promise<{ name: string; scope: CalendarScope } | null>(resolve => {
-    const overlay = document.createElement('div');
-    overlay.className = 'dialog-overlay';
-    overlay.innerHTML = `<form class="name-dialog calendar-create-dialog">
-      <h2>新建工作计划</h2>
-      <label class="field-label" for="calendar-name">名称</label>
-      <input id="calendar-name" required maxlength="80">
-      <fieldset class="scope-field">
-        <legend>范围</legend>
-        <div class="scope-options">
-          <label><input type="radio" name="calendar-scope" value="personal" checked>日常工作（跨项目可见）</label>
-          <label><input type="radio" name="calendar-scope" value="project">项目级（仅当前项目）</label>
-        </div>
-      </fieldset>
-      <div class="dialog-actions">
-        <button type="button" data-cancel>取消</button>
-        <button class="primary">确定</button>
-      </div>
-    </form>`;
-    const input = overlay.querySelector<HTMLInputElement>('#calendar-name')!;
-    input.value = defaultName;
-    const finish = (value: { name: string; scope: CalendarScope } | null) => {
-      overlay.remove();
-      resolve(value);
-    };
-    overlay.querySelector('[data-cancel]')!.addEventListener('click', () => finish(null));
-    overlay.addEventListener('click', e => { if (e.target === overlay) finish(null); });
-    overlay.querySelector('form')!.addEventListener('submit', e => {
-      e.preventDefault();
-      const name = input.value.trim();
-      if (!name) return;
-      const scope = (overlay.querySelector<HTMLInputElement>('input[name="calendar-scope"]:checked')?.value || 'personal') as CalendarScope;
-      finish({ name, scope: scope === 'project' ? 'project' : 'personal' });
-    });
-    document.body.append(overlay);
-    input.focus();
-    input.select();
-  });
 }
 
 function openDayPlan(
@@ -252,6 +209,7 @@ export function mountCalendar(
 
   container.innerHTML = `<div class="calendar-stage"><div data-calendar-host></div></div>`;
   const host = container.querySelector<HTMLElement>('[data-calendar-host]')!;
+  bindRenderedPlanCopy(host);
 
   const emitDirty = () => {
     if (loading || !assetId) return;
@@ -430,7 +388,7 @@ export function mountCalendar(
     headerToolbar: {
       left: 'prev,next today',
       center: 'title',
-      right: 'todos monthlyManage dayGridMonth,dayGridWeek,dayGridDay,listWeek',
+      right: 'todos,monthlyManage dayGridMonth,dayGridWeek,dayGridDay,listWeek',
     },
     customButtons: {
       todos: {

@@ -5,15 +5,21 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "office-api"))
+_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_ROOT / "local-office-tools" / "service"))
+sys.path.insert(0, str(_ROOT / "local-office-tools" / "repository"))
+sys.path.insert(0, str(_ROOT / "local-office-tools" / "endpoints"))
 
 from mcp.server.fastmcp import FastMCP
 
 import access_token
-import office_sheets
-import office_workbook as workbook
-from office_sheet_client import OfficeError, set_client_factory
-from office_sheets import register_tools
+import spreadsheet_service as office_sheets
+import workbook_service as workbook
+from office_repository import OfficeError, set_client_factory
+from spreadsheet_endpoint import register_tools
+from spreadsheet_service import SpreadsheetServiceError
+from mindmap_endpoint import register_tools as register_mindmap_tools
+import mindmap_service as office_mindmaps
 
 
 class FakeOffice:
@@ -50,7 +56,16 @@ class FakeOffice:
             "revision": 0,
             "content": (
                 {"type": "doc", "content": [{"type": "paragraph"}]}
-                if kind == "document" else {"name": name}
+                if kind == "document" else (
+                    {
+                        "format": "mind-elixir-v1",
+                        "nodeData": {"id": "root", "topic": name, "children": []},
+                        "arrows": [],
+                        "summaries": [],
+                        "direction": 2,
+                    }
+                    if kind == "mindmap" else {"name": name}
+                )
             ),
         }
         self.docs[asset_id] = doc
@@ -94,12 +109,14 @@ class AccessTokenTests(unittest.TestCase):
         os.environ.pop("FINANCE_MCP_TOKEN", None)
     def test_incoming_token_is_forwarded_to_office_client(self):
         from access_token import incoming_access_token, is_sheet_path, is_user_office_path, reset_incoming_access_token, set_incoming_access_token
-        from office_sheet_client import client_for, set_client_factory
+        from office_repository import client_for, set_client_factory
         set_client_factory(None)
         self.assertTrue(is_sheet_path("/mcp/sheets"))
         self.assertTrue(is_sheet_path("/api/spreadsheets/read"))
         self.assertTrue(is_user_office_path("/mcp/documents"))
         self.assertTrue(is_user_office_path("/api/documents/read"))
+        self.assertTrue(is_user_office_path("/mcp/mindmaps"))
+        self.assertTrue(is_user_office_path("/api/mindmaps/add-node"))
         self.assertFalse(is_sheet_path("/mcp/documents"))
         self.assertFalse(is_sheet_path("/mcp"))
         token = "ab" * 16
@@ -225,7 +242,7 @@ class SheetWriteTests(unittest.TestCase):
 
     def test_sheet_write_requires_login_email(self):
         self.api.me = lambda: {"id": "u1"}
-        with self.assertRaises(OfficeError) as ctx:
+        with self.assertRaises(SpreadsheetServiceError) as ctx:
             office_sheets.create_spreadsheet("P", "T", "S1")
         self.assertEqual(ctx.exception.status, 401)
 
@@ -249,6 +266,61 @@ class SheetWriteTests(unittest.TestCase):
             "set_cell_background", "set_cell_border", "set_cell_font",
         })
         self.assertTrue({"get_indicators", "get_statements", "parse_pdf", "run_office_agent"}.isdisjoint(names))
+
+
+class MindmapToolTests(unittest.TestCase):
+    def setUp(self):
+        self.api = FakeOffice()
+        set_client_factory(lambda: self.api)
+
+    def tearDown(self):
+        set_client_factory(None)
+
+    def test_mindmap_nodes_are_readable_and_mutable_by_stable_id(self):
+        created = office_mindmaps.create_mindmap("公司研究", "腾讯投资逻辑", "腾讯控股")
+        self.assertEqual(created["root"]["id"], "root")
+        self.assertEqual(created["root"]["topic"], "腾讯控股")
+
+        added = office_mindmaps.add_mindmap_node(
+            "公司研究", "腾讯投资逻辑", "root", "核心业务",
+            note="收入来源", tags=["业务", "业务"], node_id="business",
+        )
+        self.assertEqual(added["node_id"], "business")
+        office_mindmaps.add_mindmap_node(
+            "公司研究", "腾讯投资逻辑", "business", "游戏", node_id="games",
+        )
+        updated = office_mindmaps.update_mindmap_node(
+            "公司研究", "腾讯投资逻辑", "games", topic="游戏业务", hyperlink="https://example.com",
+        )
+        self.assertEqual(updated["action"], "update_node")
+
+        read = office_mindmaps.read_mindmap("公司研究", "腾讯投资逻辑")
+        games = next(item for item in read["nodes"] if item["id"] == "games")
+        self.assertEqual(games["parent_id"], "business")
+        self.assertEqual(games["path"], ["腾讯控股", "核心业务", "游戏业务"])
+
+        moved = office_mindmaps.move_mindmap_node(
+            "公司研究", "腾讯投资逻辑", "games", "root", 0,
+        )
+        self.assertEqual(moved["parent_id"], "root")
+        with self.assertRaisesRegex(ValueError, "自身或其后代"):
+            office_mindmaps.move_mindmap_node(
+                "公司研究", "腾讯投资逻辑", "business", "business",
+            )
+        deleted = office_mindmaps.delete_mindmap_node("公司研究", "腾讯投资逻辑", "business")
+        self.assertEqual(deleted["deleted_count"], 1)
+        with self.assertRaisesRegex(ValueError, "根节点"):
+            office_mindmaps.delete_mindmap_node("公司研究", "腾讯投资逻辑", "root")
+
+    def test_mindmap_tools_are_only_registered_on_mindmap_mcp(self):
+        mindmaps = FastMCP("invp-mindmaps")
+        register_mindmap_tools(mindmaps)
+        names = {tool.name for tool in mindmaps._tool_manager.list_tools()}
+        self.assertEqual(names, {
+            "create_mindmap", "read_mindmap", "write_mindmap", "add_mindmap_node",
+            "update_mindmap_node", "delete_mindmap_node", "move_mindmap_node",
+        })
+        self.assertTrue({"create_spreadsheet", "read_document", "run_office_agent"}.isdisjoint(names))
 
 
 if __name__ == "__main__":

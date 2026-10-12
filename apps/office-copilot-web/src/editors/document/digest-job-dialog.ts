@@ -1,5 +1,7 @@
 /** 文档「定时任务 / 每日资讯」设置弹窗 */
 
+import { mountThinkingStatus } from '../../ui/thinking-status';
+
 export type DigestSource = {
   kind: 'rss' | 'url' | 'rsshub';
   url?: string;
@@ -28,11 +30,11 @@ export type DigestJob = {
 type Hooks = {
   load: () => Promise<DigestJob>;
   save: (job: DigestJob) => Promise<DigestJob>;
-  run: () => Promise<{ title?: string; warnings?: string[] }>;
-  reloadDocument?: () => Promise<void>;
+  run: (onEvent: (event: Record<string, any>) => void) => Promise<void>;
+  reloadDocument?: (documentId?: string) => Promise<void>;
 };
 
-const HINT = `资讯源说明：优先填写网站官方 RSS。微博等可用 RSSHub 路由（需在服务端配置 DIGEST_RSSHUB_BASE）。微信公众号 / 小红书无稳定官方接口，请粘贴你已有的第三方转 RSS 地址（如 wewe-rss、Feeddd 等），本产品不内置抓取微信客户端。`;
+const HINT = `资讯源说明：优先填写网站官方 RSS。微博等可用 RSSHub 路由（需在服务端配置 DIGEST_RSSHUB_BASE）。微信公众号 / 小红书无稳定官方接口，请粘贴你已有的第三方转 RSS 地址（如 WeRSS、Feeddd 等），本产品不内置抓取微信客户端。`;
 
 function emptySource(): DigestSource {
   return { kind: 'rss', url: '', label: '' };
@@ -92,7 +94,7 @@ export function openDigestJobDialog(hooks: Hooks) {
         <div class="digest-topics" data-topics></div>
         <button type="button" data-add-topic>添加子主题</button>
         <p class="digest-job-hint">${HINT}</p>
-        <p class="digest-job-status" data-status></p>
+        <div class="digest-job-status" data-status></div>
         <div class="dialog-actions">
           <button type="button" data-run>立即执行一次</button>
           <button type="button" data-cancel>关闭</button>
@@ -106,6 +108,7 @@ export function openDigestJobDialog(hooks: Hooks) {
     const minuteEl = overlay.querySelector<HTMLInputElement>('[data-minute]')!;
     const orderEl = overlay.querySelector<HTMLSelectElement>('[data-order]')!;
     const statusEl = overlay.querySelector<HTMLElement>('[data-status]')!;
+    const thinking = mountThinkingStatus(statusEl);
     let busy = false;
     let settled = false;
 
@@ -121,7 +124,7 @@ export function openDigestJobDialog(hooks: Hooks) {
       if (job.last_run_at) parts.push(`上次：${job.last_run_at}`);
       if (job.last_status) parts.push(job.last_status);
       if (job.last_error) parts.push(job.last_error);
-      statusEl.textContent = parts.join(' · ');
+      thinking.note(parts.join(' · '));
     }
 
     function readForm() {
@@ -235,15 +238,33 @@ export function openDigestJobDialog(hooks: Hooks) {
       if (busy) return;
       readForm();
       busy = true;
-      statusEl.textContent = '执行中…';
+      thinking.clear();
+      thinking.note('正在获取资讯…');
+      let title = '每日资讯';
+      let warnings: string[] = [];
+      let nextDocumentId = '';
+      let archivedName = '';
       try {
         await hooks.save(job);
-        const result = await hooks.run();
-        statusEl.textContent = `已生成：${result.title || '每日资讯'}${result.warnings?.length ? '（部分来源失败）' : ''}`;
-        await hooks.reloadDocument?.();
+        await hooks.run(event => {
+          if (event.type === 'status' && event.text) {
+            if (String(event.text).includes('整理')) thinking.begin();
+            else thinking.note(String(event.text));
+          }
+          if (event.type === 'delta' && event.part === 'reasoning' && event.text) thinking.append(String(event.text));
+          if (event.type === 'done') {
+            if (event.title) title = String(event.title);
+            if (Array.isArray(event.warnings)) warnings = event.warnings.map(String);
+            if (event.document_id) nextDocumentId = String(event.document_id);
+            if (event.archived_name) archivedName = String(event.archived_name);
+          }
+        });
+        thinking.finish();
+        thinking.note(`已生成：${title}${archivedName ? `，已归档为${archivedName}` : ''}${warnings.length ? '（部分来源失败）' : ''}`);
+        await hooks.reloadDocument?.(nextDocumentId || undefined);
       } catch (e) {
-        statusEl.textContent = '';
-        window.dispatchEvent(new CustomEvent('office-error', { detail: e instanceof Error ? e.message : String(e) }));
+        thinking.finish();
+        thinking.note(e instanceof Error ? e.message : String(e));
       } finally {
         busy = false;
       }

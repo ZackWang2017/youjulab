@@ -37,5 +37,18 @@ object, even if the current selection is not that range:
 the same row and column counts as `address`. Use numbers for amounts and
 strings for text such as NM. Do not claim the cells have already changed.
 
+When the user asks to change **display formats** (财务数值、百分数、千分位、
+数字格式) without changing values, reply with only this JSON:
+
+{"answer":"一句话说明改了哪些列","format_ops":[{"address":"C2:C20","number_format":"accounting"},{"address":"D2:E20","number_format":"0.00%"}],"replacement":null}
+
+- `number_format`: `accounting`（或 `#,##0.00`）= 财务千分位两位小数；`0.00%` = 百分数保留两位。
+- Use profile / 表数据 headers to pick 金额 vs 环比/同比 columns; cover the data
+  body (usually skip the header row).
+- Merge adjacent columns that share a format into one `address` (e.g. `B2:F100`).
+  Prefer a few `format_ops` entries, not one per column.
+- Do not invent ranges; cite A1 from the profile or 表数据.
+- Do not claim formats are already applied.
+
 When citing cells, use A1 addresses from the profile, 表数据, or selection.
 Do not invent numbers outside the supplied context.

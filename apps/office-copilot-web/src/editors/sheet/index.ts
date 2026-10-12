@@ -1,18 +1,23 @@
 import { createUniver, LocaleType } from '@univerjs/presets';
+import { mergeLocales } from '@univerjs/core';
 import { UniverSheetsCorePreset } from '@univerjs/preset-sheets-core';
 import ZhCN from '@univerjs/preset-sheets-core/locales/zh-CN';
+import { UniverSheetsThreadCommentPreset } from '@univerjs/preset-sheets-thread-comment';
+import ThreadCommentZhCN from '@univerjs/preset-sheets-thread-comment/locales/zh-CN';
 import { IMenuManagerService } from '@univerjs/ui';
 import '@univerjs/preset-sheets-core/lib/index.css';
+import '@univerjs/preset-sheets-thread-comment/lib/index.css';
 import { download, type EditorAdapter } from '../../context/types';
 import { launchAmountMomYoyChart, flattenMatrixNumbers, splitRangeSpecs, type SheetValueReader } from './custom-chart';
+import { openAiChartAssistant, type ChartResponse, type SavedSheetChart } from './ai-chart';
+import { office } from '../../office-client/client';
 import { openRemoteDataDialog, selectionMatrix, toUniverCells, coerceNumericString, inferOrKeepNumberFormat } from './remote-data';
 import { parseSheetStructure, serializeSheetStructure, STRUCTURE_JSON_MAX, type StructureCell } from './read-structure';
 import { patchSheetCache, putSheetCache, refreshSheetProfile } from './sheet-cache';
 import { computeSelectionStats, extractNumbers, formatStatsBrief } from './selection-stats';
 import { closeSelectDataPanel, getLockedSelectSurrounding, openSelectDataPanel } from './select-data';
 
-const SHEET_LOCALES = {
-  ...ZhCN,
+const SHEET_LOCALES = mergeLocales(ZhCN, ThreadCommentZhCN, {
   ui: {
     ...ZhCN.ui,
     ribbon: {
@@ -21,7 +26,7 @@ const SHEET_LOCALES = {
       aiDesc: 'AI 助手相关能力',
     },
   },
-};
+});
 
 function isSnapshot(content: unknown): content is Record<string, unknown> {
   return Boolean(content && typeof content === 'object' && !Array.isArray(content)
@@ -348,6 +353,7 @@ export function mountSheet(container: HTMLElement, changed: () => void, onDirty:
     univerAPI.addEvent(univerAPI.Event.SelectionChanged, changed);
     univerAPI.addEvent(univerAPI.Event.ActiveSheetChanged, () => {
       if (loading || restoring) return;
+      document.querySelector<HTMLButtonElement>('.sheet-ai-chart-window [data-close]')?.click();
       clearStructureCache();
       rememberActiveSheet(true);
       changed();
@@ -480,6 +486,75 @@ export function mountSheet(container: HTMLElement, changed: () => void, onDirty:
       action: () => openReadDataDialog(),
     }).appendTo('ribbon.ai.others');
 
+    univerAPI.createMenu({
+      id: 'office.sheet.ai.generate-chart',
+      title: '生成图表',
+      tooltip: '复用协作助手读取的表结构，由模型选择 X/Y 轴和图表类型',
+      action: () => {
+        if (!workbook || !assetId) return;
+        const activeSheet = () => workbook!.getActiveSheet();
+        const chartSelection = () => {
+          const range = activeSheet().getSelection()?.getActiveRange();
+          if (!range) return null;
+          const target = range.getRange();
+          const rows = target.endRow - target.startRow + 1;
+          const cols = target.endColumn - target.startColumn + 1;
+          if (rows * cols > 2000) return null;
+          return {
+            sheet_id: activeSheet().getSheetId(),
+            address: range.getA1Notation(),
+            row: target.startRow,
+            column: target.startColumn,
+            rows,
+            cols,
+            values: range.getValues() as unknown[][],
+          };
+        };
+        openAiChartAssistant({
+          selectionAddress: () => chartSelection()?.address || '',
+          getModelStatus: () => office.json('/assistant/status'),
+          generate: async (description, onEvent) => {
+            await publishSheetCache(false);
+            const selection = chartSelection();
+            let response: ChartResponse | undefined;
+            let streamError = '';
+            await office.stream(`/assets/${assetId}/assistant/chart/stream`, {
+              sheet_id: activeSheet().getSheetId(),
+              description,
+              selection,
+            }, event => {
+              onEvent(event);
+              if (event.type === 'done' && event.chart) response = event as unknown as ChartResponse;
+              if (event.type === 'error') streamError = String(event.error || '图表生成失败。');
+            });
+            if (streamError) throw new Error(streamError);
+            if (!response) throw new Error('模型没有返回图表配置。');
+            return response;
+          },
+          list: async () => {
+            const sheetId = encodeURIComponent(activeSheet().getSheetId());
+            const response = await office.json<{ charts: SavedSheetChart[] }>(
+              `/assets/${assetId}/sheet-charts?sheet_id=${sheetId}`,
+            );
+            return response.charts;
+          },
+          save: (name, description, chart) => office.json(`/assets/${assetId}/sheet-charts`, {
+            method: 'POST',
+            body: JSON.stringify({
+              sheet_id: activeSheet().getSheetId(),
+              name,
+              description,
+              chart,
+            }),
+          }),
+          rename: (chartId, name) => office.json(`/assets/${assetId}/sheet-charts/${chartId}`, {
+            method: 'PUT',
+            body: JSON.stringify({ name }),
+          }),
+        });
+      },
+    }).appendTo('ribbon.ai.others');
+
     univerAPI.onCommandExecuted(command => {
       if (loading || restoring || command.type !== 2 || !assetId || !workbook) return;
       rememberActiveSheet(false);
@@ -500,21 +575,28 @@ export function mountSheet(container: HTMLElement, changed: () => void, onDirty:
     container.replaceChildren();
     container.inert = true;
     container.dataset.ready = 'false';
-    document.querySelectorAll('.sheet-chart-window').forEach(el => el.remove());
+    document.querySelectorAll<HTMLElement>('.sheet-chart-window, .sheet-ai-chart-window').forEach(el => {
+      const close = el.querySelector<HTMLButtonElement>('[data-close]');
+      if (close) close.click();
+      else el.remove();
+    });
     const created = createUniver({
       locale: LocaleType.ZH_CN, locales: { [LocaleType.ZH_CN]: SHEET_LOCALES },
-      presets: [UniverSheetsCorePreset({
-        container,
-        // 隐藏内置「文本转数字」（工具栏 + 右键），改用自定义「文本转数值」
-        menu: {
-          'sheet.toolbar.text-to-number': { hidden: true },
-          'sheet.contextMenu.text-to-number': { hidden: true },
-        },
-        sheets: {
-          disableForceStringAlert: true,
-          disableForceStringMark: true,
-        },
-      })],
+      presets: [
+        UniverSheetsCorePreset({
+          container,
+          // 隐藏内置「文本转数字」（工具栏 + 右键），改用自定义「文本转数值」
+          menu: {
+            'sheet.toolbar.text-to-number': { hidden: true },
+            'sheet.contextMenu.text-to-number': { hidden: true },
+          },
+          sheets: {
+            disableForceStringAlert: true,
+            disableForceStringMark: true,
+          },
+        }),
+        UniverSheetsThreadCommentPreset(),
+      ],
     });
     univer = created.univer;
     univerAPI = created.univerAPI;
@@ -685,17 +767,40 @@ export function mountSheet(container: HTMLElement, changed: () => void, onDirty:
       const s = patch.selection;
       const sheet = workbook.getSheetBySheetId(s.sheet_id);
       if (!sheet) throw new Error('工作表不存在。');
-      const values = patch.replacement as (string | number | boolean | null)[][];
-      sheet.getRange(s.row, s.column, values.length, values[0].length).setValues(values.map(row => row.map(v => {
-        if (typeof v === 'string' && v.startsWith('=')) return { f: v };
-        if (typeof v === 'number') return { v, t: 2, f: null };
-        if (typeof v === 'boolean') return { v, t: 3, f: null };
-        if (typeof v === 'string') {
-          const coerced = coerceNumericString(v);
-          if (coerced !== null) return { v: coerced, t: 2, f: null };
+      const formatOps = Array.isArray(patch.format_ops) ? patch.format_ops : [];
+      for (const op of formatOps) {
+        const address = String(op?.address || '').trim();
+        const pattern = String(op?.number_format || '').trim();
+        if (!address || !pattern) throw new Error('数字格式修改无效。');
+        const range = sheet.getRange(address);
+        const box = range.getRange();
+        const rows = box.endRow - box.startRow + 1;
+        const cols = box.endColumn - box.startColumn + 1;
+        if (rows < 1 || cols < 1 || rows * cols > 50_000) throw new Error('数字格式区域无效。');
+        const matrix = Array.from({ length: rows }, () => Array.from({ length: cols }, () => pattern));
+        if (typeof range.setNumberFormats !== 'function') {
+          throw new Error('当前表格不支持设置数字格式。');
         }
-        return { v, f: null };
-      })));
+        range.setNumberFormats(matrix);
+      }
+      if (patch.replacement != null) {
+        const values = patch.replacement as (string | number | boolean | null)[][];
+        if (!Array.isArray(values) || !values.length || !Array.isArray(values[0]) || !values[0].length) {
+          throw new Error('修改矩阵无效。');
+        }
+        sheet.getRange(s.row, s.column, values.length, values[0].length).setValues(values.map(row => row.map(v => {
+          if (typeof v === 'string' && v.startsWith('=')) return { f: v };
+          if (typeof v === 'number') return { v, t: 2, f: null };
+          if (typeof v === 'boolean') return { v, t: 3, f: null };
+          if (typeof v === 'string') {
+            const coerced = coerceNumericString(v);
+            if (coerced !== null) return { v: coerced, t: 2, f: null };
+          }
+          return { v, f: null };
+        })));
+      } else if (!formatOps.length) {
+        throw new Error('修改内容为空。');
+      }
       onDirty(workbook.save());
       changed();
     },

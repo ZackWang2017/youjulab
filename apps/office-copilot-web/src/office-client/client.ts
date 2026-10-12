@@ -52,7 +52,7 @@ export const office = {
       response = await this.request(path, { ...init, headers });
     } catch (e) {
       if (e instanceof AuthError) throw e;
-      throw new Error('无法连接工作区服务，请检查 office-api 是否启动。');
+      throw new Error('无法连接工作区服务，请检查 office-backend 是否启动。');
     }
     let data: any = {};
     const text = await response.text();
@@ -67,7 +67,7 @@ export const office = {
     try { response = await this.request(path); }
     catch (e) {
       if (e instanceof AuthError) throw e;
-      throw new Error('无法连接工作区服务，请检查 office-api 是否启动。');
+      throw new Error('无法连接工作区服务，请检查 office-backend 是否启动。');
     }
     if (!response.ok) {
       let data: any = {};
@@ -92,7 +92,7 @@ export const office = {
     try { response = await this.request(`/assets/${id}/file`, { cache: 'no-store' }); }
     catch (e) {
       if (e instanceof AuthError) throw e;
-      throw new Error('无法连接工作区服务，请检查 office-api 是否启动。');
+      throw new Error('无法连接工作区服务，请检查 office-backend 是否启动。');
     }
     if (response.status === 404) return null;
     if (!response.ok) {
@@ -114,7 +114,7 @@ export const office = {
       response = await this.request(path, { method: 'POST', headers, body: JSON.stringify(body) });
     } catch (e) {
       if (e instanceof AuthError) throw e;
-      throw new Error('无法连接工作区服务，请检查 office-api 是否启动。');
+      throw new Error('无法连接工作区服务，请检查 office-backend 是否启动。');
     }
     if (!response.ok) {
       let data: any = {};

@@ -39,3 +39,35 @@
 10.速冻比
 11.现金及现金等价物净增加额 
 12.期末现金及现金等价物余额 
+
+
+mcp-server 还需要在整合一下重新架构一下：
+1. 
+server.py
+ 只做最小的能力，启动进程，鉴权，不写任何的业务逻辑
+2.mcp服务分成三层，各个类型服务必须严格按照以下三类分层，三个分层分别在 mac-server目录下创建子目录，不允许跨层调用：
+第一层：endpoints层：对外http服务的入口
+第二层：service层：业务逻辑的实现
+第三层：repository层：数据访问层
+3.mcp服务分为三类，分别在三层目录下创建子目录:
+1) external-tools:外部工具的适配与转发，如百度搜索，Google搜索等，遵照三层架构
+2） local-office-tools：本地的office-copilot-web对外部提供mcp tools的转发，遵照三层架构
+3） financial-data-service: 本地数据库或者外部api提供财务数据查询服务，遵照三层架构
+
+4. 整个的目录结构如下：
+
+mcp-server/
+├── server.py
+├── external-tools/
+    ├── endpoints/ 对外Http API入口 ， 不放业务逻辑
+    ├── service/ 业务逻辑：对于external-tools没有业务逻辑需要处理，则直接调用repository层的函数
+    ├── repository/ 数据访问层：外部数据的访问设置，返回数据的处理
+├── local-office-tools/
+    ├── endpoints/ 对外Http API入口 ， 不放业务逻辑
+    ├── service/ 业务逻辑
+    ├── repository/ 数据访问层：访问apps/office-backend提供的接口，不再重复编写接口访问代码，在apps/office-backend中实现http调用，此处需要重构apps/office-backend，并尽量复用，鉴权则通过mcp-server的静态token进行鉴权
+└── financial-data-service/
+    ├── endpoints/ 对外Http API入口 ， 不放业务逻辑
+    ├── service/ 业务逻辑，不同的业务逻辑不要放到一个大文件中，例如statment和indicators 分两个文件
+    ├── repository/ 数据访问层，数据库的查询，外部网页抓取等提供数据处理的相关逻辑
+db/ 单独放到mcp-server下，作为一个公用的工具

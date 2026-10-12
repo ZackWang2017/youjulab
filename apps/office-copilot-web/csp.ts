@@ -8,6 +8,7 @@ export const OFFICE_CSP = [
   "connect-src 'self' ws: wss: http://127.0.0.1:* http://localhost:*",
   "worker-src 'self' blob:",
   "media-src 'self' blob:",
+  "frame-src https://embed.diagrams.net https://app.diagrams.net",
   "object-src 'none'",
   "base-uri 'self'",
 ].join('; ');

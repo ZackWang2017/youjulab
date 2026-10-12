@@ -8,13 +8,14 @@ import { persist, saved } from '../../context/types';
 import { askText } from '../../workspace/nav';
 import { isAiAskContent, parseAskThread } from './ask-ai';
 import { openAskAiDialog } from './ask-ai-dialog';
+import { bindPdfShots } from './shots';
 
 GlobalWorkerOptions.workerSrc = worker;
 
 const MIN_ZOOM = 0.25;
 const MAX_ZOOM = 5;
 const MAX_PDF = 30 * 1024 * 1024;
-/** 与 office-api PdfAnnotBody / pdf_annot 对齐；前端先按行合并再截断。 */
+/** 与 office-backend PdfAnnotBody / pdf_annot 对齐；前端先按行合并再截断。 */
 const MAX_ANNOT_BOXES = 200;
 
 /** 合并同行相邻矩形，减少大选区 getClientRects 数量。 */
@@ -361,6 +362,7 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
     splitBtn.setAttribute('aria-pressed', split ? 'true' : 'false');
     splitBtn.textContent = split ? '关闭浏览' : '复制浏览';
     splitBtn.title = split ? '关闭左侧对照窗格' : '左右对照同一份 PDF';
+    shots.sync();
   }
   function whenVisible() {
     if (!container.hidden && main.scroller.clientWidth >= 8) return Promise.resolve();
@@ -620,24 +622,17 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
       };
       if (annot.kind === 'highlight') {
         annot.boxes.forEach(box => {
-          const mark = document.createElement('div');
-          mark.className = 'pdf-live-annot pdf-live-highlight';
+          const mark = document.createElement('button');
+          mark.type = 'button';
+          mark.className = 'pdf-live-annot pdf-live-highlight pdf-highlight-mark';
           mark.dataset.xref = String(annot.xref);
+          mark.title = '删除高亮';
+          mark.setAttribute('aria-label', '删除高亮');
           Object.assign(mark.style, boxStyle(viewport, box));
+          mark.addEventListener('mousedown', e => e.preventDefault());
+          mark.addEventListener('click', open);
           pageDiv.append(mark);
         });
-        const first = boxStyle(viewport, annot.boxes[0]);
-        const handle = document.createElement('button');
-        handle.type = 'button';
-        handle.className = 'pdf-live-annot pdf-annot-handle';
-        handle.dataset.xref = String(annot.xref);
-        handle.title = '删除高亮';
-        handle.setAttribute('aria-label', '删除高亮');
-        handle.style.left = `calc(${first.left} - 16px)`;
-        handle.style.top = first.top;
-        handle.addEventListener('mousedown', e => e.preventDefault());
-        handle.addEventListener('click', open);
-        pageDiv.append(handle);
         continue;
       }
       const first = boxStyle(viewport, annot.boxes[0]);
@@ -914,17 +909,10 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
         return;
       }
       if (titleOf(id) === 'office-text-mark') return;
-      const handle = document.createElement('button');
-      handle.type = 'button';
-      handle.className = 'pdf-annot-handle';
-      handle.dataset.xref = xref ? String(xref) : '';
-      handle.title = '删除高亮';
-      handle.setAttribute('aria-label', '删除高亮');
-      handle.style.left = `${Math.max(2, section.offsetLeft - 18)}px`;
-      handle.style.top = `${section.offsetTop + 2}px`;
-      handle.addEventListener('mousedown', e => e.preventDefault());
-      handle.addEventListener('click', open);
-      pageDiv.append(handle);
+      section.classList.add('pdf-highlight-mark');
+      section.title = '删除高亮';
+      section.setAttribute('aria-label', '删除高亮');
+      section.addEventListener('click', open, true);
     });
     layoutNoteBadges(pageDiv);
   }
@@ -1076,6 +1064,12 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
   annotateButtons.forEach(button => {
     button.addEventListener('mousedown', e => e.preventDefault());
     button.onclick = () => { void annotate(button.dataset.annotate as AnnotKind); };
+  });
+  const shots = bindPdfShots({
+    container,
+    documentId: () => documentId,
+    activePane: () => active().root,
+    canCapture: () => !busy && !!documentId && active().ready,
   });
   controls();
   return {

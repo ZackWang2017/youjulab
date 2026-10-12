@@ -1,4 +1,4 @@
-export type Surface = 'sheet' | 'document' | 'pdf' | 'mindmap' | 'calendar';
+export type Surface = 'sheet' | 'document' | 'pdf' | 'mindmap' | 'research' | 'diagram' | 'calendar';
 export interface Context {
   document_id: string;
   surface: Surface;
@@ -8,7 +8,22 @@ export interface Context {
 }
 export interface Patch extends Omit<Context, 'surrounding'> {
   patch_id: string;
-  replacement: string | (string | number | boolean | null)[][];
+  replacement: string | (string | number | boolean | null)[][] | null;
+  format_ops?: Array<{
+    address: string;
+    number_format: string;
+    row?: number;
+    column?: number;
+    rows?: number;
+    cols?: number;
+  }>;
+  mindmap_ops?: Array<{
+    op: 'add' | 'update' | 'delete' | 'move';
+    id?: string;
+    parent_id?: string;
+    topic?: string;
+    index?: number;
+  }>;
   task?: 'explain' | 'generate';
 }
 export interface EditorAdapter {

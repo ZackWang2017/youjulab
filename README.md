@@ -2,7 +2,7 @@
 
 本地的人与 AI 协作工作台：Univer 表格、Tiptap 富文本、PDF.js 阅读器、Mind Elixir 思维导图、
 FullCalendar 工作计划（农历与法定休/班）。
-三个编辑器将选区发送到 `apps/office-api`；Agent 按工作区加载
+三个编辑器将选区发送到 `apps/office-backend`；Agent 按工作区加载
 `agents/*.agent.yaml` 与 `skills/*/SKILL.md`，流式输出回答或待确认的修改。
 
 ## 本地启动
@@ -12,14 +12,14 @@ FullCalendar 工作计划（农历与法定休/班）。
 ```sh
 python3 -m venv .venv
 .venv/bin/python -m pip install -r mcp-server/requirements.txt
-.venv/bin/python -m pip install -r apps/office-api/requirements.txt
+.venv/bin/python -m pip install -r apps/office-backend/requirements.txt
 cd apps/office-copilot-web
 npm ci
 ```
 
 ### MongoDB
 
-office-api 连接 `mongodb://127.0.0.1:27017`，库名 `office`。根目录 `.env`：
+office-backend 连接 `mongodb://127.0.0.1:27017`，库名 `office`。根目录 `.env`：
 
 ```sh
 OFFICE_MONGO_URL=mongodb://127.0.0.1:27017
@@ -47,29 +47,37 @@ brew services info mongodb/brew/mongodb-community@8.0
 
 ### 三个进程
 
-终端 1，Agent / 结构化查询（默认 8000）：
+都在项目根目录开三个终端。若旧进程还在跑 `apps/office-api/server.py`，先停掉再起下面这条。
+
+终端 1，mcp-server（默认 8000）：
 
 ```sh
 FINANCE_MCP_TRANSPORT=http FINANCE_MCP_HOST=127.0.0.1 .venv/bin/python mcp-server/server.py
 ```
 
-终端 2，登录、项目与文档快照（默认 8100，需 MongoDB 已启动）：
+终端 2，office-backend（默认 8100，需 MongoDB 已启动）：
 
 ```sh
-.venv/bin/python apps/office-api/server.py
+.venv/bin/python apps/office-backend/server.py
 ```
 
-终端 3，前端：
+终端 3，前端（默认 5173）：
 
 ```sh
-cd apps/office-copilot-web
-npm run dev
+cd apps/office-copilot-web && npm run dev
 ```
 
-访问终端输出的地址，默认 http://127.0.0.1:5173。Vite `/backend` 代理到 MCP，
-`/office` 代理到 office-api。改端口时在根目录 `.env` 设置 `FINANCE_MCP_PORT`
-或 `OFFICE_API_PORT`，并重启对应进程。临时不用 Mongo 时可设
-`OFFICE_MONGO_URL=memory://office`（进程退出后数据清空）。
+起来之后：
+
+- 页面：http://127.0.0.1:5173
+- 财务 MCP：http://127.0.0.1:8000/mcp （`MCP_ACCESS_TOKEN`）
+- 表格 MCP / REST：http://127.0.0.1:8000/mcp/sheets 、`POST /api/spreadsheets/*`（用户 32 位令牌）
+- 文档 MCP / REST：http://127.0.0.1:8000/mcp/documents 、`POST /api/documents/*`（同一用户令牌）
+- 搜索 MCP：http://127.0.0.1:8000/mcp/external-tools （`MCP_ACCESS_TOKEN`）
+- 本地工具 MCP：http://127.0.0.1:8000/mcp/local-tools （`MCP_ACCESS_TOKEN`）
+- 办公后台：http://127.0.0.1:8100/health
+
+Vite `/backend` 代理到 MCP，`/office` 代理到 office-backend。改端口时在根目录 `.env` 设置 `FINANCE_MCP_PORT` 或 `OFFICE_API_PORT`，并重启对应进程。临时不用 Mongo 时可设 `OFFICE_MONGO_URL=memory://office`（进程退出后数据清空）。
 
 Univer 表格引擎依赖 `new Function()`，前端 CSP 需包含 `script-src 'unsafe-eval'`
 （见 `apps/office-copilot-web/csp.ts`）。若 IDE 内置浏览器仍报 CSP 阻止 eval，
@@ -86,8 +94,8 @@ Univer 表格引擎依赖 `new Function()`，前端 CSP 需包含 `script-src 'u
 
 ## 模型
 
-所有用户共用 office-api 后台配置的同一个模型，前端不再选择运行模式。
-在根目录 `.env` 填写 DeepSeek（或其他 OpenAI 兼容接口）后重启 office-api：
+所有用户共用 office-backend 后台配置的同一个模型，前端不再选择运行模式。
+在根目录 `.env` 填写 DeepSeek（或其他 OpenAI 兼容接口）后重启 office-backend：
 
 ```sh
 OFFICE_MODEL_BASE_URL=https://api.deepseek.com/v1
@@ -113,6 +121,27 @@ OFFICE_MODEL_API_KEY=你的密钥
 工具：`baidu_web_search` / `baidu_baike_search` / `google_web_search`。`topic`
 （`finance` | `accounting` | `encyclopedia`）只用于网页搜。百科工具走词条接口
 `lemma/get_content`，不是百度网页搜索加站点过滤。
+
+## 本地工具 MCP：单页读取
+
+| 项 | 值 |
+|----|----|
+| MCP | `invp-local-tools` |
+| URL | `http://127.0.0.1:8000/mcp/local-tools` |
+| 鉴权 | `.env` 的 `MCP_ACCESS_TOKEN`（Bearer） |
+| 实现 | `mcp-server/local-tools/` |
+
+工具：
+
+- `read_web_page(url)`：一个具体网页，返回标题、分段正文和少量链接。
+- `search_wechat_articles(query, num=10)`：搜狗微信文章搜索的第一页。
+- `list_wechat_account(account, source="rsshub", num=10)`：一个指定公众号的最近文章。`source=rsshub` 时 `account` 是微信号，需要 `DIGEST_RSSHUB_BASE`。列表只有标题、链接、时间和摘要。
+- `list_weread_shelf(num=5)`：重新读取微信读书书架上的全部公众号，返回每个号的最近文章。
+- `read_wechat_article(url)`：一篇 `https://mp.weixin.qq.com` 文章，返回标题、公众号、发布时间和分段正文。
+
+资讯简报里的「微信读书」勾选会调用 `list_weread_shelf`。每次执行都重新读书架，书架上有哪些公众号就查哪些。mcp-server 启动时如果没有可用登录，会在终端打印二维码；登录过期后再拉书架时，终端会再打印一张。
+
+- `fetch_preset_news(source, ticker_code, name)`：按股票查询预定义资讯。`source` 为 `hkex`、`sina`、`eastmoney`、`xueqiu`、`jisilu`、`tencent`。集思录读该股票话题下的讨论，腾讯自选股读个股资讯。雪球先取个股资讯，再附上讨论区里不是回复的帖子。
 
 **Google 配置模型（无法全网搜）：** 只用 **一个** `GOOGLE_CSE_CX`，控制台「要搜索的网站」填入三组 `SEARCH_SITES_*` 的**并集**；调用时若带 `topic`，仍用同一 CX，再用对应子集做 `site:` 收窄。
 
@@ -245,7 +274,7 @@ curl -s 'http://127.0.0.1:8080/search?q=市盈率&format=json' | head
 - 工作计划：FullCalendar 月/周/日视图；资产 `kind=calendar`，`content.days` 为按日 Markdown；双击日期编辑当天内容。日期格显示农历与法定休/班（见下节「法定节假日数据更新」）。
 - 修改绑定原文档、选区和版本，内容变化后旧补丁不能应用。
 - 登录后按用户隔离项目；每个项目可有多份表格、文档、PDF、导图、计划。上次项目与文件记在服务端。
-- 表格、文档、导图、计划 JSON 自动保存到 office-api（MongoDB）；PDF 文件存在本地目录。
+- 表格、文档、导图、计划 JSON 自动保存到 office-backend（MongoDB）；PDF 文件存在本地目录。
 - 当前 Agent 为单轮、按工作区路由的执行器，真实读取 Skills，调用模型并校验返回值。
 
 ### 法定节假日数据更新
@@ -291,43 +320,33 @@ apps/office-copilot-web/src/
   office-client/                 工作区 HTTP 客户端
   patches/                       修改预览
   mcp-client/                    Agent HTTP 适配器
-apps/office-api/                 登录、项目、资产、PDF 文件
+apps/office-backend/                 登录、项目、资产、PDF 文件
 agents/                          主路由及专业 Agent 配置（按表格/文档/PDF/导图/计划 × 选区解释/生成内容）
 skills/{spreadsheet,document,pdf,mindmap,calendar}/SKILL.md
 skills/{spreadsheet-generate,document-generate,mindmap-generate,calendar-generate}/SKILL.md
 skills/common/contracts.md       共享约定（协作助手）
 skills/common/external-tools.md  外部搜索 MCP 共用约定（专题 skill include）
-invp-skills/                     外部厂商 Agent 的表格 MCP skills
-  invp-skills-chatgpt/
-  invp-skills-workbuddy/
-  invp-skills-deepseek/
+invp-skills/SKILL.md             外部 Agent 共用的表格与文档 skill（不区分具体 Agent）
 mcp-server/
-  server.py                      FastMCP 入口（财务 /mcp + 表格 /mcp/sheets + 外部工具 /mcp/external-tools）
-  external_tools/                外部工具包（搜索等，不挂 finresearch）
-    search_engine.py             百度千帆 / Google CSE 网页搜索
+  server.py                      FastMCP 入口（财务 /mcp + 表格 /mcp/sheets + 外部工具 /mcp/external-tools + 本地工具 /mcp/local-tools）
+  external-tools/                搜索：endpoint → service → repository
+  local-tools/                   网页、公众号搜索、指定公众号、单篇文章，入口 /mcp/local-tools
+  local-office-tools/            表格、文档、选区 Agent；repository 调 office-backend
+  financial-data-service/        财务档案、报表、财报 PDF
   access_token.py                财务 MCP 静态令牌；表格入口转发用户 token
-  office-api/                    Office 相关 MCP/REST（与财务 API 分开）
-    office_sheets.py             按项目名/表名/sheet名创建、读写、合并与样式
-    office_workbook.py           Univer JSON 单元格写入（不渲染）
-    office_sheet_client.py       转发到 apps/office-api
-    office_sheet_routes.py       /api/spreadsheets/* 与 /mcp/sheets
-    office_context.py            选区验证
-    office_patch.py              补丁生成及冲突校验
-    office_agent.py              Skills 加载与模型调用
-    office_routes.py             选区 Agent REST /api/office
   tests/test_office.py            办公协议测试
   tests/test_external_tools_search.py  搜索引擎 mock 测试
 ```
 
 已有 MCP 入口 `/mcp` 或 stdio 提供财务工具及 `get_office_context`、`run_office_agent`、
-`validate_office_patch`。浏览器协作助手走 office-api，不走该入口。
+`validate_office_patch`。浏览器协作助手走 office-backend，不走该入口。
 外部 Agent 读写表格走同一 mcp-server 进程的 `/mcp/sheets` 与
 `POST /api/spreadsheets/create|read|write|merge|unmerge|background|border|font`，参数是项目名、表名、sheet 名。
-网页搜索走同一进程的 **`/mcp/external-tools`**（见上文「外部工具 MCP」）。
+网页搜索走同一进程的 **`/mcp/external-tools`**（见上文「外部工具 MCP」）。网页与公众号读取走 **`/mcp/local-tools`**。
 表格鉴权使用办公工作区每个用户自己的 32 位访问令牌。令牌只用来找到登录邮箱账号，项目和表格挂在该账号下；重新生成令牌不会丢掉资产，但需换新 skill。
-财务 `/mcp` 与外部工具 `/mcp/external-tools` 仍用 `.env` 的 `MCP_ACCESS_TOKEN`。
+财务 `/mcp`、外部工具 `/mcp/external-tools` 与本地工具 `/mcp/local-tools` 仍用 `.env` 的 `MCP_ACCESS_TOKEN`。
 不要把表格或外部搜索工具注册进财务 `/mcp`，也不要走 `/api/financial` 或 PDF 渲染。
-厂商 skill 放在 `invp-skills/<厂商名>/`，与协作助手的 `skills/` 分开。
+外部 Agent 共用 `invp-skills/SKILL.md`，与协作助手的 `skills/` 分开。登录后从账号菜单下载，文件里会写入当前用户令牌。
 新增协作助手 Skill 时创建 `skills/<name>/SKILL.md`，将专业 Agent 配置中的 `skill`
 指向它。文件在每次请求时读取，无需重启即可调整提示词。
 
@@ -335,7 +354,7 @@ mcp-server/
 
 ```sh
 .venv/bin/python -m unittest discover -s mcp-server/tests -v
-.venv/bin/python -m unittest discover -s apps/office-api/tests -v
+.venv/bin/python -m unittest discover -s apps/office-backend/tests -v
 cd apps/office-copilot-web
 npm run build
 ```

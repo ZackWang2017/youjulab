@@ -2,7 +2,7 @@ import { defineConfig, loadEnv } from 'vite';
 import { resolve } from 'node:path';
 import { OFFICE_CSP } from './csp';
 
-const cspHeaders = { 'Content-Security-Policy': OFFICE_CSP };
+const cspHeaders = { 'Content-Security-Policy': OFFICE_CSP }; // 绘图页嵌入 diagrams.net
 
 export default defineConfig(() => {
   const env = loadEnv('development', resolve(process.cwd(), '../..'), '');

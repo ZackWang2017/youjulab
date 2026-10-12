@@ -7,21 +7,23 @@ import { office } from '../office-client/client';
 import type { Asset, Kind, Workspace } from './session';
 import { openCalcWindow } from './calc-window';
 
-const LABELS: Record<Kind, string> = { sheet: '表格', document: '文档', pdf: 'PDF', mindmap: '导图', calendar: '计划' };
-const NEW_LABELS: Record<Kind, string> = { sheet: '新建表格', document: '新建文档', pdf: '新建 PDF', mindmap: '新建导图', calendar: '新建计划' };
+const LABELS: Record<Kind, string> = { sheet: '表格', document: '文档', pdf: 'PDF', mindmap: '导图', research: '研究图', diagram: '绘图', calendar: '计划' };
+const NEW_LABELS: Record<Kind, string> = { sheet: '新建表格', document: '新建文档', pdf: '新建 PDF', mindmap: '新建导图', research: '新建研究图', diagram: '新建绘图', calendar: '新建计划' };
 
 function kindIcon(kind: Kind) {
   if (kind === 'sheet') return 'table-2';
   if (kind === 'document') return 'file-text';
   if (kind === 'pdf') return 'book-open';
   if (kind === 'calendar') return 'calendar-days';
+  if (kind === 'diagram') return 'workflow';
+  if (kind === 'research') return 'chart-no-axes-combined';
   return 'git-fork';
 }
 
 export function renderAuth(root: HTMLElement) {
   root.innerHTML = `<div class="auth-page" id="auth-page">
     <form id="auth" class="auth-card">
-      <h1>AI投研助手</h1>
+      <h1>AI学研助手</h1>
       <p>登录后进入你的项目工作区</p>
       <label class="field-label" for="auth-email">邮箱</label>
       <input id="auth-email" name="email" type="email" autocomplete="username" required>
@@ -44,16 +46,18 @@ export function renderChrome(root: HTMLElement) {
   </header>
   <main><div class="workspace">
     <section id="sheet" class="surface" aria-label="表格编辑器"></section>
-    <section id="document" class="surface" aria-label="文档编辑器" hidden><div class="format-bar"><button data-format="bold" title="加粗" aria-label="加粗"><i data-lucide="bold"></i></button><button data-format="italic" title="斜体" aria-label="斜体"><i data-lucide="italic"></i></button><button data-format="strike" title="删除线" aria-label="删除线"><i data-lucide="strikethrough"></i></button><button data-format="code" title="行内代码" aria-label="行内代码"><i data-lucide="code"></i></button><button data-format="h1" title="一级标题" aria-label="一级标题"><i data-lucide="heading-1"></i></button><button data-format="heading" title="二级标题" aria-label="二级标题"><i data-lucide="heading-2"></i></button><button data-format="h3" title="三级标题" aria-label="三级标题"><i data-lucide="heading-3"></i></button><button data-format="list" title="无序列表" aria-label="无序列表"><i data-lucide="list"></i></button><button data-format="ordered" title="有序列表" aria-label="有序列表"><i data-lucide="list-ordered"></i></button><button data-format="quote" title="引用" aria-label="引用"><i data-lucide="quote"></i></button><button data-format="codeblock" title="代码块" aria-label="代码块"><i data-lucide="square-code"></i></button><button data-format="rule" title="分隔线" aria-label="分隔线"><i data-lucide="minus"></i></button><button type="button" data-digest-job title="定时任务" aria-label="定时任务"><i data-lucide="clock"></i><span>定时任务</span></button></div><div id="rich-editor"></div></section>
-    <section id="pdf" class="surface" aria-label="PDF 阅读器" hidden><div class="pdf-toolbar"><label class="file-label"><i data-lucide="folder-open"></i>上传 PDF<input type="file" accept="application/pdf,.pdf"></label><div class="pdf-annotate" role="toolbar" aria-label="PDF 批注"><button type="button" data-annotate="highlight" title="先划选文字，再点击高亮" aria-label="高亮" disabled><i data-lucide="highlighter"></i><span>高亮</span></button><button type="button" data-annotate="text" title="先划选文字，再添加批注" aria-label="文字批注" disabled><i data-lucide="message-square-plus"></i><span>批注</span></button><button type="button" data-ask-ai title="先划选文字，再向 AI 提问" aria-label="问 AI" disabled><i data-lucide="sparkles"></i><span>问AI</span></button><button type="button" data-pdf-terms title="维护本项目的财报译法" aria-label="术语">术语</button></div><span data-page>未打开文件</span><div class="pdf-nav"><button data-prev title="上一页" aria-label="上一页"><i data-lucide="chevron-left"></i></button><input data-page-input type="number" min="1" step="1" value="1" aria-label="跳转到页码" title="输入页码后回车跳转"><span data-page-total>/ 0</span><button data-next title="下一页" aria-label="下一页"><i data-lucide="chevron-right"></i></button></div><div class="pdf-zoom"><button data-zoom-out title="缩小" aria-label="缩小" disabled><i data-lucide="zoom-out"></i></button><span data-zoom>100%</span><button data-zoom-in title="放大" aria-label="放大" disabled><i data-lucide="zoom-in"></i></button><button data-fit-width title="适应宽度" aria-label="适应宽度" disabled><i data-lucide="unfold-horizontal"></i></button></div><button type="button" data-split-view aria-pressed="false" title="左右对照同一份 PDF" disabled>复制浏览</button></div><div class="pdf-stage"><div class="pdf-pane" data-pane="copy" hidden><div class="pdf-scroll" tabindex="0" data-scroll="copy"></div></div><div class="pdf-split" role="separator" aria-orientation="vertical" aria-label="调整对照窗格宽度" tabindex="0" hidden></div><div class="pdf-pane is-active" data-pane="main"><div class="pdf-scroll" tabindex="0" data-scroll="main"><div class="pdf-page"><div class="empty"><i data-lucide="file-search"></i><p>未打开 PDF</p></div></div></div></div></div></section>
+    <section id="document" class="surface" aria-label="文档编辑器" hidden><div class="format-bar"><button data-format="bold" title="加粗" aria-label="加粗"><i data-lucide="bold"></i></button><button data-format="italic" title="斜体" aria-label="斜体"><i data-lucide="italic"></i></button><button data-format="strike" title="删除线" aria-label="删除线"><i data-lucide="strikethrough"></i></button><button data-format="highlight" title="高亮" aria-label="高亮"><i data-lucide="highlighter"></i></button><button data-format="code" title="行内代码" aria-label="行内代码"><i data-lucide="code"></i></button><button data-format="h1" title="一级标题" aria-label="一级标题"><i data-lucide="heading-1"></i></button><button data-format="heading" title="二级标题" aria-label="二级标题"><i data-lucide="heading-2"></i></button><button data-format="h3" title="三级标题" aria-label="三级标题"><i data-lucide="heading-3"></i></button><button data-format="list" title="无序列表" aria-label="无序列表"><i data-lucide="list"></i></button><button data-format="ordered" title="有序列表" aria-label="有序列表"><i data-lucide="list-ordered"></i></button><button data-format="quote" title="引用" aria-label="引用"><i data-lucide="quote"></i></button><button data-format="codeblock" title="代码块" aria-label="代码块"><i data-lucide="square-code"></i></button><button data-format="rule" title="分隔线" aria-label="分隔线"><i data-lucide="minus"></i></button><span class="format-sep" aria-hidden="true"></span><button type="button" data-digest-job title="定时任务" aria-label="定时任务"><i data-lucide="clock"></i><span>定时任务</span></button><div class="skill-menu-wrap"><button type="button" data-my-skills title="我的技能" aria-label="我的技能" aria-haspopup="menu" aria-expanded="false"><span class="skill-tool-icon" aria-hidden="true"><svg viewBox="0 -1 738 717" fill="currentColor"><g transform="translate(0 715) scale(1 -1)"><path d="M729.08 113.84L504.32 342.24C493.72 352.84 476.62 352.84 466.01 342.24L449.64 327.19L410.87 366.43C410.87 366.43 472.91 434.57 475.96 433.18C542.11 403.68 588.97 416.94 642.78 469.3C690.17 516.69 700.18 585.09 675.53 638.84L582.73 547.71C573.39 538.36 558.21 538.36 548.93 547.71L509.36 587.21C500.02 596.55 500.02 611.74 509.36 621.08L598.04 709.16C547.07 725.34 486.76 711.42 443.74 668.4C373.48 601.06 384.29 552.94 408.61 499.32C409.61 497.07 346.38 429.53 346.38 429.53L342.2 429.53L139.06 634.14C139.06 634.14 147.94 660.91 132.69 676.22L99.82 707.64L37.58 645.4L70.45 613.99C70.45 613.99 95.44 598.74 113.47 607.49L311.71 406.86L315.69 399.9L56.14 163.41L22.27 129.48C-7.42 99.85 -7.42 51.8 22.27 22.17C51.9 -7.39 99.88 -7.39 129.58 22.17L163.44 56.17C163.44 56.17 315.83 253.09 382.44 332.5L418.23 296.44L398.61 273.97C388 263.5 388 246.33 398.61 235.73L621.97 10.31C632.51 -0.3 649.68 -0.3 660.22 10.31L729.08 75.59C739.69 86.13 739.69 103.37 729.08 113.84ZM110.02 78.71C100.74 69.36 85.63 69.36 76.28 78.71C66.94 87.99 66.94 103.1 76.28 112.51C85.63 121.86 100.74 121.86 110.02 112.51C119.37 103.1 119.37 87.92 110.02 78.71ZM652.26 44.11C647.75 39.67 640.47 39.67 636.02 44.11L435.86 254.29C431.41 258.73 431.41 266.08 435.86 270.52C440.36 274.96 447.65 274.96 452.09 270.52L652.33 60.35C656.77 55.91 656.77 48.55 652.26 44.11ZM693.82 85.6C689.38 81.16 682.09 81.16 677.58 85.6L477.41 295.84C472.91 300.35 472.91 307.57 477.41 312.08C481.86 316.52 489.14 316.52 493.59 312.08L693.82 101.91C698.32 97.4 698.32 85.6Z"/></g></svg></span><span>我的技能</span></button><div class="skill-menu" data-skill-menu hidden></div></div></div><div id="rich-editor"></div></section>
+    <section id="pdf" class="surface" aria-label="PDF 阅读器" hidden><div class="pdf-toolbar"><input type="file" accept="application/pdf,.pdf" hidden><div class="pdf-annotate" role="toolbar" aria-label="PDF 批注"><button type="button" data-annotate="highlight" title="先划选文字，再点击高亮" aria-label="高亮" disabled><i data-lucide="highlighter"></i><span>高亮</span></button><button type="button" data-annotate="text" title="先划选文字，再添加批注" aria-label="文字批注" disabled><i data-lucide="message-square-plus"></i><span>批注</span></button><button type="button" data-ask-ai title="先划选文字，再向 AI 提问" aria-label="问 AI" disabled><i data-lucide="sparkles"></i><span>问AI</span></button><button type="button" data-pdf-terms title="维护本项目的财报译法" aria-label="术语">术语</button><button type="button" data-pdf-shot title="在页面上拖拽截取区域" aria-label="截图" aria-pressed="false" disabled>截图</button></div><div class="pdf-shots" data-pdf-shots hidden></div><span data-page>未打开文件</span><div class="pdf-nav"><button data-prev title="上一页" aria-label="上一页"><i data-lucide="chevron-left"></i></button><input data-page-input type="number" min="1" step="1" value="1" aria-label="跳转到页码" title="输入页码后回车跳转"><span data-page-total>/ 0</span><button data-next title="下一页" aria-label="下一页"><i data-lucide="chevron-right"></i></button></div><div class="pdf-zoom"><button data-zoom-out title="缩小" aria-label="缩小" disabled><i data-lucide="zoom-out"></i></button><span data-zoom>100%</span><button data-zoom-in title="放大" aria-label="放大" disabled><i data-lucide="zoom-in"></i></button><button data-fit-width title="适应宽度" aria-label="适应宽度" disabled><i data-lucide="unfold-horizontal"></i></button></div><button type="button" data-split-view aria-pressed="false" title="左右对照同一份 PDF" disabled>复制浏览</button></div><div class="pdf-stage"><div class="pdf-pane" data-pane="copy" hidden><div class="pdf-scroll" tabindex="0" data-scroll="copy"></div></div><div class="pdf-split" role="separator" aria-orientation="vertical" aria-label="调整对照窗格宽度" tabindex="0" hidden></div><div class="pdf-pane is-active" data-pane="main"><div class="pdf-scroll" tabindex="0" data-scroll="main"><div class="pdf-page"><div class="empty"><i data-lucide="file-search"></i><p>未打开 PDF</p></div></div></div></div></div></section>
     <section id="mindmap" class="surface" aria-label="思维导图" hidden></section>
+    <section id="research" class="surface" aria-label="研究图" hidden></section>
+    <section id="diagram" class="surface" aria-label="绘图" hidden></section>
     <section id="calendar" class="surface" aria-label="工作计划" hidden></section>
   </div><div id="workspace-split" class="workspace-split" role="separator" aria-orientation="vertical" aria-expanded="true" aria-label="隐藏或调整协作助手" tabindex="0"></div><aside><div class="panel-title"><div class="panel-heading"><i data-lucide="sparkles"></i><h1>协作助手</h1></div><span id="model-name" class="model-name">模型：未配置</span></div>
     <div id="assistant-sessions-bar" class="assistant-sessions-bar" hidden>
       <label class="assistant-session-label"><select id="assistant-session-select"></select></label>
       <div class="assistant-session-actions">
         <button type="button" id="rename-assistant-session" title="修改会话名"><i data-lucide="pencil"></i></button>
-        <button type="button" id="refresh-sheet-context" title="重新解析整张表并生成表含义"><i data-lucide="refresh-cw"></i></button>
+        <button type="button" id="refresh-sheet-context" title="刷新当前工作区上下文"><i data-lucide="refresh-cw"></i></button>
         <button type="button" id="delete-assistant-session" title="删除当前会话"><i data-lucide="trash-2"></i></button>
       </div>
     </div>
@@ -116,6 +120,31 @@ export function askText(title: string, placeholder: string, initial = '', maxLen
   });
 }
 
+export function askDocumentCreate() {
+  return new Promise<{ name: string; visibility: 'project' | 'user' } | null>(resolve => {
+    const overlay = document.createElement('div');
+    overlay.className = 'dialog-overlay';
+    overlay.innerHTML = `<form class="name-dialog document-create-dialog">
+      <h2>新建文档</h2>
+      <label class="field-label" for="document-create-name">文档名称</label>
+      <input id="document-create-name" required maxlength="80" placeholder="文档名称">
+      <fieldset><legend>可见范围</legend><label><input type="radio" name="visibility" value="project" checked><span>项目可见</span></label><label><input type="radio" name="visibility" value="user"><span>我可见</span></label></fieldset>
+      <div class="dialog-actions"><button type="button" data-cancel>取消</button><button class="primary">创建</button></div>
+    </form>`;
+    const finish = (value: { name: string; visibility: 'project' | 'user' } | null) => { overlay.remove(); resolve(value); };
+    overlay.querySelector('[data-cancel]')!.addEventListener('click', () => finish(null));
+    overlay.addEventListener('click', event => { if (event.target === overlay) finish(null); });
+    overlay.querySelector('form')!.addEventListener('submit', event => {
+      event.preventDefault();
+      const name = overlay.querySelector<HTMLInputElement>('#document-create-name')!.value.trim();
+      const visibility = overlay.querySelector<HTMLInputElement>('input[name="visibility"]:checked')!.value as 'project' | 'user';
+      if (name) finish({ name, visibility });
+    });
+    document.body.append(overlay);
+    overlay.querySelector<HTMLInputElement>('#document-create-name')!.focus();
+  });
+}
+
 /** 保存失败弹窗：阻断式提示，可选重试。 */
 export function alertSaveError(message: string) {
   return new Promise<'retry' | 'dismiss'>(resolve => {
@@ -128,7 +157,7 @@ export function alertSaveError(message: string) {
     overlay.innerHTML = `<div class="name-dialog save-error-dialog" role="alertdialog" aria-labelledby="save-error-title" aria-describedby="save-error-body">
       <h2 id="save-error-title">保存失败</h2>
       <p id="save-error-body" class="save-error-body"></p>
-      <p class="save-error-hint">内容仍保留在当前编辑器中。请确认 office-api / 数据库已启动后重试，勿直接关闭页面以免丢失未同步内容。</p>
+      <p class="save-error-hint">内容仍保留在当前编辑器中。请确认 office-backend / 数据库已启动后重试，勿直接关闭页面以免丢失未同步内容。</p>
       <div class="dialog-actions">
         <button type="button" data-dismiss>知道了</button>
         <button type="button" class="primary" data-retry>重试保存</button>
@@ -158,7 +187,7 @@ export async function openAccountDialog(email: string) {
       <input id="access-token" readonly spellcheck="false">
       <button type="button" data-copy>复制</button>
     </div>
-    <p class="account-hint">令牌只用来找到你的登录邮箱账号。项目和表格挂在该账号下，重新生成令牌不会丢掉资产，但旧令牌立即失效，请重新下载 skill。</p>
+    <p class="account-hint">令牌是外部 Agent 访问的身份验证方式，请妥善保管，重新生成令牌后，需更新外部 Agent Skill 。</p>
     <div class="dialog-actions account-actions">
       <button type="button" data-rotate>重新生成</button>
     </div>
@@ -231,16 +260,19 @@ export interface NavHandlers {
   onNewAsset: (kind: Kind) => void;
   onRenameAsset: (kind: Kind, id: string) => void;
   onDeletePdf: (id: string) => Promise<boolean>;
+  onDeleteAsset: (kind: Kind, id: string) => void;
   onSelectProject: (id: string) => void;
   onNewProject: () => void;
   onRenameProject: (id: string) => void;
   onLogout: () => void;
+  onOpenCalc: () => void;
+  onOpenNotebook: () => void;
 }
 
 function closeMenus(event?: Event) {
   if (event?.target instanceof Element && event.target.closest('.split-tab')) return;
   document.querySelectorAll<HTMLElement>('.menu').forEach(menu => { menu.hidden = true; });
-  document.querySelectorAll<HTMLButtonElement>('[data-caret]').forEach(btn => btn.setAttribute('aria-expanded', 'false'));
+  document.querySelectorAll<HTMLButtonElement>('[data-caret], #settings-btn').forEach(btn => btn.setAttribute('aria-expanded', 'false'));
 }
 if (!('officeMenuBound' in document)) {
   document.addEventListener('click', closeMenus);
@@ -474,18 +506,80 @@ function iconButton(icon: string, label: string, run: () => void) {
   return button;
 }
 
+let titleCopyNotice: HTMLElement | null = null;
+let titleCopyNoticeTimer: ReturnType<typeof window.setTimeout> | undefined;
+
+function showTitleCopyNotice(text: string) {
+  if (!titleCopyNotice) {
+    titleCopyNotice = document.createElement('div');
+    titleCopyNotice.className = 'title-copy-notice';
+    titleCopyNotice.setAttribute('role', 'status');
+    titleCopyNotice.setAttribute('aria-live', 'polite');
+    document.body.append(titleCopyNotice);
+  }
+
+  titleCopyNotice.textContent = `已复制：${text}`;
+  titleCopyNotice.hidden = false;
+
+  if (titleCopyNoticeTimer !== undefined) {
+    window.clearTimeout(titleCopyNoticeTimer);
+  }
+  titleCopyNoticeTimer = window.setTimeout(() => {
+    if (titleCopyNotice) titleCopyNotice.hidden = true;
+  }, 1800);
+}
+
+async function copyTitlePath(button: HTMLButtonElement, text: string) {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+    } else {
+      const input = document.createElement('textarea');
+      input.value = text;
+      input.setAttribute('readonly', '');
+      input.style.cssText = 'position:fixed;opacity:0;pointer-events:none';
+      document.body.append(input);
+      input.select();
+      const copied = document.execCommand('copy');
+      input.remove();
+      if (!copied) throw new Error('浏览器未允许复制。');
+    }
+    const title = button.title;
+    button.title = '已复制';
+    showTitleCopyNotice(text);
+    window.setTimeout(() => { button.title = title; }, 1200);
+  } catch (error) {
+    window.dispatchEvent(new CustomEvent('office-error', {
+      detail: error instanceof Error ? `复制失败：${error.message}` : '复制失败。',
+    }));
+  }
+}
+
+function titleCopyButton(text: string, label: string) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'menu-edit';
+  button.title = label;
+  button.setAttribute('aria-label', label);
+  button.innerHTML = '<i data-lucide="copy"></i>';
+  button.addEventListener('click', event => {
+    event.stopPropagation();
+    void copyTitlePath(button, text);
+  });
+  return button;
+}
+
 export function renderNav(workspace: Workspace, surface: Kind, handlers: NavHandlers) {
   const left = document.querySelector('.workspace-nav')!;
   const right = document.querySelector('.account-nav')!;
-  left.replaceChildren(...(['sheet', 'document', 'pdf', 'mindmap', 'calendar'] as Kind[]).map(kind => {
+  left.replaceChildren(...(['pdf', 'sheet', 'mindmap', 'document', 'research', 'diagram'] as Kind[]).map(kind => {
     const wrap = document.createElement('div');
     wrap.className = 'split-tab';
     wrap.dataset.kind = kind;
     const items = workspace.assets[kind];
     const current = workspace.selected[kind];
     const label = current?.name || LABELS[kind];
-    wrap.innerHTML = `<button role="tab" data-tab="${kind}" aria-selected="${surface === kind}" aria-label="${LABELS[kind]}"><i data-lucide="${kindIcon(kind)}"></i><span class="tab-label"></span></button>
-      <button data-caret="${kind}" aria-label="${LABELS[kind]}列表" aria-expanded="false"><i data-lucide="chevron-down"></i></button>
+    wrap.innerHTML = `<button role="tab" data-tab="${kind}" aria-selected="${surface === kind}" aria-label="${LABELS[kind]}"><i data-lucide="${kindIcon(kind)}"></i><span class="tab-label"></span></button><button data-caret="${kind}" aria-label="${LABELS[kind]}列表" aria-expanded="false"><i data-lucide="chevron-down"></i></button>
       <div class="menu" hidden></div>`;
     const tab = wrap.querySelector<HTMLButtonElement>('[data-tab]')!;
     tab.querySelector('.tab-label')!.textContent = label;
@@ -500,11 +594,7 @@ export function renderNav(workspace: Workspace, surface: Kind, handlers: NavHand
       button.type = 'button';
       button.dataset.assetId = asset.id;
       button.className = current?.id === asset.id ? 'active' : '';
-      button.textContent = asset.kind === 'calendar' && asset.scope === 'project'
-        ? `${asset.name}（项目）`
-        : asset.kind === 'calendar' && asset.scope === 'personal'
-          ? `${asset.name}（日常）`
-          : asset.name;
+      button.textContent = asset.name;
       const edit = document.createElement('button');
       edit.type = 'button';
       edit.className = 'menu-edit';
@@ -512,7 +602,32 @@ export function renderNav(workspace: Workspace, surface: Kind, handlers: NavHand
       edit.title = '重命名';
       edit.setAttribute('aria-label', `重命名 ${asset.name}`);
       edit.innerHTML = '<i data-lucide="pencil"></i>';
-      row.append(button, edit);
+      const copy = (kind === 'sheet' || kind === 'document' || kind === 'mindmap')
+        ? titleCopyButton(`${workspace.project.name}-${asset.name}`, `复制 ${LABELS[kind]}定位标题`)
+        : null;
+      if (kind === 'document') {
+        const name = document.createElement('span');
+        name.textContent = asset.name;
+        button.textContent = '';
+        button.append(name);
+        const scope = document.createElement('small');
+        scope.className = 'asset-visibility';
+        scope.textContent = asset.placement === 'user' ? '我可见' : '项目可见';
+        button.append(scope);
+        const remove = document.createElement('button');
+        remove.type = 'button';
+        remove.className = 'menu-edit menu-delete';
+        remove.dataset.deleteAsset = asset.id;
+        remove.title = '删除';
+        remove.setAttribute('aria-label', `删除 ${asset.name}`);
+        remove.innerHTML = '<i data-lucide="trash-2"></i>';
+        row.append(button, edit);
+        if (copy) row.append(copy);
+        row.append(remove);
+      } else {
+        row.append(button, edit);
+        if (copy) row.append(copy);
+      }
       menu.append(row);
     });
     const create = document.createElement('button');
@@ -523,19 +638,28 @@ export function renderNav(workspace: Workspace, surface: Kind, handlers: NavHand
     menu.append(create);
     return wrap;
   }));
-  right.innerHTML = `<button type="button" id="open-calc" title="计算器" aria-label="计算器"><i data-lucide="calculator"></i></button>
+  right.innerHTML = `<div class="tool-group"><button type="button" id="open-calc" title="计算器" aria-label="计算器"><i data-lucide="calculator"></i></button><button type="button" id="open-calendar" data-tab="calendar" title="计划" aria-label="计划" aria-selected="${surface === 'calendar'}"><i data-lucide="calendar-days"></i></button><button type="button" id="open-notebook" title="笔记本" aria-label="笔记本"><i data-lucide="notebook-pen"></i></button></div>
     <div class="split-tab project-tab">
-      <button id="project-current" type="button" title="当前项目"></button>
-      <button data-caret="project" aria-label="项目列表" aria-expanded="false"><i data-lucide="chevron-down"></i></button>
+      <button id="project-current" type="button" title="当前项目"></button><button data-caret="project" aria-label="项目列表" aria-expanded="false"><i data-lucide="chevron-down"></i></button>
       <div class="menu menu-right" hidden></div>
     </div>
-    <button type="button" class="user-email" id="account-btn" title="查看访问令牌"></button>
-    <button id="logout" type="button">退出</button>`;
+    <div class="split-tab settings-tab">
+      <button id="settings-btn" type="button" aria-haspopup="menu" aria-expanded="false"><i data-lucide="settings"></i><span>设置</span><i data-lucide="chevron-down" class="settings-chevron"></i></button>
+      <div class="menu menu-right settings-menu" role="menu" hidden>
+        <button type="button" id="account-btn" role="menuitem"><i data-lucide="user-round"></i><span class="settings-item-copy"><span>账号</span><small class="user-email"></small></span></button>
+        <button id="logout" type="button" role="menuitem" class="settings-logout"><i data-lucide="log-out"></i><span>退出</span></button>
+      </div>
+    </div>`;
+  right.querySelector<HTMLButtonElement>('#open-notebook')!.onclick = event => {
+    event.stopPropagation();
+    closeMenus();
+    handlers.onOpenNotebook();
+  };
   right.querySelector('#project-current')!.textContent = workspace.project.name;
-  const email = right.querySelector<HTMLButtonElement>('#account-btn')!;
-  email.title = workspace.user.email;
-  email.textContent = workspace.user.email;
-  const projectMenu = right.querySelector<HTMLElement>('.menu')!;
+  const account = right.querySelector<HTMLButtonElement>('#account-btn')!;
+  account.title = `账号：${workspace.user.email}`;
+  account.querySelector<HTMLElement>('.user-email')!.textContent = workspace.user.email;
+  const projectMenu = right.querySelector<HTMLElement>('.project-tab .menu')!;
   workspace.projects.forEach(project => {
     const row = document.createElement('div');
     row.className = 'menu-row';
@@ -551,7 +675,8 @@ export function renderNav(workspace: Workspace, surface: Kind, handlers: NavHand
     edit.title = '重命名';
     edit.setAttribute('aria-label', `重命名 ${project.name}`);
     edit.innerHTML = '<i data-lucide="pencil"></i>';
-    row.append(button, edit);
+    const copy = titleCopyButton(project.name, '复制项目定位标题');
+    row.append(button, edit, copy);
     projectMenu.append(row);
   });
   const addProject = document.createElement('button');
@@ -562,7 +687,7 @@ export function renderNav(workspace: Workspace, surface: Kind, handlers: NavHand
   projectMenu.append(addProject);
   createIcons({ icons });
 
-  left.querySelectorAll<HTMLButtonElement>('[data-tab]').forEach(button => {
+  document.querySelectorAll<HTMLButtonElement>('header [data-tab]').forEach(button => {
     button.onclick = () => handlers.onSurface(button.dataset.tab as Kind);
   });
   document.querySelectorAll<HTMLButtonElement>('[data-caret]').forEach(button => {
@@ -575,22 +700,30 @@ export function renderNav(workspace: Workspace, surface: Kind, handlers: NavHand
       button.setAttribute('aria-expanded', String(open));
     };
   });
-  left.querySelectorAll<HTMLButtonElement>('[data-asset-id]').forEach(button => {
+  document.querySelectorAll<HTMLButtonElement>('header [data-asset-id]').forEach(button => {
     button.onclick = () => {
       const kind = button.closest<HTMLElement>('.split-tab')!.dataset.kind as Kind;
       closeMenus();
       handlers.onSelectAsset(kind, button.dataset.assetId!);
     };
   });
-  left.querySelectorAll<HTMLButtonElement>('[data-new]').forEach(button => {
+  document.querySelectorAll<HTMLButtonElement>('header [data-new]').forEach(button => {
     button.onclick = () => { closeMenus(); handlers.onNewAsset(button.dataset.new as Kind); };
   });
-  left.querySelectorAll<HTMLButtonElement>('[data-rename-asset]').forEach(button => {
+  document.querySelectorAll<HTMLButtonElement>('header [data-rename-asset]').forEach(button => {
     button.onclick = e => {
       e.stopPropagation();
       const kind = button.closest<HTMLElement>('.split-tab')!.dataset.kind as Kind;
       closeMenus();
       handlers.onRenameAsset(kind, button.dataset.renameAsset!);
+    };
+  });
+  document.querySelectorAll<HTMLButtonElement>('header [data-delete-asset]').forEach(button => {
+    button.onclick = e => {
+      e.stopPropagation();
+      const kind = button.closest<HTMLElement>('.split-tab')!.dataset.kind as Kind;
+      closeMenus();
+      handlers.onDeleteAsset(kind, button.dataset.deleteAsset!);
     };
   });
   right.querySelectorAll<HTMLButtonElement>('[data-project-id]').forEach(button => {
@@ -603,11 +736,20 @@ export function renderNav(workspace: Workspace, surface: Kind, handlers: NavHand
       handlers.onRenameProject(button.dataset.renameProject!);
     };
   });
-  right.querySelector<HTMLButtonElement>('#open-calc')!.onclick = () => { closeMenus(); openCalcWindow(); };
+  right.querySelector<HTMLButtonElement>('#open-calc')!.onclick = () => { closeMenus(); handlers.onOpenCalc(); };
   right.querySelector<HTMLButtonElement>('#project-current')!.onclick = () => {
     right.querySelector<HTMLButtonElement>('[data-caret="project"]')!.click();
   };
   right.querySelector<HTMLButtonElement>('#new-project')!.onclick = () => { closeMenus(); handlers.onNewProject(); };
-  email.onclick = () => { closeMenus(); void openAccountDialog(workspace.user.email); };
-  right.querySelector<HTMLButtonElement>('#logout')!.onclick = () => handlers.onLogout();
+  const settings = right.querySelector<HTMLButtonElement>('#settings-btn')!;
+  settings.onclick = e => {
+    e.stopPropagation();
+    const menu = right.querySelector<HTMLElement>('.settings-menu')!;
+    const open = menu.hidden;
+    closeMenus();
+    menu.hidden = !open;
+    settings.setAttribute('aria-expanded', String(open));
+  };
+  account.onclick = () => { closeMenus(); void openAccountDialog(workspace.user.email); };
+  right.querySelector<HTMLButtonElement>('#logout')!.onclick = () => { closeMenus(); handlers.onLogout(); };
 }

@@ -45,6 +45,6 @@ Return shape: `{ engine, query, topic?, results:[{title,link,snippet}], quota }`
 
 1. Call at most a few searches; refine `query` rather than dumping raw results.
 2. Quote links in Markdown when citing.
-3. Do not scrape SERP HTML — only these MCP tools.
+3. Do not scrape SERP HTML. Reading one result page is `read_web_page` on `/mcp/local-tools`, a separate MCP.
 4. Answer layout (section headings, PDF-only structure, etc.) belongs in the
    calling topic skill, not in this common fragment.

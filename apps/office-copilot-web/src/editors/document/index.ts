@@ -1,102 +1,64 @@
-import { Editor, Extension } from '@tiptap/core';
-import { BulletList } from '@tiptap/extension-list';
+import { Editor, Mark } from '@tiptap/core';
+import { createIcons, icons } from 'lucide';
+import Link from '@tiptap/extension-link';
 import StarterKit from '@tiptap/starter-kit';
 import { download, type EditorAdapter } from '../../context/types';
+import { circleBullet, listStack, nestedListTab, nestUnderNumber } from '../rich-text-lists';
 import { formattedInsertHtml } from './markdown';
 import { openDigestJobDialog, type DigestJob } from './digest-job-dialog';
+import { bindSkillMenu, type DocumentSkill, type SkillType } from './skill-menu';
 
 const FALLBACK = { type: 'doc', content: [{ type: 'paragraph' }] };
 
-function listStack(editor: Editor) {
-  const names: string[] = [];
-  const $from = editor.state.selection.$from;
-  for (let depth = $from.depth; depth > 0; depth -= 1) {
-    const name = $from.node(depth).type.name;
-    if (name === 'orderedList' || name === 'bulletList') names.push(name);
-  }
-  return names.reverse();
-}
+const smallText = Mark.create({
+  name: 'small',
+  parseHTML: () => [{ tag: 'span.doc-small' }],
+  renderHTML: () => ['span', { class: 'doc-small' }, 0],
+});
 
-const circleBullet = BulletList.extend({
+const documentHighlight = Mark.create({
+  name: 'highlight',
+  parseHTML: () => [{ tag: 'mark.document-highlight' }],
+  renderHTML: () => ['mark', { class: 'document-highlight' }, 0],
+});
+
+const documentComment = Mark.create({
+  name: 'comment',
   addAttributes() {
     return {
-      ...this.parent?.(),
-      marker: {
-        default: null,
-        parseHTML: element => element.getAttribute('data-marker'),
-        renderHTML: attributes => (attributes.marker ? { 'data-marker': attributes.marker } : {}),
-      },
+      id: { default: null },
+      text: { default: '' },
     };
   },
+  parseHTML: () => [{
+    tag: 'span.document-comment[data-comment-id]',
+    getAttrs: element => ({
+      id: (element as HTMLElement).dataset.commentId || null,
+      text: (element as HTMLElement).dataset.commentText || '',
+    }),
+  }],
+  renderHTML: ({ HTMLAttributes }) => ['span', {
+    class: 'document-comment',
+    'data-comment-id': HTMLAttributes.id,
+    'data-comment-text': HTMLAttributes.text,
+    title: '批注',
+  }, 0],
 });
 
-function innermostBullet(editor: Editor) {
-  const $from = editor.state.selection.$from;
-  for (let depth = $from.depth; depth > 0; depth -= 1) {
-    const node = $from.node(depth);
-    if (node.type.name === 'bulletList') return { depth, node };
-  }
-  return null;
-}
-
-function setBulletMarker(editor: Editor, marker: 'circle' | null) {
-  return editor.commands.command(({ tr, state }) => {
-    const $from = state.selection.$from;
-    for (let depth = $from.depth; depth > 0; depth -= 1) {
-      const node = $from.node(depth);
-      if (node.type.name !== 'bulletList') continue;
-      tr.setNodeMarkup(tr.mapping.map($from.before(depth)), undefined, { ...node.attrs, marker });
-      return true;
-    }
-    return false;
-  });
-}
-
-/** 编号为第一级；Tab 变成实心圆点，再 Tab 变成空心圆。 */
-function nestUnderNumber(editor: Editor) {
-  const stack = listStack(editor);
-  if (!stack.length) return false;
-  const depth = stack.length;
-  const inner = stack[depth - 1];
-  if (inner === 'orderedList' && depth === 1) {
-    return editor.chain().sinkListItem('listItem').command(({ tr, state }) => {
-      const $from = tr.selection.$from;
-      for (let d = $from.depth; d > 0; d -= 1) {
-        if ($from.node(d).type.name !== 'orderedList') continue;
-        tr.setNodeMarkup($from.before(d), state.schema.nodes.bulletList);
-        return true;
-      }
-      return false;
-    }).run();
-  }
-  if (inner === 'bulletList' && stack.filter(name => name === 'bulletList').length === 1) {
-    if (innermostBullet(editor)?.node.attrs.marker === 'circle') return true;
-    return setBulletMarker(editor, 'circle');
-  }
-  return true;
-}
-
-function liftNestedList(editor: Editor) {
-  const bullet = innermostBullet(editor);
-  if (bullet?.node.attrs.marker === 'circle') return setBulletMarker(editor, null);
-  return editor.commands.liftListItem('listItem');
-}
-
-const nestedListTab = Extension.create({
-  name: 'nestedListTab',
-  priority: 1000,
-  addKeyboardShortcuts() {
-    return {
-      Tab: () => nestUnderNumber(this.editor),
-      'Shift-Tab': () => liftNestedList(this.editor),
-    };
-  },
-});
+export type DocumentSkillHooks = {
+  types: () => Promise<SkillType[]>;
+  list: (documentId: string) => Promise<DocumentSkill[]>;
+  save: (documentId: string, skill: { id?: string; name: string; type: string; params: Record<string, string> }) => Promise<DocumentSkill>;
+  remove: (documentId: string, skillId: string) => Promise<void>;
+  run: (documentId: string, skillId: string, onEvent: (event: Record<string, any>) => void) => Promise<void>;
+  reloadDocument: (documentId: string) => Promise<void>;
+  searchSecurities: (query: string) => Promise<{ items: { ticker_code: string; name: string }[] }>;
+};
 
 export type DocumentDigestHooks = {
   getJob: (documentId: string) => Promise<DigestJob>;
   saveJob: (documentId: string, job: DigestJob) => Promise<DigestJob>;
-  runJob: (documentId: string) => Promise<{ title?: string; warnings?: string[] }>;
+  runJob: (documentId: string, onEvent: (event: Record<string, any>) => void) => Promise<void>;
   reloadDocument: (documentId: string) => Promise<void>;
 };
 
@@ -105,12 +67,21 @@ export function mountDocument(
   changed: () => void,
   onDirty: (content: unknown) => void,
   digest?: DocumentDigestHooks,
+  skills?: DocumentSkillHooks,
 ): EditorAdapter {
   let revision = 0;
   let assetId = '';
   let loading = false;
   const editor = new Editor({
-    element: container, extensions: [StarterKit.configure({ bulletList: false }), circleBullet, nestedListTab], content: FALLBACK,
+    element: container, extensions: [
+      StarterKit.configure({ bulletList: false }),
+      Link.configure({ openOnClick: true, autolink: true, defaultProtocol: 'https', HTMLAttributes: { target: '_blank', rel: 'noopener noreferrer' } }),
+      smallText,
+      documentHighlight,
+      documentComment,
+      circleBullet,
+      nestedListTab,
+    ], content: FALLBACK,
     onSelectionUpdate: changed,
     onUpdate() {
       if (loading || !assetId) return;
@@ -119,6 +90,70 @@ export function mountDocument(
       changed();
     },
   });
+  const currentComment = () => editor.getAttributes('comment') as { id?: string; text?: string };
+  const openCommentDialog = (existing?: { id?: string; text?: string }) => {
+    if (editor.state.selection.empty) {
+      window.dispatchEvent(new CustomEvent('office-error', { detail: '请先选择需要批注的文字。' }));
+      return;
+    }
+    const overlay = document.createElement('div');
+    overlay.className = 'dialog-overlay document-comment-overlay';
+    const dialog = document.createElement('form');
+    dialog.className = 'document-comment-dialog';
+    dialog.innerHTML = `
+      <h2>批注</h2>
+      <textarea maxlength="2000" placeholder="输入批注内容" aria-label="批注内容"></textarea>
+      <div class="dialog-actions">
+        <button type="button" data-remove ${existing?.id ? '' : 'hidden'}>删除批注</button>
+        <button type="button" data-cancel>取消</button>
+        <button type="submit" class="primary">保存</button>
+      </div>`;
+    const input = dialog.querySelector<HTMLTextAreaElement>('textarea')!;
+    input.value = existing?.text || '';
+    const close = () => overlay.remove();
+    dialog.querySelector<HTMLButtonElement>('[data-cancel]')!.onclick = close;
+    dialog.querySelector<HTMLButtonElement>('[data-remove]')!.onclick = () => {
+      editor.chain().focus().unsetMark('comment').run();
+      close();
+    };
+    dialog.onsubmit = event => {
+      event.preventDefault();
+      const text = input.value.trim();
+      if (!text) {
+        input.setCustomValidity('请输入批注内容。');
+        input.reportValidity();
+        return;
+      }
+      editor.chain().focus().setMark('comment', {
+        id: existing?.id || `comment-${crypto.randomUUID()}`,
+        text,
+      }).run();
+      close();
+    };
+    overlay.onclick = event => { if (event.target === overlay) close(); };
+    overlay.append(dialog);
+    document.body.append(overlay);
+    input.focus();
+  };
+  editor.view.dom.addEventListener('click', event => {
+    const target = (event.target as HTMLElement).closest<HTMLElement>('.document-comment[data-comment-id]');
+    if (!target) return;
+    window.setTimeout(() => {
+      editor.chain().focus().extendMarkRange('comment').run();
+      openCommentDialog({ id: target.dataset.commentId, text: target.dataset.commentText });
+    });
+  });
+  const toolbar = container.parentElement!.querySelector<HTMLElement>('.format-bar');
+  if (toolbar && !toolbar.querySelector('[data-format="comment"]')) {
+    const commentButton = document.createElement('button');
+    commentButton.type = 'button';
+    commentButton.dataset.format = 'comment';
+    commentButton.title = '添加或编辑批注';
+    commentButton.setAttribute('aria-label', '批注');
+    commentButton.innerHTML = '<i data-lucide="message-square-plus"></i>';
+    toolbar.querySelector('[data-format="highlight"]')?.after(commentButton);
+    createIcons({ icons });
+  }
   container.parentElement!.querySelectorAll<HTMLButtonElement>('[data-format]').forEach(button => {
     button.addEventListener('mousedown', e => e.preventDefault());
     button.onclick = () => {
@@ -127,6 +162,11 @@ export function mountDocument(
       if (format === 'bold') chain.toggleBold().run();
       if (format === 'italic') chain.toggleItalic().run();
       if (format === 'strike') chain.toggleStrike().run();
+      if (format === 'highlight') chain.toggleMark('highlight').run();
+      if (format === 'comment') {
+        const comment = currentComment();
+        openCommentDialog(comment.id ? comment : undefined);
+      }
       if (format === 'code') chain.toggleCode().run();
       if (format === 'h1') chain.toggleHeading({ level: 1 }).run();
       if (format === 'heading') chain.toggleHeading({ level: 2 }).run();
@@ -141,6 +181,34 @@ export function mountDocument(
       if (format === 'rule') chain.setHorizontalRule().run();
     };
   });
+  const skillBtn = container.parentElement!.querySelector<HTMLButtonElement>('[data-my-skills]');
+  if (skillBtn && skills) {
+    bindSkillMenu(skillBtn, {
+      types: () => skills.types(),
+      list: () => {
+        if (!assetId) throw new Error('请先打开一篇文档。');
+        return skills.list(assetId);
+      },
+      save: body => {
+        if (!assetId) throw new Error('请先打开一篇文档。');
+        return skills.save(assetId, body);
+      },
+      remove: id => {
+        if (!assetId) throw new Error('请先打开一篇文档。');
+        return skills.remove(assetId, id);
+      },
+      run: (id, onEvent) => {
+        if (!assetId) throw new Error('请先打开一篇文档。');
+        return skills.run(assetId, id, onEvent);
+      },
+      reloadDocument: async (nextId?: string) => {
+        const target = nextId || assetId;
+        if (!target) return;
+        await skills.reloadDocument(target);
+      },
+      searchSecurities: query => skills.searchSecurities(query),
+    });
+  }
   const digestBtn = container.parentElement!.querySelector<HTMLButtonElement>('[data-digest-job]');
   if (digestBtn && digest) {
     digestBtn.addEventListener('mousedown', e => e.preventDefault());
@@ -152,9 +220,9 @@ export function mountDocument(
       void openDigestJobDialog({
         load: () => digest.getJob(assetId),
         save: job => digest.saveJob(assetId, job),
-        run: () => digest.runJob(assetId),
-        reloadDocument: async () => {
-          await digest.reloadDocument(assetId);
+        run: onEvent => digest.runJob(assetId, onEvent),
+        reloadDocument: async (nextId?: string) => {
+          await digest.reloadDocument(nextId || assetId);
         },
       }).catch(e => {
         window.dispatchEvent(new CustomEvent('office-error', { detail: e instanceof Error ? e.message : String(e) }));

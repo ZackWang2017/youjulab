@@ -1,5 +1,6 @@
 import { historyForApi, isAiAskContent, parseAskThread, serializeAskThread, type AskThread, type AskTurn } from './ask-ai';
 import { markdownToHtml } from '../document/markdown';
+import { appendThinkingBlock } from '../../ui/thinking-status';
 
 type AskAiHooks = {
   userName: string;
@@ -193,33 +194,7 @@ export function openAskAiDialog(args: AskAiOpenArgs, hooks: AskAiHooks) {
     }
 
     function appendThinking(card: HTMLElement, text: string, live: boolean, open: boolean) {
-      const block = document.createElement('div');
-      block.className = 'assistant-thinking';
-      block.dataset.live = live ? 'true' : 'false';
-      block.dataset.open = open ? 'true' : 'false';
-      const toggle = document.createElement('button');
-      toggle.type = 'button';
-      toggle.className = 'assistant-thinking-toggle';
-      const chevron = document.createElement('span');
-      chevron.className = 'assistant-thinking-chevron';
-      chevron.textContent = '›';
-      const dot = document.createElement('span');
-      dot.className = 'assistant-thinking-dot';
-      const label = document.createElement('span');
-      label.textContent = live ? 'Thinking' : 'Thought';
-      toggle.append(chevron, dot, label);
-      const body = document.createElement('div');
-      body.className = 'assistant-thinking-body';
-      body.textContent = text;
-      toggle.onclick = () => {
-        const next = block.dataset.open !== 'true';
-        block.dataset.open = next ? 'true' : 'false';
-        if (next) body.scrollTop = body.scrollHeight;
-      };
-      block.append(toggle);
-      if (text.trim()) block.append(body);
-      card.append(block);
-      if (open && text.trim()) body.scrollTop = body.scrollHeight;
+      appendThinkingBlock(card, text, { live, open });
     }
 
     function renderThread(streaming?: { speaker: string; text: string; thinking?: string; live?: boolean }) {

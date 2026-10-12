@@ -11,15 +11,15 @@ export interface User {
 export interface Project { id: string; name: string; created_at: string; updated_at: string; }
 export interface Asset {
   id: string;
-  project_id: string;
-  kind: Kind;
+  project_id: string | null;
+  kind: Kind | 'calc' | 'notebook';
   name: string;
   revision: number;
   updated_at: string;
   filename?: string | null;
   size?: number | null;
   content?: any;
-  scope?: 'personal' | 'project' | null;
+  placement?: 'user' | 'project';
 }
 export interface Workspace {
   user: User;
@@ -27,9 +27,11 @@ export interface Workspace {
   project: Project;
   assets: Record<Kind, Asset[]>;
   selected: Record<Kind, Asset | null>;
+  calc: Asset | null;
+  notebook: Asset | null;
 }
 
-const KINDS: Kind[] = ['sheet', 'document', 'pdf', 'mindmap', 'calendar'];
+const KINDS: Kind[] = ['sheet', 'document', 'pdf', 'mindmap', 'research', 'diagram', 'calendar'];
 const serverRevision = new Map<string, number>();
 let queued: { id: string; content: unknown } | null = null;
 let saveTimer: ReturnType<typeof setTimeout> | undefined;
@@ -51,12 +53,19 @@ export async function flushSave() {
   if (!job) return saving;
   saving = saving.then(async () => {
     try {
-      const saved = await office.json<Asset>(`/assets/${job.id}`, {
+      const saved = await office.json<Asset & { archived_name?: string }>(`/assets/${job.id}`, {
         method: 'PUT',
         body: JSON.stringify({ content: job.content, revision: serverRevision.get(job.id) ?? 0 }),
       });
-      serverRevision.set(job.id, saved.revision);
+      serverRevision.set(saved.id, saved.revision);
       saveFailed = false;
+      if (saved.id !== job.id) {
+        queued = null;
+        window.dispatchEvent(new CustomEvent('office-document-replaced', {
+          detail: { id: saved.id, archived_name: saved.archived_name || '' },
+        }));
+        return;
+      }
       window.dispatchEvent(new CustomEvent('office-saved'));
     } catch (e) {
       // 没有更新的排队内容时，把失败任务放回，便于重试、避免丢稿
@@ -88,12 +97,24 @@ async function loadAssets(projectId: string) {
     document: [] as Asset[],
     pdf: [] as Asset[],
     mindmap: [] as Asset[],
+    research: [] as Asset[],
+    diagram: [] as Asset[],
     calendar: [] as Asset[],
   };
   await Promise.all(KINDS.map(async kind => {
     assets[kind] = (await office.json<{ assets: Asset[] }>(`/projects/${projectId}/assets?kind=${kind}`)).assets;
   }));
   return assets;
+}
+
+async function loadUserTool(projectId: string, kind: 'calc' | 'notebook') {
+  try {
+    const listed = (await office.json<{ assets: Asset[] }>(`/projects/${projectId}/assets?kind=${kind}`)).assets[0];
+    if (!listed) return null;
+    return getAsset(listed.id);
+  } catch {
+    return null;
+  }
 }
 
 function pick(list: Asset[], last: string | null) {
@@ -106,6 +127,8 @@ function selectedFrom(assets: Record<Kind, Asset[]>, last: Record<Kind, string |
     document: pick(assets.document, last.document),
     pdf: pick(assets.pdf, last.pdf),
     mindmap: pick(assets.mindmap, last.mindmap),
+    research: pick(assets.research, last.research),
+    diagram: pick(assets.diagram, last.diagram),
     calendar: pick(assets.calendar, last.calendar),
   };
 }
@@ -122,6 +145,8 @@ export async function bootstrap(): Promise<Workspace> {
   return {
     user, projects, project, assets,
     selected: selectedFrom(assets, user.last_assets),
+    calc: await loadUserTool(project.id, 'calc'),
+    notebook: await loadUserTool(project.id, 'notebook'),
   };
 }
 
@@ -155,6 +180,8 @@ export async function selectProject(id: string) {
   return {
     user, projects, project, assets,
     selected: selectedFrom(assets, user.last_assets),
+    calc: await loadUserTool(id, 'calc'),
+    notebook: await loadUserTool(id, 'notebook'),
   } satisfies Workspace;
 }
 
@@ -179,15 +206,9 @@ export async function createProject(name: string) {
   return selectProject(project.id);
 }
 
-export async function createAsset(
-  projectId: string,
-  kind: Kind,
-  name: string,
-  options?: { scope?: 'personal' | 'project' },
-) {
+export async function createAsset(projectId: string, kind: Kind, name: string, visibility: 'project' | 'user' = 'project') {
   await flushSaveSoft();
-  const body: { kind: Kind; name: string; scope?: 'personal' | 'project' } = { kind, name };
-  if (kind === 'calendar') body.scope = options?.scope || 'personal';
+  const body: { kind: Kind; name: string; visibility: 'project' | 'user' } = { kind, name, visibility };
   const asset = await office.json<Asset>(`/projects/${projectId}/assets`, {
     method: 'POST', body: JSON.stringify(body),
   });
