@@ -26,3 +26,4 @@ private/
 *.db
 credentials.json
 **/weread-session.json
+*.swp
