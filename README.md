@@ -6,7 +6,7 @@
 
 | 服务 | 作用 | 默认地址 |
 | --- | --- | --- |
-| web | 浏览器工作区 | http://127.0.0.1:8080 |
+| web | 浏览器工作区 | http://www.youjulab.com 与 https://www.youjulab.com |
 | office-backend | 登录、项目、文档状态、模型编排 | 容器内 8100，经 `/office` 反代 |
 | mcp-server | 财务数据、资讯、表格/文档/导图存储、持仓 | 容器内 8000，经 `/backend` 反代 |
 | postgres | `finresearch` 业务库，以及带 pgvector 的 `office_vectors` | 仅容器网络 |
@@ -24,7 +24,7 @@ PDF 向量检索使用 embedding 服务，默认连宿主机 `http://host.docker
 
 脚本会检查本机是否已有数据库镜像，没有则拉取 `pgvector/pgvector:pg16` 和 `mongo:7`，再构建应用镜像（安装 Python 与前端依赖）并启动。首次构建需要下载依赖，时间会比较长。
 
-启动后打开 http://127.0.0.1:8080 ，注册邮箱账号即可使用。
+启动后打开 http://www.youjulab.com 或 https://www.youjulab.com ，注册邮箱账号即可使用。把域名解析到这台机器的 80 和 443。正式证书放在 `deploy/certs/fullchain.pem` 和 `deploy/certs/privkey.pem`；目录为空时容器会生成一张临时自签证书，浏览器会提示不受信任。
 
 常用参数：
 
@@ -48,7 +48,7 @@ docker compose down          # 停止并保留数据卷
 docker compose down -v       # 同时删除数据库和上传文件
 ```
 
-网页端口用 `WEB_PORT` 修改，默认 `8080`。
+网页端口用 `WEB_HTTP_PORT`（默认 80）和 `WEB_HTTPS_PORT`（默认 443）修改。
 
 ## 本机直接运行
 

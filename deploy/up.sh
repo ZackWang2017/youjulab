@@ -80,11 +80,11 @@ if ! "${compose[@]}" up -d --build --wait; then
   exit 1
 fi
 
-web_port="${WEB_PORT:-}"
+web_port="${WEB_HTTP_PORT:-}"
 if [[ -z "$web_port" ]]; then
-  web_port="$(grep -E '^[[:space:]]*WEB_PORT=' .env 2>/dev/null | tail -n 1 | cut -d= -f2- | tr -d '"' || true)"
+  web_port="$(grep -E '^[[:space:]]*WEB_HTTP_PORT=' .env 2>/dev/null | tail -n 1 | cut -d= -f2- | tr -d '"' || true)"
 fi
-web_port="${web_port:-8080}"
+web_port="${web_port:-80}"
 
 echo "等待 http://127.0.0.1:${web_port}/office/health"
 ready=0

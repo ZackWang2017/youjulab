@@ -116,7 +116,10 @@ services:
     environment:
       MCP_ACCESS_TOKEN: ${MCP_ACCESS_TOKEN:-invpdevstatic32tokenpleasechange}
     ports:
-      - "${WEB_PORT:-8080}:80"
+      - "${WEB_HTTP_PORT:-80}:80"
+      - "${WEB_HTTPS_PORT:-443}:443"
+    volumes:
+      - ${SSL_CERT_DIR:-./deploy/certs}:/etc/nginx/certs
     depends_on:
       office-backend:
         condition: service_healthy
