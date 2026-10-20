@@ -1,0 +1,145 @@
+name: youjulab
+
+# 数据库口令只放在 Compose 插值里，避免把本机 .env 的 127.0.0.1 地址带进容器。
+# 口令请使用 URL 安全字符。修改口令后需要删除对应数据卷再初始化。
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-youju}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-youju-dev-change-me}
+      POSTGRES_DB: finresearch
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./deploy/postgres/initdb.sh:/docker-entrypoint-initdb.d/01-office-vectors.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    restart: unless-stopped
+
+  mongo:
+    image: mongo:7
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_USER:-youju}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD:-youju-dev-change-me}
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "mongosh --quiet -u \"$$MONGO_INITDB_ROOT_USERNAME\" -p \"$$MONGO_INITDB_ROOT_PASSWORD\" --authenticationDatabase admin --eval 'db.adminCommand({ ping: 1 })'",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 15s
+    restart: unless-stopped
+
+  mcp-server:
+    build:
+      context: .
+      dockerfile: mcp-server/Dockerfile
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      FINANCE_MCP_TRANSPORT: http
+      FINANCE_MCP_HOST: 0.0.0.0
+      FINANCE_MCP_PORT: "8000"
+      FINANCE_DATABASE_URL: postgresql://${POSTGRES_USER:-youju}:${POSTGRES_PASSWORD:-youju-dev-change-me}@postgres:5432/finresearch
+      FINANCE_DB_HOST: postgres
+      FINANCE_DB_PORT: "5432"
+      FINANCE_DB_USER: ${POSTGRES_USER:-youju}
+      FINANCE_DB_PASSWORD: ${POSTGRES_PASSWORD:-youju-dev-change-me}
+      FINANCE_DB_NAME: finresearch
+      FINANCE_DB_ADMIN: postgres
+      OFFICE_PG_URL: postgresql://${POSTGRES_USER:-youju}:${POSTGRES_PASSWORD:-youju-dev-change-me}@postgres:5432/office_vectors
+      FINANCE_PDF_ROOT: /app/data
+      MCP_ACCESS_TOKEN: ${MCP_ACCESS_TOKEN:-invpdevstatic32tokenpleasechange}
+    volumes:
+      - mcp_data:/app/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 18
+      start_period: 25s
+    restart: unless-stopped
+
+  office-backend:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.office
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      OFFICE_API_HOST: 0.0.0.0
+      OFFICE_API_PORT: "8100"
+      OFFICE_MONGO_URL: mongodb://${MONGO_USER:-youju}:${MONGO_PASSWORD:-youju-dev-change-me}@mongo:27017/${OFFICE_MONGO_DB:-office}?authSource=admin
+      OFFICE_MONGO_DB: ${OFFICE_MONGO_DB:-office}
+      OFFICE_PG_URL: postgresql://${POSTGRES_USER:-youju}:${POSTGRES_PASSWORD:-youju-dev-change-me}@postgres:5432/office_vectors
+      OFFICE_FILE_ROOT: /data/office-files
+      FINANCE_MCP_BASE_URL: http://mcp-server:8000
+      OFFICE_EMBEDDING_BASE_URL: ${DOCKER_EMBEDDING_BASE_URL:-http://host.docker.internal:11434}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - office_files:/data/office-files
+    depends_on:
+      mongo:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      mcp-server:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8100/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 18
+      start_period: 20s
+    restart: unless-stopped
+
+  web:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.web
+    environment:
+      MCP_ACCESS_TOKEN: ${MCP_ACCESS_TOKEN:-invpdevstatic32tokenpleasechange}
+    ports:
+      - "${WEB_PORT:-8080}:80"
+    depends_on:
+      office-backend:
+        condition: service_healthy
+      mcp-server:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/office/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 18
+      start_period: 10s
+    restart: unless-stopped
+
+  ollama:
+    profiles: ["embedding"]
+    image: ollama/ollama:latest
+    volumes:
+      - ollama_data:/root/.ollama
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  mongo_data:
+  office_files:
+  mcp_data:
+  ollama_data:

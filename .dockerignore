@@ -1,0 +1,17 @@
+.git
+.venv
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/*.swp
+**/.DS_Store
+node_modules
+apps/office-copilot-web/dist
+apps/office-copilot-web/public/pdfjs
+data
+uploads
+.env
+private
+.cursor
+**/tests
+test-results

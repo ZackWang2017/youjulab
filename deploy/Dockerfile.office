@@ -1,0 +1,27 @@
+# 构建上下文是仓库根目录。
+FROM python:3.12-slim
+
+WORKDIR /app
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    OFFICE_API_HOST=0.0.0.0 \
+    OFFICE_API_PORT=8100 \
+    OFFICE_FILE_ROOT=/data/office-files
+
+COPY apps/office-backend/requirements.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir -r /tmp/requirements.txt
+
+COPY apps/office-backend /app/apps/office-backend
+COPY skills /app/skills
+COPY agents /app/agents
+COPY youju-skills /app/youju-skills
+COPY mcp-server/external-tools /app/mcp-server/external-tools
+COPY mcp-server/local-tools /app/mcp-server/local-tools
+
+RUN mkdir -p /data/office-files
+
+WORKDIR /app/apps/office-backend
+EXPOSE 8100
+
+CMD ["python", "server.py"]

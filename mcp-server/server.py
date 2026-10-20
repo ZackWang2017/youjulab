@@ -140,7 +140,16 @@ def _run_http() -> None:
     external_tools.mount_external_mcp(app, external_mcp)
     website_crawler_endpoint.mount_local_mcp(app, local_mcp)
 
+    async def health(_request):
+        return JSONResponse({"ok": True})
+
+    app.add_route("/health", health, methods=["GET"])
+
     async def guard(request, call_next):
+        if request.url.path == "/health":
+            response = await call_next(request)
+            response.headers.update(_CORS)
+            return response
         # CORS 预检
         if request.method == "OPTIONS":
             return JSONResponse({}, headers=_CORS)

@@ -42,7 +42,14 @@ def api_port() -> int:
 
 
 def mcp_http_base() -> str:
-    """mcp-server 的 HTTP 根地址。文档技能经 /api/documents/write 写回文档。"""
+    """mcp-server 的 HTTP 根地址。文档技能经 /api/documents/write 写回文档。
+
+    Docker Compose 设置 FINANCE_MCP_BASE_URL（例如 http://mcp-server:8000）。
+    未设置时仍按本机 FINANCE_MCP_HOST / FINANCE_MCP_PORT 拼接。
+    """
+    explicit = (os.environ.get("FINANCE_MCP_BASE_URL") or "").strip().rstrip("/")
+    if explicit:
+        return explicit
     host = (os.environ.get("FINANCE_MCP_HOST") or "127.0.0.1").strip() or "127.0.0.1"
     if host == "0.0.0.0":
         host = "127.0.0.1"

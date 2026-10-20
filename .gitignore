@@ -5,6 +5,8 @@ wewe-rss/
 __pycache__/
 *.pyc
 .env
+.env.*
+!.env.example
 uploads/
 data/
 backup/archives/
@@ -20,3 +22,7 @@ prompt
 docs/
 private/
 .cursor/
+*.sqlite
+*.db
+credentials.json
+**/weread-session.json
