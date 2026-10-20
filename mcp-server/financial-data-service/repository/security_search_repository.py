@@ -1,6 +1,8 @@
 """按名称或代码查询 securities 表。港股在表里是英文简称，中文名用行情联想补上后再回表核对。"""
 from __future__ import annotations
 
+import re
+
 import httpx
 
 from db.connection import get_connection
@@ -8,13 +10,18 @@ from db.connection import get_connection
 _SUGGEST_URL = "https://searchapi.eastmoney.com/api/suggest/get"
 _SUGGEST_TOKEN = "D43BF722C8E33BDC906FB84D85E326E8"
 _MARKETS = {"HK", "SH", "SZ", "BJ"}
+_SEARCHABLE_TYPES = ("股票", "基金")  # 美股 ETF 记为基金
+_US_CODE_RE = re.compile(r"^[A-Za-z]{1,6}$")
 
 
 def candidate_codes(text: str) -> list[str]:
     head = (text or "").strip().split(".", 1)[0]
-    if not head.isdigit():
-        return []
-    return list(dict.fromkeys((head, head.zfill(5), head.zfill(6))))
+    if head.isdigit():
+        return list(dict.fromkeys((head, head.zfill(5), head.zfill(6))))
+    if _US_CODE_RE.match(head):
+        # 美股 / ETF 代码，如 SPY、spy.us（仅 ASCII 字母，中文名不算）
+        return [head.upper()]
+    return []
 
 
 def search_securities(text: str, *, limit: int) -> list[dict]:
@@ -22,9 +29,9 @@ def search_securities(text: str, *, limit: int) -> list[dict]:
     like = f"%{_escape_like(text)}%"
     prefix = f"{_escape_like(text)}%"
     sql = """
-        SELECT ticker_code, name
+        SELECT ticker_code, name, security_type::text AS security_type
         FROM securities
-        WHERE security_type = '股票'
+        WHERE security_type = ANY(%s::security_type_enum[])
           AND (
             split_part(ticker_code, '.', 1) = ANY(%s::text[])
             OR ticker_code ILIKE %s
@@ -42,28 +49,26 @@ def search_securities(text: str, *, limit: int) -> list[dict]:
     """
     with get_connection() as conn:
         with conn.cursor() as cur:
-            cur.execute(sql, (codes, like, like, codes, prefix, limit))
-            return [
-                {"ticker_code": row["ticker_code"], "name": row["name"]}
-                for row in cur.fetchall()
-            ]
+            cur.execute(sql, (list(_SEARCHABLE_TYPES), codes, like, like, codes, prefix, limit))
+            return [_row(row) for row in cur.fetchall()]
 
 
 def fetch_by_tickers(tickers: list[str]) -> list[dict]:
     if not tickers:
         return []
     sql = """
-        SELECT ticker_code, name
+        SELECT ticker_code, name, security_type::text AS security_type
         FROM securities
         WHERE ticker_code = ANY(%s::text[])
     """
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(sql, (tickers,))
-            return [
-                {"ticker_code": row["ticker_code"], "name": row["name"]}
-                for row in cur.fetchall()
-            ]
+            return [_row(row) for row in cur.fetchall()]
+
+
+def _row(row) -> dict:
+    return {"ticker_code": row["ticker_code"], "name": row["name"], "security_type": row["security_type"]}
 
 
 def fetch_name_hints(text: str) -> list[dict]:

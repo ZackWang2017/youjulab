@@ -1,6 +1,7 @@
 /** 文档工具栏「我的技能」：下拉列出当前文档的技能，弹窗新增或修改。 */
 
 import { mountThinkingStatus } from '../../ui/thinking-status';
+import { office } from '../../office-client/client';
 
 export type SkillParamField = {
   key: string;
@@ -38,6 +39,13 @@ type Hooks = {
 };
 
 type PickedStock = { code: string; name: string };
+
+type WeReadLoginSession = {
+  session_id: string;
+  status: string;
+  qr_data_url: string;
+  error?: string;
+};
 
 function spreadLabel(label: HTMLElement) {
   const text = label.dataset.spread || label.textContent || '';
@@ -141,6 +149,76 @@ export function bindSkillMenu(button: HTMLButtonElement, hooks: Hooks) {
   });
 }
 
+function waitForWeReadLogin(initial: WeReadLoginSession): Promise<boolean> {
+  return new Promise(resolve => {
+    const overlay = document.createElement('div');
+    overlay.className = 'dialog-overlay weread-login-overlay';
+    overlay.innerHTML = `<div class="weread-login-dialog" role="dialog" aria-modal="true" aria-labelledby="weread-login-title">
+      <header><div><h2 id="weread-login-title">登录微信读书</h2><p>请使用微信扫描二维码，并在手机上确认。</p></div><button type="button" data-close title="关闭" aria-label="关闭">×</button></header>
+      <div class="weread-qr-wrap"><img data-qr alt="微信读书登录二维码"><p data-state>正在获取二维码…</p></div>
+      <footer><button type="button" data-retry hidden>重新获取二维码</button><button type="button" data-cancel>取消</button></footer>
+    </div>`;
+    document.body.append(overlay);
+    const image = overlay.querySelector<HTMLImageElement>('[data-qr]')!;
+    const state = overlay.querySelector<HTMLElement>('[data-state]')!;
+    const retry = overlay.querySelector<HTMLButtonElement>('[data-retry]')!;
+    let session = initial;
+    let settled = false;
+    let timer = 0;
+    const finish = (loggedIn: boolean) => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timer);
+      overlay.remove();
+      resolve(loggedIn);
+    };
+    const paint = (next: WeReadLoginSession) => {
+      session = next;
+      if (next.qr_data_url) image.src = next.qr_data_url;
+      image.hidden = !next.qr_data_url;
+      if (next.status === 'authenticated') {
+        finish(true);
+        return;
+      }
+      if (next.status === 'failed' || next.status === 'expired') {
+        state.textContent = next.error || '二维码已失效，请重新获取。';
+        retry.hidden = false;
+        return;
+      }
+      state.textContent = next.qr_data_url ? '等待扫码确认…' : '正在生成二维码…';
+    };
+    const poll = async () => {
+      if (settled || !session.session_id) return;
+      try {
+        paint(await office.json<WeReadLoginSession>(`/integrations/weread/login/${session.session_id}`));
+      } catch (error) {
+        state.textContent = error instanceof Error ? error.message : String(error);
+        retry.hidden = false;
+        return;
+      }
+      if (!settled && session.status === 'pending') timer = window.setTimeout(() => { void poll(); }, 1200);
+    };
+    const restart = async () => {
+      retry.hidden = true;
+      state.textContent = '正在获取二维码…';
+      try {
+        paint(await office.json<WeReadLoginSession>('/integrations/weread/login', { method: 'POST' }));
+        if (!settled && session.status === 'pending') void poll();
+      } catch (error) {
+        state.textContent = error instanceof Error ? error.message : String(error);
+        retry.hidden = false;
+      }
+    };
+    overlay.querySelectorAll<HTMLButtonElement>('[data-close], [data-cancel]').forEach(button => {
+      button.addEventListener('click', () => finish(false));
+    });
+    overlay.addEventListener('click', event => { if (event.target === overlay) finish(false); });
+    retry.addEventListener('click', () => { void restart(); });
+    paint(session);
+    if (session.status === 'pending') void poll();
+  });
+}
+
 function quickRunSkill(
   hooks: Hooks,
   skill: DocumentSkill,
@@ -190,6 +268,7 @@ function quickRunSkill(
   void (async () => {
     try {
       let nextDocumentId = '';
+      let wereadLogin: WeReadLoginSession | null = null;
       await hooks.run(skill.id, event => {
         if (closed) return;
         if (event.type === 'status' && event.text) {
@@ -198,7 +277,20 @@ function quickRunSkill(
         }
         if (event.type === 'delta' && event.part === 'reasoning' && event.text) thinking.append(String(event.text));
         if (event.type === 'done' && event.document_id) nextDocumentId = String(event.document_id);
+        if (event.type === 'weread_login_required') wereadLogin = event as WeReadLoginSession;
       });
+      if (wereadLogin) {
+        const loggedIn = await waitForWeReadLogin(wereadLogin);
+        if (!loggedIn || closed) {
+          setRunning(false);
+          if (!closed) thinking.note('微信读书登录未完成。');
+          return;
+        }
+        dismiss();
+        setRunning(false);
+        quickRunSkill(hooks, skill, anchor, running, setRunning);
+        return;
+      }
       if (!closed) thinking.finish();
       await hooks.reloadDocument(nextDocumentId || undefined);
       dismiss();
@@ -426,15 +518,25 @@ async function openSkillDialog(hooks: Hooks, current: DocumentSkill | null) {
     thinking.note('正在获取资讯并写入文档…');
     try {
       const saved = await hooks.save(payload());
-      let nextDocumentId = '';
-      await hooks.run(saved.id, event => {
-        if (event.type === 'status' && event.text) {
-          if (String(event.text).includes('整理')) thinking.begin();
-          else thinking.note(String(event.text));
-        }
-        if (event.type === 'delta' && event.part === 'reasoning' && event.text) thinking.append(String(event.text));
-        if (event.type === 'done' && event.document_id) nextDocumentId = String(event.document_id);
-      });
+      const run = async (): Promise<string> => {
+        let nextDocumentId = '';
+        let wereadLogin: WeReadLoginSession | null = null;
+        await hooks.run(saved.id, event => {
+          if (event.type === 'status' && event.text) {
+            if (String(event.text).includes('整理')) thinking.begin();
+            else thinking.note(String(event.text));
+          }
+          if (event.type === 'delta' && event.part === 'reasoning' && event.text) thinking.append(String(event.text));
+          if (event.type === 'done' && event.document_id) nextDocumentId = String(event.document_id);
+          if (event.type === 'weread_login_required') wereadLogin = event as WeReadLoginSession;
+        });
+        if (!wereadLogin) return nextDocumentId;
+        if (!await waitForWeReadLogin(wereadLogin)) throw new Error('微信读书登录未完成。');
+        thinking.clear();
+        thinking.note('登录成功，正在继续获取资讯…');
+        return run();
+      };
+      const nextDocumentId = await run();
       thinking.finish();
       await hooks.reloadDocument(nextDocumentId || undefined);
       close();

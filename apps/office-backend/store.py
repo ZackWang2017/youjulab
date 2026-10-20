@@ -10,8 +10,10 @@ from uuid import uuid4
 
 from config import mongo_db, mongo_url
 
-KINDS = ("sheet", "document", "pdf", "mindmap", "research", "diagram", "calendar", "calc", "notebook")
+KINDS = ("sheet", "document", "pdf", "mindmap", "research", "diagram", "project_plan", "calendar", "calc", "notebook")
 USER_KINDS = frozenset({"calendar", "calc", "notebook"})
+# 可在「项目可见 / 我可见」间切换；我可见时 project_id 为空，跨项目出现在列表中。
+SCOPED_VISIBILITY_KINDS = frozenset({"document", "project_plan"})
 DEFAULT_SHEET_NAME = "未命名表格"
 DEFAULT_DOCUMENT_NAME = "未命名文档"
 DEFAULT_MINDMAP_NAME = "未命名导图"
@@ -21,10 +23,43 @@ DEFAULT_CALENDAR_NAME = "日常工作"
 DEFAULT_CALC_NAME = "计算器"
 DEFAULT_NOTEBOOK_NAME = "笔记本"
 ACCESS_TOKEN_LENGTH = 32
+RECENT_ASSET_LIMIT = 8
 
 
 def empty_last_assets() -> dict:
-    return {"sheet": None, "document": None, "pdf": None, "mindmap": None, "research": None, "diagram": None, "calendar": None}
+    return {"sheet": None, "document": None, "pdf": None, "mindmap": None, "research": None, "diagram": None, "project_plan": None, "calendar": None}
+
+
+def recent_asset_ids(doc: dict, project_id: str, opened_id: str | None = None) -> list[str]:
+    """Keep a bounded, project-scoped opening history without copying asset metadata."""
+    histories = doc.get("recent_assets_by_project")
+    if isinstance(histories, dict) and project_id in histories:
+        previous = histories[project_id] or []
+    else:
+        # Keep pre-migration histories visible until this project is next updated.
+        previous = doc.get("recent_assets") or (doc.get("last_assets") or {}).values()
+    ids = [str(value) for value in previous if isinstance(value, str) and value]
+    if opened_id:
+        ids = [opened_id, *ids]
+    return list(dict.fromkeys(ids))[:RECENT_ASSET_LIMIT]
+
+
+def recent_asset_histories(doc: dict, project_id: str, opened_id: str) -> dict[str, list[str]]:
+    histories = doc.get("recent_assets_by_project")
+    result = dict(histories) if isinstance(histories, dict) else {}
+    result[project_id] = recent_asset_ids(doc, project_id, opened_id)
+    return result
+
+
+def remove_recent_asset(doc: dict, asset_id: str) -> dict[str, list[str]]:
+    histories = doc.get("recent_assets_by_project")
+    if not isinstance(histories, dict):
+        return {}
+    return {
+        project_id: [item for item in ids if item != asset_id]
+        for project_id, ids in histories.items()
+        if isinstance(project_id, str) and isinstance(ids, list)
+    }
 
 
 def new_access_token() -> str:
@@ -82,10 +117,15 @@ def default_calendar() -> dict:
     return {
         "format": "invp-calendar-v1",
         "timezone": "Asia/Shanghai",
+        "weeks": {},
         "days": {},
         "monthlyEvents": [],
         "todos": "",
     }
+
+
+def default_project_plan() -> dict:
+    return {"format": "invp-project-plan-v1", "tasks": []}
 
 
 def default_calc() -> dict:
@@ -101,10 +141,17 @@ def is_user_kind(kind: str) -> bool:
     return kind in USER_KINDS
 
 
+def supports_scoped_visibility(kind: str) -> bool:
+    return kind in SCOPED_VISIBILITY_KINDS
+
+
 def asset_in_view(asset: dict, project_id: str | None, kind: str | None) -> bool:
     if kind and asset.get("kind") != kind:
         return False
-    if is_user_kind(str(asset.get("kind") or "")) or not asset.get("project_id"):
+    asset_kind = str(asset.get("kind") or "")
+    if is_user_kind(asset_kind):
+        return True
+    if supports_scoped_visibility(asset_kind) and not asset.get("project_id") and asset.get("visibility") == "user":
         return True
     return asset.get("project_id") == project_id
 
@@ -162,7 +209,7 @@ def public_asset(doc: dict, include_content: bool = False) -> dict:
     }
     if doc.get("index_status"):
         item["index_status"] = doc["index_status"]
-    if include_content and doc["kind"] != "pdf":
+    if include_content:
         item["content"] = doc.get("content")
     return item
 
@@ -205,6 +252,9 @@ class Store:
     def assets_any(self, project_id: str, kind: str | None = None) -> list[dict]: raise NotImplementedError
     def asset_any(self, asset_id: str) -> dict | None: raise NotImplementedError
     def users(self) -> list[dict]: raise NotImplementedError
+    def get_user_model_config(self, user_id: str) -> dict | None: raise NotImplementedError
+    def upsert_user_model_config(self, user_id: str, fields: dict) -> dict: raise NotImplementedError
+    def delete_user_model_config(self, user_id: str) -> bool: raise NotImplementedError
     def get_digest_job(self, user_id: str, document_id: str) -> dict | None: raise NotImplementedError
     def upsert_digest_job(self, user_id: str, document_id: str, fields: dict) -> dict: raise NotImplementedError
     def delete_digest_job(self, user_id: str, document_id: str) -> None: raise NotImplementedError
@@ -238,12 +288,13 @@ class MemoryStore(Store):
         self._assistant_sessions: dict[str, dict] = {}
         self._sheet_cache: dict[str, dict] = {}
         self._sheet_charts: dict[str, dict] = {}
+        self._user_model_configs: dict[str, dict] = {}
 
     def create_user(self, email: str, password: str) -> dict:
         user = {
             "id": new_id(), "email": email.lower(), "password_hash": hash_password(password),
             "access_token": self._unique_access_token(),
-            "last_project_id": None, "last_assets": empty_last_assets(),
+            "last_project_id": None, "last_assets": empty_last_assets(), "recent_assets": [], "recent_assets_by_project": {},
             "created_at": now(),
         }
         self._users[user["id"]] = user
@@ -404,6 +455,21 @@ class MemoryStore(Store):
 
     def users(self) -> list[dict]:
         return [copy.deepcopy(u) for u in self._users.values()]
+
+    def get_user_model_config(self, user_id: str) -> dict | None:
+        found = self._user_model_configs.get(user_id)
+        return copy.deepcopy(found) if found else None
+
+    def upsert_user_model_config(self, user_id: str, fields: dict) -> dict:
+        current = self._user_model_configs.get(user_id) or {"user_id": user_id, "created_at": now()}
+        current.update(fields)
+        current["user_id"] = user_id
+        current["updated_at"] = now()
+        self._user_model_configs[user_id] = current
+        return copy.deepcopy(current)
+
+    def delete_user_model_config(self, user_id: str) -> bool:
+        return self._user_model_configs.pop(user_id, None) is not None
 
     def get_digest_job(self, user_id: str, document_id: str) -> dict | None:
         found = getattr(self, "_digest_jobs", {}).get(f"{user_id}:{document_id}")
@@ -619,6 +685,7 @@ class MongoStore(Store):
         self.db.sheet_charts.create_index("id", unique=True)
         self.db.document_skills.create_index("id", unique=True)
         self.db.document_skills.create_index([("user_id", 1), ("document_id", 1), ("updated_at", -1)])
+        self.db.user_model_configs.create_index("user_id", unique=True)
 
     def _one(self, collection: str, query: dict) -> dict | None:
         doc = self.db[collection].find_one(query)
@@ -628,7 +695,7 @@ class MongoStore(Store):
         user = {
             "id": new_id(), "email": email.lower(), "password_hash": hash_password(password),
             "access_token": self._unique_access_token(),
-            "last_project_id": None, "last_assets": empty_last_assets(),
+            "last_project_id": None, "last_assets": empty_last_assets(), "recent_assets": [], "recent_assets_by_project": {},
             "created_at": now(),
         }
         self.db.users.insert_one(user)
@@ -730,7 +797,7 @@ class MongoStore(Store):
             query["kind"] = kind
         if kind and is_user_kind(kind):
             query["project_id"] = None
-        elif kind == "document":
+        elif kind and supports_scoped_visibility(kind):
             query["$or"] = [
                 {"project_id": project_id},
                 {"project_id": None, "visibility": "user"},
@@ -741,7 +808,7 @@ class MongoStore(Store):
             query["$or"] = [
                 {"project_id": project_id, "kind": {"$nin": sorted(USER_KINDS)}},
                 {"kind": {"$in": sorted(USER_KINDS)}},
-                {"project_id": None},
+                {"project_id": None, "visibility": "user", "kind": {"$in": sorted(SCOPED_VISIBILITY_KINDS)}},
             ]
         return list(self.db.assets.find(query, projection).sort("updated_at", -1))
 
@@ -777,6 +844,22 @@ class MongoStore(Store):
 
     def users(self) -> list[dict]:
         return list(self.db.users.find({}, {"_id": 0, "password_hash": 0, "access_token": 0}))
+
+    def get_user_model_config(self, user_id: str) -> dict | None:
+        return self.db.user_model_configs.find_one({"user_id": user_id}, {"_id": 0})
+
+    def upsert_user_model_config(self, user_id: str, fields: dict) -> dict:
+        payload = {**fields, "user_id": user_id, "updated_at": now()}
+        existing = self.get_user_model_config(user_id)
+        if existing:
+            self.db.user_model_configs.update_one({"user_id": user_id}, {"$set": payload})
+        else:
+            payload["created_at"] = now()
+            self.db.user_model_configs.insert_one(payload)
+        return self.get_user_model_config(user_id) or payload
+
+    def delete_user_model_config(self, user_id: str) -> bool:
+        return bool(self.db.user_model_configs.delete_one({"user_id": user_id}).deleted_count)
 
     def get_digest_job(self, user_id: str, document_id: str) -> dict | None:
         return self._one("digest_jobs", {"user_id": user_id, "document_id": document_id})

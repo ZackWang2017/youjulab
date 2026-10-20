@@ -60,6 +60,7 @@ def ensure_schema() -> None:
                         chunk_count INT NOT NULL DEFAULT 0,
                         error TEXT,
                         empty BOOLEAN NOT NULL DEFAULT FALSE,
+                        layout_version INT NOT NULL DEFAULT 0,
                         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                     )
                     """
@@ -77,6 +78,28 @@ def ensure_schema() -> None:
                     )
                     """
                 )
+                cur.execute("ALTER TABLE pdf_index ADD COLUMN IF NOT EXISTS layout_version INT NOT NULL DEFAULT 0")
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS pdf_layout_blocks (
+                        document_id TEXT NOT NULL REFERENCES pdf_index(document_id) ON DELETE CASCADE,
+                        block_id TEXT NOT NULL,
+                        page INT NOT NULL,
+                        ord INT NOT NULL,
+                        text TEXT NOT NULL,
+                        font_size DOUBLE PRECISION NOT NULL DEFAULT 0,
+                        bold BOOLEAN NOT NULL DEFAULT FALSE,
+                        x0 DOUBLE PRECISION NOT NULL DEFAULT 0,
+                        y0 DOUBLE PRECISION NOT NULL DEFAULT 0,
+                        x1 DOUBLE PRECISION NOT NULL DEFAULT 0,
+                        y1 DOUBLE PRECISION NOT NULL DEFAULT 0,
+                        indent DOUBLE PRECISION NOT NULL DEFAULT 0,
+                        y_ratio DOUBLE PRECISION NOT NULL DEFAULT 0,
+                        PRIMARY KEY (document_id, block_id)
+                    )
+                    """
+                )
+                cur.execute("CREATE INDEX IF NOT EXISTS pdf_layout_blocks_document_ord ON pdf_layout_blocks (document_id, ord)")
                 cur.execute(
                     """
                     CREATE INDEX IF NOT EXISTS pdf_chunks_document_ord
@@ -136,6 +159,43 @@ def extract_chunks(path: Path) -> tuple[int, list[dict[str, Any]]]:
         doc.close()
 
 
+def extract_layout_blocks(path: Path) -> list[dict[str, Any]]:
+    """Extract native text lines in reading order without changing vector chunks."""
+    doc = pymupdf.open(path)
+    try:
+        result: list[dict[str, Any]] = []
+        order = 0
+        for page_no, page in enumerate(doc, 1):
+            raw = page.get_text("rawdict")
+            height = max(1.0, float(page.rect.height))
+            for block in raw.get("blocks") or []:
+                if block.get("type") != 0:
+                    continue
+                for line in block.get("lines") or []:
+                    spans = line.get("spans") or []
+                    span_texts = [
+                        str(span.get("text") or "".join(str(char.get("c") or "") for char in span.get("chars") or []))
+                        for span in spans
+                    ]
+                    spans = [span for span, value in zip(spans, span_texts) if value.strip()]
+                    text = "".join(value for value in span_texts if value.strip()).strip()
+                    if not text:
+                        continue
+                    bbox = line.get("bbox") or [0, 0, 0, 0]
+                    size = max((float(span.get("size") or 0) for span in spans), default=0.0)
+                    bold = any("bold" in str(span.get("font") or "").lower() or int(span.get("flags") or 0) & 16 for span in spans)
+                    result.append({
+                        "block_id": f"p{page_no}-l{order}", "page": page_no, "ord": order, "text": text,
+                        "font_size": size, "bold": bold, "x0": float(bbox[0]), "y0": float(bbox[1]),
+                        "x1": float(bbox[2]), "y1": float(bbox[3]), "indent": float(bbox[0]),
+                        "y_ratio": max(0.0, min(1.0, float(bbox[1]) / height)),
+                    })
+                    order += 1
+        return result
+    finally:
+        doc.close()
+
+
 def get_index_status(document_id: str) -> dict[str, Any]:
     ensure_schema()
     with _conn() as conn:
@@ -152,6 +212,7 @@ def get_index_status(document_id: str) -> dict[str, Any]:
         "empty": bool(row.get("empty")),
         "error": row.get("error") or "",
         "updated_at": row["updated_at"].isoformat() if row.get("updated_at") else None,
+        "layout_version": int(row.get("layout_version") or 0),
     }
 
 
@@ -163,6 +224,42 @@ def delete_document_index(document_id: str) -> None:
         with conn.cursor() as cur:
             cur.execute("DELETE FROM pdf_index WHERE document_id = %s", (document_id,))
         conn.commit()
+
+
+def ensure_layout_blocks(document_id: str, path: str | Path, version: int = 1) -> list[dict[str, Any]]:
+    """Lazily persist layout metadata; this path never generates embeddings."""
+    ensure_schema()
+    status = get_index_status(document_id)
+    if status.get("status") != "ready":
+        raise ValueError(f"文档尚未完成索引（状态：{status.get('status')}）。")
+    if status.get("empty"):
+        raise ValueError("未提取到可用文本层，扫描件暂不支持生成大纲。")
+    pdf_path = Path(path)
+    with _doc_lock(document_id):
+        with _conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT layout_version FROM pdf_index WHERE document_id = %s", (document_id,))
+                current = cur.fetchone()
+                if current and int(current.get("layout_version") or 0) >= version:
+                    cur.execute("SELECT * FROM pdf_layout_blocks WHERE document_id = %s ORDER BY ord", (document_id,))
+                    return list(cur.fetchall())
+        blocks = extract_layout_blocks(pdf_path)
+        if not blocks:
+            raise ValueError("PDF 没有可用于识别结构的原生文本。")
+        with _conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM pdf_layout_blocks WHERE document_id = %s", (document_id,))
+                for item in blocks:
+                    cur.execute(
+                        """INSERT INTO pdf_layout_blocks
+                           (document_id, block_id, page, ord, text, font_size, bold, x0, y0, x1, y1, indent, y_ratio)
+                           VALUES (%(document_id)s, %(block_id)s, %(page)s, %(ord)s, %(text)s, %(font_size)s, %(bold)s,
+                                   %(x0)s, %(y0)s, %(x1)s, %(y1)s, %(indent)s, %(y_ratio)s)""",
+                        {"document_id": document_id, **item},
+                    )
+                cur.execute("UPDATE pdf_index SET layout_version = %s, updated_at = NOW() WHERE document_id = %s", (version, document_id))
+            conn.commit()
+        return blocks
 
 
 def _vec_literal(values: list[float]) -> str:
@@ -218,6 +315,7 @@ def ensure_index(
                     (document_id, user_id, mtime, content_hash),
                 )
                 cur.execute("DELETE FROM pdf_chunks WHERE document_id = %s", (document_id,))
+                cur.execute("DELETE FROM pdf_layout_blocks WHERE document_id = %s", (document_id,))
             conn.commit()
 
         try:
@@ -227,7 +325,7 @@ def ensure_index(
                     with conn.cursor() as cur:
                         cur.execute(
                             """
-                            UPDATE pdf_index SET status = 'ready', page_count = %s, chunk_count = 0,
+                            UPDATE pdf_index SET status = 'ready', page_count = %s, chunk_count = 0, layout_version = 0,
                                    empty = TRUE, error = '未提取到可检索文本（可能是扫描件，需要 OCR）。', updated_at = NOW()
                             WHERE document_id = %s
                             """,
@@ -253,7 +351,7 @@ def ensure_index(
                         )
                     cur.execute(
                         """
-                        UPDATE pdf_index SET status = 'ready', page_count = %s, chunk_count = %s,
+                        UPDATE pdf_index SET status = 'ready', page_count = %s, chunk_count = %s, layout_version = 0,
                                empty = FALSE, error = NULL, updated_at = NOW()
                         WHERE document_id = %s
                         """,

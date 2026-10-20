@@ -17,21 +17,28 @@ from typing import Any, Callable
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-STATEMENT_SERVICE_PATH = Path(__file__).resolve().parent / "statement_service.py"
+_SERVICE_DIR = Path(__file__).resolve().parent
+STATEMENT_SERVICE_PATH = _SERVICE_DIR / "statement_service.py"
+STATEMENT_ENSURE_PATH = _SERVICE_DIR / "statement_ensure.py"
 
 
-def _load_statement_service():
-    spec = importlib.util.spec_from_file_location("financial_statement_service", STATEMENT_SERVICE_PATH)
+def _load_module(name: str, path: Path):
+    loaded = sys.modules.get(name)
+    if loaded is not None:
+        return loaded
+    spec = importlib.util.spec_from_file_location(name, path)
     if spec is None or spec.loader is None:
-        raise RuntimeError(f"cannot load: {STATEMENT_SERVICE_PATH}")
+        raise RuntimeError(f"cannot load: {path}")
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
 
 
-_statement_service = _load_statement_service()
+_statement_service = _load_module("financial_statement_service", STATEMENT_SERVICE_PATH)
+_statement_ensure = _load_module("financial_statement_ensure", STATEMENT_ENSURE_PATH)
 query_financial_statements = _statement_service.query_financial_statements
+ensure_statements = _statement_ensure.ensure_statements
 
 # ---------------------------------------------------------------------------
 # 标准键 → 财报 source_item_name（可多个，求和）
@@ -314,9 +321,21 @@ def query_financial_indicators(
     """按证券代码、年份、期间查询并汇总 12 项财务指标。
 
     空参数表示匹配任意值；返回按 (ticker_code, fiscal_year, report_period) 分组的指标列表。
+    指定了证券且库中完全没有财报时，先补抓再计算。
     """
+    sync: dict[str, Any] = {
+        "status": "ready",
+        "ticker_code": None,
+        "data_source": None,
+        "saved": 0,
+        "message": "",
+    }
+    query_ticker = ticker_code
+    if ticker_code and str(ticker_code).strip():
+        sync = ensure_statements(ticker_code)
+        query_ticker = sync["ticker_code"]
     rows = query_financial_statements(
-        ticker_code=ticker_code,
+        ticker_code=query_ticker,
         market_code=market_code,
         fiscal_year=fiscal_year,
         report_period=report_period,
@@ -342,10 +361,15 @@ def query_financial_indicators(
             )
         )
 
+    if query_ticker and not periods and sync["status"] in {"ready", "fetched"}:
+        note = "本地已有该证券财报，但没有符合本次筛选的报告期。"
+        message = sync["message"]
+        sync = {**sync, "message": f"{message}{note}" if message else note}
     return {
         "total_periods": len(periods),
         "currency_unit": currency_unit,
         "periods": periods,
+        "sync": sync,
     }
 
 

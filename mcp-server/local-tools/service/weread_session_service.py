@@ -1,52 +1,41 @@
-"""微信读书扫码登录。二维码打在 mcp-server 进程的标准错误上，接口本身不等待扫码。"""
+"""微信读书登录态和按需发起的扫码登录会话。"""
 from __future__ import annotations
 
-import sys
+import base64
+import io
 import threading
+import time
+import uuid
+from typing import Any
 
 import weread_session_repository as session_repository
 
 _lock = threading.Lock()
-_worker: threading.Thread | None = None
-
-
-def ensure_login() -> None:
-    """已有可用登录态就直接返回。否则在后台输出二维码并等待扫码。"""
-    cookie = session_repository.load_cookie()
-    if cookie and session_repository.session_valid(cookie):
-        print("微信读书登录有效。", file=sys.stderr)
-        return
-    _start_worker("微信读书需要扫码登录。请用微信扫描下面的二维码，并在手机上确认登录微信读书网页版。")
+_login_sessions: dict[str, dict[str, Any]] = {}
+_ACTIVE_TTL_SECONDS = 5 * 60
 
 
 def list_shelf_articles(num: int) -> dict:
     """重新读取书架上的全部公众号，再取每个号的最近文章。"""
     count = max(1, num)
-    _log(f"开始拉取书架，每个号最多 {count} 篇")
     cookie = session_repository.load_cookie()
     if not cookie:
-        _log("本地没有登录态")
-        _start_worker("微信读书尚未登录。请到 mcp-server 终端扫描二维码。")
-        return {"error": "微信读书尚未登录，请到 mcp-server 终端扫码。", "accounts": []}
+        return _login_required("微信读书尚未登录。")
     shelf = session_repository.list_official_accounts(cookie)
     if shelf.get("auth_expired"):
-        _clear_login("书架")
-        return {"error": "微信读书登录已过期，请到 mcp-server 终端扫码。", "accounts": []}
+        session_repository.save_cookie("")
+        return _login_required("微信读书登录已过期。")
     if shelf.get("error"):
-        _log(f"书架失败：{shelf['error']}")
         return {"error": shelf["error"], "accounts": []}
     books = shelf.get("accounts") or []
-    _log(f"书架上有 {len(books)} 个公众号")
     if not books:
         return {"error": "书架上没有公众号。", "accounts": []}
     accounts = []
     for book in books:
         fetched = session_repository.latest_articles(cookie, book["id"])
         if fetched.get("auth_expired"):
-            _clear_login(book.get("title") or book["id"])
-            if accounts:
-                break
-            return {"error": "微信读书登录已过期，请到 mcp-server 终端扫码。", "accounts": []}
+            session_repository.save_cookie("")
+            return _login_required("微信读书登录已过期。")
         items = (fetched.get("items") or [])[:count]
         accounts.append({
             "id": book["id"],
@@ -54,68 +43,104 @@ def list_shelf_articles(num: int) -> dict:
             "error": "" if items else (fetched.get("error") or "没有文章。"),
             "results": items,
         })
-    filled = sum(1 for account in accounts if account["results"])
-    _log(f"完成：{filled} 个号有文章，{len(accounts) - filled} 个号为空，共 {len(books)} 个号")
     return {"error": "", "accounts": accounts}
 
 
 def list_articles(book_id: str, num: int) -> dict:
     cookie = session_repository.load_cookie()
     if not cookie:
-        _log("本地没有登录态")
-        _start_worker("微信读书尚未登录。请到 mcp-server 终端扫描二维码。")
-        return _expired("微信读书尚未登录，请到 mcp-server 终端扫码。")
+        return _login_required("微信读书尚未登录。", results=True)
     fetched = session_repository.latest_articles(cookie, book_id)
     if fetched.get("auth_expired"):
-        _clear_login(book_id)
-        return _expired("微信读书登录已过期，请到 mcp-server 终端扫码。")
+        session_repository.save_cookie("")
+        return _login_required("微信读书登录已过期。", results=True)
     items = (fetched.get("items") or [])[: max(1, num)]
     if fetched.get("error") and not items:
         return {"error": fetched["error"], "results": []}
     return {"error": "", "results": items}
 
 
-def _log(message: str) -> None:
-    print(f"微信读书：{message}", file=sys.stderr)
-
-
-def _clear_login(where: str) -> None:
-    _log(f"{where} 确认登录失效，已清除本地登录态")
-    session_repository.save_cookie("")
-    _start_worker("微信读书登录已过期。请用微信扫描下面的新二维码。")
-
-
-def _start_worker(notice: str) -> None:
-    global _worker
+def start_login() -> dict:
+    """仅在用户明确请求读取且登录失效时，创建一个扫码会话。"""
+    cookie = session_repository.load_cookie()
+    if cookie and session_repository.session_valid(cookie):
+        return {"status": "authenticated", "session_id": "", "qr_data_url": ""}
     with _lock:
-        if _worker is not None and _worker.is_alive():
+        _prune_sessions()
+        pending = next((item for item in _login_sessions.values() if item["status"] == "pending"), None)
+        if pending:
+            return _public_session(pending)
+        session = {
+            "id": uuid.uuid4().hex,
+            "status": "pending",
+            "qr_url": "",
+            "error": "",
+            "updated_at": time.time(),
+        }
+        _login_sessions[session["id"]] = session
+        threading.Thread(target=_login, args=(session["id"],), name="weread-login", daemon=True).start()
+        return _public_session(session)
+
+
+def login_status(session_id: str) -> dict:
+    with _lock:
+        _prune_sessions()
+        session = _login_sessions.get(session_id)
+        if not session:
+            return {"status": "expired", "session_id": session_id, "qr_data_url": "", "error": "扫码会话已过期，请重新获取数据。"}
+        return _public_session(session)
+
+
+def _login(session_id: str) -> None:
+    def on_qr(url: str) -> None:
+        with _lock:
+            session = _login_sessions.get(session_id)
+            if not session:
+                return
+            session["qr_url"] = url
+            session["updated_at"] = time.time()
+
+    cookie = session_repository.login(on_qr)
+    with _lock:
+        session = _login_sessions.get(session_id)
+        if not session:
             return
-        _worker = threading.Thread(target=_login, args=(notice,), name="weread-login", daemon=True)
-        _worker.start()
+        session["status"] = "authenticated" if cookie else "failed"
+        session["error"] = "" if cookie else "扫码未完成或已超时，请重新获取数据。"
+        session["updated_at"] = time.time()
 
 
-def _login(notice: str) -> None:
-    print(notice, file=sys.stderr)
-    cookie = session_repository.login(_print_qr)
-    if cookie:
-        print("微信读书登录成功。", file=sys.stderr)
-        return
-    print("微信读书扫码未完成。下次拉取公众号时会再输出一张二维码。", file=sys.stderr)
+def _login_required(message: str, *, results: bool = False) -> dict:
+    payload = {"error": message, "login_required": True}
+    payload["results" if results else "accounts"] = []
+    return payload
 
 
-def _print_qr(url: str) -> None:
-    print("—— 微信读书登录二维码 ——", file=sys.stderr)
-    print(url, file=sys.stderr)
+def _public_session(session: dict) -> dict:
+    url = str(session.get("qr_url") or "")
+    return {
+        "status": session["status"],
+        "session_id": session["id"],
+        "qr_data_url": _qr_data_url(url) if url else "",
+        "error": session.get("error") or "",
+    }
+
+
+def _qr_data_url(url: str) -> str:
     try:
         import qrcode
-    except ImportError:
-        print("当前环境没有 qrcode 包，请打开上面的地址完成登录。", file=sys.stderr)
-        return
-    code = qrcode.QRCode(border=1)
-    code.add_data(url)
-    code.make(fit=True)
-    code.print_ascii(out=sys.stderr, invert=True)
+        import qrcode.image.svg
+        image = qrcode.make(url, image_factory=qrcode.image.svg.SvgPathImage, border=2)
+        output = io.BytesIO()
+        image.save(output)
+    except Exception:
+        return ""
+    encoded = base64.b64encode(output.getvalue()).decode("ascii")
+    return f"data:image/svg+xml;base64,{encoded}"
 
 
-def _expired(message: str) -> dict:
-    return {"error": message, "results": []}
+def _prune_sessions() -> None:
+    cutoff = time.time() - _ACTIVE_TTL_SECONDS
+    for session_id, session in list(_login_sessions.items()):
+        if session.get("updated_at", 0) < cutoff:
+            _login_sessions.pop(session_id, None)

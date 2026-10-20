@@ -5,7 +5,8 @@ import json
 from typing import Any
 
 from assistant import iter_chat_events, strip_thinking
-from config import ROOT, model_name
+from config import ROOT
+from model_runtime import model_name
 from sheet_cache import detail_surrounding, structure_fingerprint
 
 CHART_TYPES = frozenset({"bar", "line", "pie", "scatter"})

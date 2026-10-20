@@ -1,5 +1,6 @@
 import { Calendar } from '@fullcalendar/core';
 import type { EventClickArg, EventInput } from '@fullcalendar/core';
+import { createIcons, icons } from 'lucide';
 import zhCnLocale from '@fullcalendar/core/locales/zh-cn';
 import dayGridPlugin from '@fullcalendar/daygrid';
 import interactionPlugin from '@fullcalendar/interaction';
@@ -16,23 +17,26 @@ import {
   REPEAT_LABEL,
   type MonthlyEvent,
 } from './monthly-events';
-import { openTodoList } from './todos';
+import { closeTodoList, openTodoList } from './todos';
 
 /** 按日工作计划：key 为 YYYY-MM-DD，value 为 Markdown 正文。 */
 export interface CalendarContent {
   format: 'invp-calendar-v1';
   timezone: string;
+  /** 按周一归档的本周事项，key 为 YYYY-MM-DD。 */
+  weeks: Record<string, string>;
   days: Record<string, string>;
   monthlyEvents: MonthlyEvent[];
   /** Markdown 待办，每行 `- [ ]` 或 `- [x]`。 */
   todos: string;
 }
 
-type Selection = { date: string; text: string };
+type Selection = { date: string; text: string; weekStart: string; weekText: string };
 
 const FALLBACK: CalendarContent = {
   format: 'invp-calendar-v1',
   timezone: 'Asia/Shanghai',
+  weeks: {},
   days: {},
   monthlyEvents: [],
   todos: '',
@@ -40,6 +44,39 @@ const FALLBACK: CalendarContent = {
 
 function dateKey(iso: string) {
   return String(iso || '').slice(0, 10);
+}
+
+function dateFromKey(value: string) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!match) return null;
+  const date = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+  return date.getFullYear() === Number(match[1]) && date.getMonth() === Number(match[2]) - 1 && date.getDate() === Number(match[3])
+    ? date
+    : null;
+}
+
+function formatDate(date: Date) {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+}
+
+function weekStartFor(date: string) {
+  const value = dateFromKey(date);
+  if (!value) return date;
+  value.setDate(value.getDate() - ((value.getDay() + 6) % 7));
+  return formatDate(value);
+}
+
+function addDateDays(date: string, days: number) {
+  const value = dateFromKey(date);
+  if (!value) return date;
+  value.setDate(value.getDate() + days);
+  return formatDate(value);
+}
+
+function weekTone(weekStart: string) {
+  let hash = 0;
+  for (const char of weekStart) hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
+  return ['teal', 'blue', 'gold', 'plum'][hash % 4];
 }
 
 function isDayMap(value: unknown): value is Record<string, string> {
@@ -66,7 +103,7 @@ function migrateLegacyEvents(events: unknown[]): Record<string, string> {
 
 function normalizeContent(content: unknown): CalendarContent {
   if (!content || typeof content !== 'object' || Array.isArray(content)) {
-    return { ...FALLBACK, days: {}, monthlyEvents: [], todos: '' };
+    return { ...FALLBACK, weeks: {}, days: {}, monthlyEvents: [], todos: '' };
   }
   const raw = content as Record<string, unknown>;
   const timezone = typeof raw.timezone === 'string' && raw.timezone ? raw.timezone : 'Asia/Shanghai';
@@ -80,9 +117,20 @@ function normalizeContent(content: unknown): CalendarContent {
   } else if (Array.isArray(raw.events)) {
     days = migrateLegacyEvents(raw.events);
   }
+  const weeks: Record<string, string> = {};
+  if (isDayMap(raw.weeks)) {
+    for (const [key, value] of Object.entries(raw.weeks)) {
+      const date = dateKey(key);
+      const weekStart = weekStartFor(date);
+      const text = String(value || '').trim();
+      if (!dateFromKey(date) || !text) continue;
+      weeks[weekStart] = weeks[weekStart] ? `${weeks[weekStart].trimEnd()}\n\n${value}` : String(value);
+    }
+  }
   return {
     format: 'invp-calendar-v1',
     timezone,
+    weeks,
     days,
     monthlyEvents: normalizeMonthlyEvents(raw.monthlyEvents),
     todos: typeof raw.todos === 'string' ? raw.todos : '',
@@ -110,8 +158,9 @@ function plainPreview(md: string, max = 80) {
 
 function openDayPlan(
   date: string,
-  initial: string,
-  onSave: (markdown: string) => void,
+  weekInitial: string,
+  dayInitial: string,
+  onSave: (weekMarkdown: string, dayMarkdown: string) => void,
 ) {
   return new Promise<void>(resolve => {
     const overlay = document.createElement('div');
@@ -150,38 +199,73 @@ function openDayPlan(
       meta.append(mark);
     }
     if (meta.childNodes.length) title.append(meta);
+    const titlebar = document.createElement('header');
+    titlebar.className = 'calendar-day-dialog-head';
+    const closeButton = document.createElement('button');
+    closeButton.type = 'button';
+    closeButton.className = 'calendar-day-dialog-close';
+    closeButton.setAttribute('title', '关闭');
+    closeButton.setAttribute('aria-label', '关闭');
+    closeButton.innerHTML = '<i data-lucide="x"></i>';
+    titlebar.append(title, closeButton);
 
-    const host = document.createElement('div');
-    host.className = 'md-editor-host';
-    host.dataset.mdHost = '';
+    const sections = document.createElement('div');
+    sections.className = 'calendar-plan-sections';
+    const weekSection = document.createElement('section');
+    weekSection.className = 'calendar-plan-section calendar-week-section';
+    const weekHeading = document.createElement('h3');
+    weekHeading.textContent = `本周事项（${weekStartFor(date)} 起）`;
+    const weekHost = document.createElement('div');
+    weekHost.className = 'md-editor-host';
+    weekHost.dataset.mdHost = '';
+    weekSection.append(weekHeading, weekHost);
+
+    const daySection = document.createElement('section');
+    daySection.className = 'calendar-plan-section';
+    const dayHeading = document.createElement('h3');
+    dayHeading.textContent = '今日事项';
+    const dayHost = document.createElement('div');
+    dayHost.className = 'md-editor-host';
+    dayHost.dataset.mdHost = '';
+    daySection.append(dayHeading, dayHost);
+    sections.append(weekSection, daySection);
     const actions = document.createElement('div');
     actions.className = 'dialog-actions';
     actions.innerHTML = `
       <button type="button" data-cancel>取消</button>
       <button type="button" class="primary" data-save>保存</button>`;
-    dialog.append(title, host, actions);
+    dialog.append(titlebar, sections, actions);
     overlay.append(dialog);
     document.body.append(overlay);
-    let mdEditor: MdEditorHandle | null = mountMarkdownEditor(host, initial, {
-      placeholder: '写下今天的内容…',
+    createIcons({ icons });
+    let weekEditor: MdEditorHandle | null = mountMarkdownEditor(weekHost, weekInitial, {
+      placeholder: '写下本周重点、推进事项或风险…',
+      live: true,
+    });
+    let dayEditor: MdEditorHandle | null = mountMarkdownEditor(dayHost, dayInitial, {
+      placeholder: '写下今天的事项…',
       live: true,
     });
     requestAnimationFrame(() => {
-      mdEditor?.focus();
+      weekEditor?.focus();
     });
 
     const close = () => {
-      mdEditor?.destroy();
-      mdEditor = null;
+      weekEditor?.destroy();
+      dayEditor?.destroy();
+      weekEditor = null;
+      dayEditor = null;
       overlay.remove();
       resolve();
     };
 
     dialog.querySelector('[data-cancel]')!.addEventListener('click', close);
+    closeButton.addEventListener('click', close);
     dialog.querySelector('[data-save]')!.addEventListener('click', () => {
-      const markdown = mdEditor?.getValue() || '';
+      const weekMarkdown = weekEditor?.getValue() || '';
+      const dayMarkdown = dayEditor?.getValue() || '';
       close();
-      onSave(markdown);
+      onSave(weekMarkdown, dayMarkdown);
     });
     overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
   });
@@ -203,7 +287,7 @@ export function mountCalendar(
   let revision = 0;
   let assetId = '';
   let loading = false;
-  let data: CalendarContent = { ...FALLBACK, days: {}, monthlyEvents: [], todos: '' };
+  let data: CalendarContent = { ...FALLBACK, weeks: {}, days: {}, monthlyEvents: [], todos: '' };
   let selection: Selection | null = null;
   let calendar: Calendar | null = null;
 
@@ -221,6 +305,7 @@ export function mountCalendar(
   const snapshotContent = (): CalendarContent => ({
     format: 'invp-calendar-v1',
     timezone: data.timezone || 'Asia/Shanghai',
+    weeks: { ...data.weeks },
     days: { ...data.days },
     monthlyEvents: data.monthlyEvents.map(e => ({ ...e })),
     todos: data.todos || '',
@@ -235,7 +320,21 @@ export function mountCalendar(
     const cleaned = markdown.replace(/^\uFEFF/, '');
     if (cleaned.trim()) data.days[date] = cleaned;
     else delete data.days[date];
-    selection = { date, text: data.days[date] || '' };
+    const weekStart = weekStartFor(date);
+    selection = { date, text: data.days[date] || '', weekStart, weekText: data.weeks[weekStart] || '' };
+    syncDays();
+    emitDirty();
+  };
+
+  const setDayAndWeekContent = (date: string, weekMarkdown: string, dayMarkdown: string) => {
+    const weekStart = weekStartFor(date);
+    const cleanedWeek = weekMarkdown.replace(/^\uFEFF/, '');
+    const cleanedDay = dayMarkdown.replace(/^\uFEFF/, '');
+    if (cleanedWeek.trim()) data.weeks[weekStart] = cleanedWeek;
+    else delete data.weeks[weekStart];
+    if (cleanedDay.trim()) data.days[date] = cleanedDay;
+    else delete data.days[date];
+    selection = { date, text: data.days[date] || '', weekStart, weekText: data.weeks[weekStart] || '' };
     syncDays();
     emitDirty();
   };
@@ -257,18 +356,36 @@ export function mountCalendar(
     void openTodoList(data.todos || '', setTodos);
   };
 
-  const toFcInputs = (): EventInput[] => Object.entries(data.days)
-    .filter(([, text]) => String(text || '').trim())
-    .map(([date, text]) => ({
-      id: date,
-      title: plainPreview(text, 40) || '工作计划',
-      start: date,
-      allDay: true,
-      editable: false,
-      startEditable: false,
-      durationEditable: false,
-      extendedProps: { content: text },
-    }));
+  const toFcInputs = (): EventInput[] => [
+    ...Object.entries(data.weeks)
+      .filter(([, text]) => String(text || '').trim())
+      .map(([weekStart, text]) => ({
+        id: `week:${weekStart}`,
+        // 周横幅按实际可用宽度裁切；这里必须保留完整摘要，不能预先按字符数截断。
+        title: plainPreview(text, Number.MAX_SAFE_INTEGER) || '周事项',
+        start: weekStart,
+        end: addDateDays(weekStart, 7),
+        allDay: true,
+        editable: false,
+        startEditable: false,
+        durationEditable: false,
+        classNames: ['calendar-week-event', `calendar-week-tone-${weekTone(weekStart)}`],
+        extendedProps: { content: text, kind: 'week', weekStart },
+      })),
+    ...Object.entries(data.days)
+      .filter(([, text]) => String(text || '').trim())
+      .map(([date, text]) => ({
+        id: `day:${date}`,
+        title: plainPreview(text, 40) || '今日事项',
+        start: date,
+        allDay: true,
+        editable: false,
+        startEditable: false,
+        durationEditable: false,
+        classNames: ['calendar-day-event'],
+        extendedProps: { content: text, kind: 'day', date },
+      })),
+  ];
 
   const syncDays = () => {
     if (!calendar) return;
@@ -277,7 +394,8 @@ export function mountCalendar(
   };
 
   const setSelectionDate = (date: string) => {
-    selection = { date, text: data.days[date] || '' };
+    const weekStart = weekStartFor(date);
+    selection = { date, text: data.days[date] || '', weekStart, weekText: data.weeks[weekStart] || '' };
     host.querySelectorAll('.fc-day-selected').forEach(el => el.classList.remove('fc-day-selected'));
     host.querySelectorAll(`[data-date="${date}"]`).forEach(el => el.classList.add('fc-day-selected'));
     changed();
@@ -287,8 +405,9 @@ export function mountCalendar(
     if (dayDialogOpen) return;
     dayDialogOpen = true;
     setSelectionDate(date);
-    void openDayPlan(date, data.days[date] || '', markdown => {
-      setDayContent(date, markdown);
+    const weekStart = weekStartFor(date);
+    void openDayPlan(date, data.weeks[weekStart] || '', data.days[date] || '', (weekMarkdown, dayMarkdown) => {
+      setDayAndWeekContent(date, weekMarkdown, dayMarkdown);
     }).finally(() => {
       dayDialogOpen = false;
       changed();
@@ -364,26 +483,12 @@ export function mountCalendar(
     strip.append(scroller);
   }
 
-  let lastDateClick = { date: '', at: 0 };
   let dayDialogOpen = false;
-
-  const bindDayDblClick = () => {
-    host.querySelectorAll<HTMLElement>('.fc-daygrid-day[data-date]').forEach(cell => {
-      if (cell.dataset.dblBound) return;
-      cell.dataset.dblBound = '1';
-      cell.addEventListener('dblclick', e => {
-        e.preventDefault();
-        e.stopPropagation();
-        const date = cell.dataset.date;
-        if (!date) return;
-        openDay(date);
-      });
-    });
-  };
 
   calendar = new Calendar(host, {
     plugins: [dayGridPlugin, interactionPlugin, listPlugin],
     locale: zhCnLocale,
+    firstDay: 1,
     initialView: 'dayGridMonth',
     headerToolbar: {
       left: 'prev,next today',
@@ -457,33 +562,33 @@ export function mountCalendar(
       return { domNodes: [wrap] };
     },
     eventContent(arg) {
+      if (arg.event.extendedProps.kind === 'week') {
+        const week = document.createElement('div');
+        week.className = 'fc-week-plan';
+        week.textContent = arg.event.title;
+        return { domNodes: [week] };
+      }
       const content = String(arg.event.extendedProps.content || arg.event.title || '');
       return { domNodes: [buildDayContentEl(content)] };
     },
     dateClick: info => {
       const date = info.dateStr.slice(0, 10);
       setSelectionDate(date);
-      const now = Date.now();
-      if (date === lastDateClick.date && now - lastDateClick.at < 450) {
-        openDay(date);
-        lastDateClick = { date: '', at: 0 };
-        return;
-      }
-      lastDateClick = { date, at: now };
+      openDay(date);
     },
     eventClick: (info: EventClickArg) => {
-      const date = dateKey(info.event.id || info.event.startStr);
+      const date = info.event.extendedProps.kind === 'week'
+        ? String(info.event.extendedProps.weekStart || info.event.startStr).slice(0, 10)
+        : String(info.event.extendedProps.date || info.event.startStr).slice(0, 10);
       if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return;
       setSelectionDate(date);
       openDay(date);
     },
     datesSet: () => {
-      bindDayDblClick();
       refreshMonthStrip();
     },
   });
   calendar.render();
-  bindDayDblClick();
   refreshMonthStrip();
 
   function currentSelection() {
@@ -495,15 +600,17 @@ export function mountCalendar(
       selection: {
         date: selection.date,
         text: selection.text,
+        week_start: selection.weekStart,
+        week_text: selection.weekText,
       },
-      surrounding: selection.text.trim()
-        ? `日期：${selection.date}\n内容：\n${selection.text}`
-        : `日期：${selection.date}\n（当天尚无内容）`,
+      surrounding: `本周起始：${selection.weekStart}\n本周事项：\n${selection.weekText || '（本周尚无事项）'}\n\n日期：${selection.date}\n今日事项：\n${selection.text || '（当天尚无事项）'}`,
     };
   }
 
   return {
     async load(asset) {
+      // 待办窗口独立挂在 body；先持久化并关闭旧窗口，避免其状态串到新日历资产。
+      closeTodoList();
       loading = true;
       assetId = asset.id;
       revision = asset.revision;
@@ -519,9 +626,10 @@ export function mountCalendar(
         && !isDayMap((asset.content as { days?: unknown }).days),
       );
       const missingDays = !(asset.content && typeof asset.content === 'object' && 'days' in (asset.content as object));
+      const missingWeeks = !(asset.content && typeof asset.content === 'object' && 'weeks' in (asset.content as object));
       const missingMonthly = !(asset.content && typeof asset.content === 'object' && 'monthlyEvents' in (asset.content as object));
       const missingTodos = !(asset.content && typeof asset.content === 'object' && 'todos' in (asset.content as object));
-      if (looksLegacy || missingDays || missingMonthly || missingTodos) {
+      if (looksLegacy || missingDays || missingWeeks || missingMonthly || missingTodos) {
         emitDirty();
       } else {
         changed();

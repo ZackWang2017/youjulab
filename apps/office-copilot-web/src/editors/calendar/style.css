@@ -187,16 +187,27 @@
 }
 
 .calendar-day-dialog {
-  min-width: min(720px, calc(100vw - 48px));
-  width: min(720px, calc(100vw - 48px));
-  max-height: min(88vh, 780px);
+  min-width: min(780px, calc(100vw - 48px));
+  width: min(860px, calc(100vw - 48px));
+  max-height: min(88vh, 720px);
   overflow: auto;
   background: white;
   border-radius: 8px;
-  padding: 18px 20px 16px;
-  box-shadow: 0 12px 40px rgba(20, 28, 36, 0.18);
+  border: 1px solid #d9e2e1;
+  padding: 0;
+  box-shadow: 0 22px 56px rgba(20, 28, 36, 0.22);
   display: grid;
-  gap: 10px;
+  gap: 0;
+}
+
+.calendar-day-dialog-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 17px 20px 15px;
+  border-bottom: 1px solid #e3e9e8;
+  background: #f8fbfa;
 }
 
 .calendar-day-dialog h2,
@@ -238,18 +249,92 @@
   font-size: 10px;
 }
 
+.calendar-day-dialog-close {
+  display: inline-grid;
+  width: 30px;
+  min-width: 30px;
+  height: 30px;
+  min-height: 30px;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: #657272;
+  cursor: pointer;
+}
+
+.calendar-day-dialog-close:hover,
+.calendar-day-dialog-close:focus-visible {
+  background: #e9efee;
+  color: #263535;
+}
+
+.calendar-day-dialog-close svg {
+  width: 17px;
+  height: 17px;
+}
+
 .calendar-day-dialog .md-editor-host {
-  min-height: 320px;
-  border: 1px solid #d8dde1;
-  border-radius: 6px;
+  min-height: 126px;
+  border: 1px solid #d6dfde;
+  border-radius: 5px;
   overflow: hidden;
   background: #fff;
+  box-shadow: inset 0 1px 2px rgba(31, 52, 52, 0.03);
 }
 
 .calendar-day-dialog .dialog-actions {
   display: flex;
   gap: 8px;
   justify-content: flex-end;
+  padding: 12px 20px 16px;
+  border-top: 1px solid #e5ebea;
+  background: #fafcfc;
+}
+
+.calendar-day-dialog .calendar-plan-sections {
+  display: grid;
+  gap: 20px;
+  padding: 20px;
+}
+
+.calendar-day-dialog .calendar-plan-section {
+  display: grid;
+  gap: 9px;
+}
+
+.calendar-day-dialog .calendar-plan-section h3 {
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #33414a;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.calendar-day-dialog .calendar-plan-section h3::before {
+  width: 3px;
+  height: 14px;
+  border-radius: 2px;
+  background: #6c7d7c;
+  content: "";
+}
+
+.calendar-day-dialog .calendar-week-section h3 {
+  color: #0f6f64;
+}
+
+.calendar-day-dialog .calendar-week-section h3::before {
+  background: #168274;
+}
+
+.calendar-day-dialog .calendar-plan-section .plan-md-live {
+  height: 126px;
+  min-height: 126px;
+  max-height: 126px;
+  overflow: auto;
 }
 
 /* —— Markdown 编辑器（编写 / 预览） —— */
@@ -506,6 +591,62 @@
   color: #24282d !important;
 }
 
+#calendar .fc-event.calendar-week-event,
+#calendar .fc-daygrid-event.calendar-week-event,
+#calendar .fc-h-event.calendar-week-event {
+  min-height: 23px;
+  margin: 2px 3px 3px !important;
+  border: 1px solid transparent !important;
+  border-radius: 4px;
+  box-shadow: inset 3px 0 rgba(255,255,255,.45), 0 1px 2px rgba(20,28,36,.08) !important;
+  color: #fff !important;
+}
+
+#calendar .fc-event.calendar-week-event {
+  overflow: hidden;
+  white-space: nowrap !important;
+}
+
+#calendar .fc-event.calendar-week-event .fc-event-main,
+#calendar .fc-h-event.calendar-week-event .fc-event-main {
+  padding: 3px 7px !important;
+  color: #fff !important;
+  min-width: 0;
+}
+
+#calendar .fc-event.calendar-week-event .fc-event-main-frame {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+}
+
+#calendar .calendar-week-tone-teal {
+  background: rgba(22, 130, 116, 0.3) !important;
+  border-color: rgba(15, 111, 100, 0.46) !important;
+  color: #0d5149 !important;
+}
+
+#calendar .calendar-week-tone-teal .fc-event-main,
+#calendar .calendar-week-tone-teal .fc-week-plan {
+  color: #0d5149 !important;
+}
+#calendar .calendar-week-tone-blue { background: #3774b6 !important; border-color: #245b98 !important; }
+#calendar .calendar-week-tone-gold { background: #b7791f !important; border-color: #925a12 !important; }
+#calendar .calendar-week-tone-plum { background: #805e9d !important; border-color: #65487e !important; }
+
+#calendar .fc-week-plan {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 #calendar .fc-daygrid-event .fc-event-main,
 #calendar .fc-h-event .fc-event-main {
   background: transparent !important;
@@ -513,14 +654,73 @@
   padding: 1px 2px;
 }
 
-#calendar .fc-daygrid-event:hover,
-#calendar .fc-daygrid-event:focus {
+#calendar .fc-daygrid-event:not(.calendar-week-event):hover,
+#calendar .fc-daygrid-event:not(.calendar-week-event):focus {
   background: transparent !important;
+}
+
+#calendar .fc-daygrid-event.calendar-week-event:hover,
+#calendar .fc-daygrid-event.calendar-week-event:focus,
+#calendar .fc-h-event.calendar-week-event:hover,
+#calendar .fc-h-event.calendar-week-event:focus {
+  color: #fff !important;
+  filter: brightness(0.9);
+}
+
+#calendar .fc-daygrid-event.calendar-week-event.calendar-week-tone-teal:hover,
+#calendar .fc-daygrid-event.calendar-week-event.calendar-week-tone-teal:focus,
+#calendar .fc-h-event.calendar-week-event.calendar-week-tone-teal:hover,
+#calendar .fc-h-event.calendar-week-event.calendar-week-tone-teal:focus {
+  background: rgba(22, 130, 116, 0.48) !important;
+  background-color: rgba(22, 130, 116, 0.48) !important;
+  color: #083f39 !important;
+}
+
+#calendar .fc-daygrid-event.calendar-week-event.calendar-week-tone-teal:hover .fc-event-main,
+#calendar .fc-daygrid-event.calendar-week-event.calendar-week-tone-teal:focus .fc-event-main,
+#calendar .fc-h-event.calendar-week-event.calendar-week-tone-teal:hover .fc-event-main,
+#calendar .fc-h-event.calendar-week-event.calendar-week-tone-teal:focus .fc-event-main {
+  color: #083f39 !important;
+}
+
+#calendar .fc-daygrid-event.calendar-week-event.calendar-week-tone-blue:hover,
+#calendar .fc-daygrid-event.calendar-week-event.calendar-week-tone-blue:focus,
+#calendar .fc-h-event.calendar-week-event.calendar-week-tone-blue:hover,
+#calendar .fc-h-event.calendar-week-event.calendar-week-tone-blue:focus {
+  background: #285f9f !important;
+  background-color: #285f9f !important;
+}
+
+#calendar .fc-daygrid-event.calendar-week-event.calendar-week-tone-gold:hover,
+#calendar .fc-daygrid-event.calendar-week-event.calendar-week-tone-gold:focus,
+#calendar .fc-h-event.calendar-week-event.calendar-week-tone-gold:hover,
+#calendar .fc-h-event.calendar-week-event.calendar-week-tone-gold:focus {
+  background: #945d13 !important;
+  background-color: #945d13 !important;
+}
+
+#calendar .fc-daygrid-event.calendar-week-event.calendar-week-tone-plum:hover,
+#calendar .fc-daygrid-event.calendar-week-event.calendar-week-tone-plum:focus,
+#calendar .fc-h-event.calendar-week-event.calendar-week-tone-plum:hover,
+#calendar .fc-h-event.calendar-week-event.calendar-week-tone-plum:focus {
+  background: #66457f !important;
+  background-color: #66457f !important;
+}
+
+#calendar .fc-daygrid-event.calendar-week-event:hover .fc-event-main,
+#calendar .fc-daygrid-event.calendar-week-event:focus .fc-event-main,
+#calendar .fc-h-event.calendar-week-event:hover .fc-event-main,
+#calendar .fc-h-event.calendar-week-event:focus .fc-event-main {
+  color: #fff !important;
 }
 
 #calendar .fc-daygrid-event {
   white-space: normal !important;
   margin: 1px 2px !important;
+}
+
+#calendar .fc-daygrid-event.calendar-day-event {
+  margin-top: 1px !important;
 }
 
 #calendar .fc-day-plan {
@@ -570,6 +770,26 @@
 
 #calendar .fc-list-event td {
   background: transparent !important;
+}
+
+@media (max-width: 720px) {
+  .calendar-day-dialog {
+    min-width: calc(100vw - 24px);
+    width: calc(100vw - 24px);
+  }
+
+  .calendar-day-dialog-head,
+  .calendar-day-dialog .calendar-plan-sections,
+  .calendar-day-dialog .dialog-actions {
+    padding-left: 14px;
+    padding-right: 14px;
+  }
+
+  .calendar-day-dialog .calendar-plan-section .plan-md-live {
+    height: 118px;
+    min-height: 118px;
+    max-height: 118px;
+  }
 }
 
 /* —— 月度事件：今天按钮后的滚动条 + 管理弹窗 —— */

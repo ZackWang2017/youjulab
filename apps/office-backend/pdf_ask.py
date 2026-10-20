@@ -7,7 +7,8 @@ import sys
 from collections.abc import AsyncIterator
 from typing import Any
 
-from config import ROOT, model_configured, model_name
+from config import ROOT
+from model_runtime import model_configuration_error, model_configured, model_name
 from assistant import iter_chat_events
 from office_pdf_vector import ensure_index, get_index_status, search_chunks
 
@@ -375,7 +376,7 @@ async def iter_pdf_ask_events(
     ensure_first: bool = True,
 ) -> AsyncIterator[dict]:
     if not model_configured():
-        raise ValueError("请先在后台配置模型（OFFICE_MODEL_BASE_URL、OFFICE_MODEL_NAME）。")
+        raise ValueError(model_configuration_error())
     text = (selection or "").strip()
     ask = (question or "").strip()
     doc_id = (document_id or "").strip()

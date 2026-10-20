@@ -13,7 +13,7 @@ from fastapi.testclient import TestClient
 HERE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(HERE))
 
-from document_skill_run import _collect_items, _select_new_items, _write_news_brief, run_document_skill  # noqa: E402
+from document_skill_run import WeReadLoginRequired, _collect_items, _select_new_items, _write_news_brief, run_document_skill  # noqa: E402
 from config import digest_tz  # noqa: E402
 from datetime import datetime, timedelta  # noqa: E402
 from zoneinfo import ZoneInfo  # noqa: E402
@@ -269,6 +269,16 @@ class NewsBriefMarkdownTests(unittest.TestCase):
         shelf.assert_called_once_with()
         weread = [item for item in items if item["source"] == "腾讯财经"]
         self.assertEqual(weread[0]["title"], "早报")
+
+    def test_weread_login_required_stops_before_model_generation(self) -> None:
+        with patch("document_skill_run._fetch_weread_shelf", return_value={
+            "error": "微信读书登录已过期。", "login_required": True, "accounts": [],
+        }), patch("document_skill_run.start_weread_login", return_value={
+            "session_id": "scan-1", "status": "pending", "qr_data_url": "data:image/svg+xml;base64,test",
+        }):
+            with self.assertRaises(WeReadLoginRequired) as raised:
+                _collect_items({"preset_sources": "weread"})
+        self.assertEqual(raised.exception.session["session_id"], "scan-1")
 
     def test_weread_title_is_kept_when_the_summary_is_empty(self) -> None:
         with patch("document_skill_run._fetch_weread_shelf", return_value={

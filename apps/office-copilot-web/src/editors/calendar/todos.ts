@@ -31,6 +31,18 @@ function persist() {
   onChangeCb?.(serializeTodoMarkdown(items));
 }
 
+/**
+ * 待办窗口挂在 document.body 下，日历资产切换前必须关闭它。
+ * 先写回当前回调，避免旧窗口的内容在切换后误写到新日历。
+ */
+export function closeTodoList() {
+  if (!windowEl || windowEl.hidden) return;
+  persist();
+  windowEl.hidden = true;
+  onChangeCb = null;
+  items = [];
+}
+
 function bindDrag(win: HTMLElement, handle: HTMLElement) {
   let drag: { x: number; y: number; left: number; top: number } | null = null;
   handle.addEventListener('pointerdown', event => {
@@ -93,6 +105,7 @@ function renderList() {
       const next = text.value.replace(/\r?\n/g, '');
       if (next !== text.value) text.value = next;
       items[index] = { ...items[index], text: next };
+      persist();
       fitText();
     });
     text.addEventListener('blur', () => {
@@ -163,10 +176,7 @@ export function openTodoList(
     addInput?.focus();
   });
 
-  win.querySelector<HTMLButtonElement>('[data-close]')!.onclick = () => {
-    persist();
-    win.hidden = true;
-  };
+  win.querySelector<HTMLButtonElement>('[data-close]')!.onclick = closeTodoList;
 
   bindDrag(win, win.querySelector<HTMLElement>('.calendar-todo-titlebar')!);
   renderList();

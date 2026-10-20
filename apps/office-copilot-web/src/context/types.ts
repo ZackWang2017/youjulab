@@ -1,4 +1,4 @@
-export type Surface = 'sheet' | 'document' | 'pdf' | 'mindmap' | 'research' | 'diagram' | 'calendar';
+export type Surface = 'sheet' | 'document' | 'pdf' | 'mindmap' | 'research' | 'diagram' | 'project_plan' | 'calendar';
 export interface Context {
   document_id: string;
   surface: Surface;

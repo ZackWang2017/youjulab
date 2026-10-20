@@ -1,4 +1,6 @@
+import base64
 import json
+import os
 import sys
 import unittest
 from pathlib import Path
@@ -87,6 +89,7 @@ class OfficeApiTests(unittest.TestCase):
         self.assertIsNone(calendar["project_id"])
         self.assertEqual(calendar["placement"], "user")
         self.assertEqual(calendar["content"]["format"], "invp-calendar-v1")
+        self.assertEqual(calendar["content"]["weeks"], {})
         self.assertEqual(calendar["content"]["days"], {})
         self.assertEqual(calendar["content"]["todos"], "")
         calc = self.client.get(f"/projects/{user['last_project_id']}/assets?kind=calc", headers=headers).json()["assets"]
@@ -129,8 +132,60 @@ class OfficeApiTests(unittest.TestCase):
         self.assertEqual(legacy["placement"], "project")
         self.assertEqual(legacy["project_id"], first_project)
 
+        # 编辑时可改可见范围：项目可见 → 我可见 → 再绑回当前项目
+        shared = self.client.put(
+            f"/assets/{legacy_id}",
+            headers=headers,
+            json={"revision": 0, "name": "共享笔记", "visibility": "user"},
+        ).json()
+        self.assertEqual(shared["placement"], "user")
+        self.assertIsNone(shared["project_id"])
+        self.client.post(f"/projects/{first_project}/select", headers=headers)
+        rebound = self.client.put(
+            f"/assets/{legacy_id}",
+            headers=headers,
+            json={"revision": shared["revision"], "visibility": "project"},
+        ).json()
+        self.assertEqual(rebound["placement"], "project")
+        self.assertEqual(rebound["project_id"], first_project)
+
         removed = self.client.delete(f"/assets/{personal['id']}", headers=headers)
         self.assertEqual(removed.status_code, 200)
+
+    def test_project_plan_visibility_create_and_edit(self):
+        data = self.auth("plan-vis@example.com")
+        headers = {"Authorization": f"Bearer {data['token']}"}
+        first = data["user"]["last_project_id"]
+        personal = self.client.post(
+            f"/projects/{first}/assets",
+            headers=headers,
+            json={"kind": "project_plan", "name": "个人计划", "visibility": "user"},
+        ).json()
+        self.assertEqual(personal["placement"], "user")
+        self.assertIsNone(personal["project_id"])
+
+        second = self.client.post("/projects", headers=headers, json={"name": "另一项目"}).json()
+        listed = self.client.get(
+            f"/projects/{second['id']}/assets?kind=project_plan", headers=headers,
+        ).json()["assets"]
+        self.assertIn(personal["id"], [item["id"] for item in listed])
+
+        self.client.post(f"/projects/{second['id']}/select", headers=headers)
+        project_scoped = self.client.put(
+            f"/assets/{personal['id']}",
+            headers=headers,
+            json={"revision": personal["revision"], "name": "项目计划", "visibility": "project"},
+        ).json()
+        self.assertEqual(project_scoped["placement"], "project")
+        self.assertEqual(project_scoped["project_id"], second["id"])
+        only_second = self.client.get(
+            f"/projects/{first}/assets?kind=project_plan", headers=headers,
+        ).json()["assets"]
+        self.assertNotIn(personal["id"], [item["id"] for item in only_second])
+        still_second = self.client.get(
+            f"/projects/{second['id']}/assets?kind=project_plan", headers=headers,
+        ).json()["assets"]
+        self.assertIn(personal["id"], [item["id"] for item in still_second])
 
     def test_user_tools_stay_visible_across_projects(self):
         data = self.auth("a@example.com")
@@ -156,6 +211,35 @@ class OfficeApiTests(unittest.TestCase):
         kept_notebook = self.client.get(f"/assets/{notebook_id}", headers=token)
         self.assertEqual(kept_notebook.status_code, 200)
         self.assertIsNone(kept_notebook.json()["project_id"])
+
+    def test_project_plan_is_project_scoped_and_saves_normally(self):
+        data = self.auth("plan@example.com")
+        token = {"Authorization": f"Bearer {data['token']}"}
+        first = data["user"]["last_project_id"]
+        created = self.client.post(
+            f"/projects/{first}/assets", headers=token,
+            json={"kind": "project_plan", "name": "季度投研计划"},
+        ).json()
+        self.assertEqual(created["kind"], "project_plan")
+        self.assertEqual(created["placement"], "project")
+        self.assertEqual(created["project_id"], first)
+        self.assertEqual(created["content"], {"format": "invp-project-plan-v1", "tasks": []})
+        listed = self.client.get(f"/projects/{first}/assets?kind=project_plan", headers=token).json()["assets"]
+        self.assertIn(created["id"], [item["id"] for item in listed])
+        saved = self.client.put(
+            f"/assets/{created['id']}", headers=token,
+            json={"revision": created["revision"], "content": {"format": "invp-project-plan-v1", "tasks": [{"id": "t1"}]}},
+        ).json()
+        self.assertEqual(saved["revision"], created["revision"] + 1)
+        self.assertEqual(saved["content"]["tasks"][0]["id"], "t1")
+        second = self.client.post("/projects", headers=token, json={"name": "另一个项目"}).json()
+        elsewhere = self.client.get(f"/projects/{second['id']}/assets?kind=project_plan", headers=token).json()["assets"]
+        self.assertNotIn(created["id"], [item["id"] for item in elsewhere])
+
+        # 历史脏数据也不能把项目计划变成跨项目资产。
+        self.store._assets[created["id"]]["project_id"] = None
+        elsewhere = self.client.get(f"/projects/{second['id']}/assets?kind=project_plan", headers=token).json()["assets"]
+        self.assertNotIn(created["id"], [item["id"] for item in elsewhere])
 
     def test_user_cannot_read_foreign_project_or_asset(self):
         a = self.auth("a@example.com")
@@ -183,6 +267,74 @@ class OfficeApiTests(unittest.TestCase):
         self.assertEqual(me["last_assets"]["sheet"], extra["id"])
         self.assertEqual(len(assets) + 1, 2)
 
+    def test_recent_assets_follow_opening_order_and_include_project_name(self):
+        data = self.auth("recent@example.com")
+        token = {"Authorization": f"Bearer {data['token']}"}
+        project_id = data["user"]["last_project_id"]
+        first = self.client.post(
+            f"/projects/{project_id}/assets", headers=token,
+            json={"kind": "sheet", "name": "第一张表"},
+        ).json()
+        second = self.client.post(
+            f"/projects/{project_id}/assets", headers=token,
+            json={"kind": "document", "name": "研究笔记"},
+        ).json()
+        self.client.post(f"/assets/{first['id']}/select", headers=token)
+        recent = self.client.get("/assets/recent", headers=token).json()["assets"]
+        self.assertEqual([item["id"] for item in recent[:2]], [first["id"], second["id"]])
+        project = self.client.get("/projects", headers=token).json()["projects"][0]
+        self.assertEqual(recent[0]["project_name"], project["name"])
+
+        self.client.post(f"/assets/{second['id']}/select?track_recent=false", headers=token)
+        unchanged = self.client.get("/assets/recent", headers=token).json()["assets"]
+        self.assertEqual([item["id"] for item in unchanged[:2]], [first["id"], second["id"]])
+
+        other_project = self.client.post("/projects", headers=token, json={"name": "另一项目"}).json()
+        other = self.client.post(
+            f"/projects/{other_project['id']}/assets", headers=token,
+            json={"kind": "pdf", "name": "另一项目 PDF"},
+        ).json()
+        first_project_recent = self.client.get(
+            f"/assets/recent?project_id={project_id}", headers=token,
+        ).json()["assets"]
+        other_project_recent = self.client.get(
+            f"/assets/recent?project_id={other_project['id']}", headers=token,
+        ).json()["assets"]
+        self.assertNotIn(other["id"], [item["id"] for item in first_project_recent])
+        self.assertEqual(other_project_recent[0]["id"], other["id"])
+
+    def test_recent_assets_can_be_manually_reordered(self):
+        data = self.auth("recent-order@example.com")
+        token = {"Authorization": f"Bearer {data['token']}"}
+        project_id = data["user"]["last_project_id"]
+        first = self.client.post(
+            f"/projects/{project_id}/assets", headers=token,
+            json={"kind": "sheet", "name": "估值表"},
+        ).json()
+        second = self.client.post(
+            f"/projects/{project_id}/assets", headers=token,
+            json={"kind": "document", "name": "研究笔记"},
+        ).json()
+        self.client.post(f"/assets/{first['id']}/select", headers=token)
+        recent = self.client.get(f"/assets/recent?project_id={project_id}", headers=token).json()["assets"]
+        ordered_ids = [item["id"] for item in recent]
+        reordered_ids = list(reversed(ordered_ids))
+
+        response = self.client.put(
+            "/assets/recent", headers=token,
+            json={"project_id": project_id, "asset_ids": reordered_ids},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([item["id"] for item in response.json()["assets"]], reordered_ids)
+        persisted = self.client.get(f"/assets/recent?project_id={project_id}", headers=token).json()["assets"]
+        self.assertEqual([item["id"] for item in persisted], reordered_ids)
+
+        invalid = self.client.put(
+            "/assets/recent", headers=token,
+            json={"project_id": project_id, "asset_ids": reordered_ids[:-1]},
+        )
+        self.assertEqual(invalid.status_code, 400)
+
     def test_save_revision_conflict(self):
         data = self.auth("a@example.com")
         token = {"Authorization": f"Bearer {data['token']}"}
@@ -197,6 +349,62 @@ class OfficeApiTests(unittest.TestCase):
         res = self.client.post("/auth/login", json={"email": "a@example.com", "password": "wrong12"})
         self.assertEqual(res.status_code, 401)
 
+    def test_change_password_requires_current_password_and_updates_login(self):
+        data = self.auth("a@example.com")
+        headers = {"Authorization": f"Bearer {data['token']}"}
+        wrong = self.client.put("/auth/password", headers=headers, json={"current_password": "wrong12", "new_password": "updated12"})
+        self.assertEqual(wrong.status_code, 400)
+        changed = self.client.put("/auth/password", headers=headers, json={"current_password": "secret1", "new_password": "updated12"})
+        self.assertEqual(changed.status_code, 200)
+        self.assertEqual(self.client.post("/auth/login", json={"email": "a@example.com", "password": "secret1"}).status_code, 401)
+        self.assertEqual(self.client.post("/auth/login", json={"email": "a@example.com", "password": "updated12"}).status_code, 200)
+
+    def test_user_model_config_encrypts_key_and_never_returns_plaintext(self):
+        key = base64.urlsafe_b64encode(b"x" * 32).decode("ascii")
+        with patch.dict(os.environ, {
+            "LLM_CONFIG_SET": "1",
+            "OFFICE_MODEL_CREDENTIALS_KEY": key,
+        }, clear=False):
+            data = self.auth("model@example.com")
+            headers = {"Authorization": f"Bearer {data['token']}"}
+            secret = "sk-user-secret-1234"
+            saved = self.client.put("/auth/model-config", headers=headers, json={
+                "provider": "deepseek",
+                "model": "deepseek-flash",
+                "base_url": "https://api.deepseek.com/v1",
+                "api_key": secret,
+            })
+            self.assertEqual(saved.status_code, 200)
+            self.assertNotIn(secret, saved.text)
+            row = self.store.get_user_model_config(data["user"]["id"])
+            self.assertIsNotNone(row)
+            self.assertNotIn("api_key", row)
+            self.assertNotIn(secret, json.dumps(row))
+            self.assertTrue(row["api_key_ciphertext"])
+            self.assertTrue(row["api_key_nonce"])
+            shown = self.client.get("/auth/model-config", headers=headers)
+            self.assertEqual(shown.status_code, 200)
+            self.assertNotIn(secret, shown.text)
+            self.assertEqual(shown.json()["key_last4"], "1234")
+            self.assertTrue(shown.json()["active_configured"])
+            deleted = self.client.delete("/auth/model-config", headers=headers)
+            self.assertEqual(deleted.status_code, 200)
+            self.assertTrue(deleted.json()["deleted"])
+
+    def test_user_model_config_requires_encryption_key(self):
+        with patch.dict(os.environ, {
+            "LLM_CONFIG_SET": "1",
+            "OFFICE_MODEL_CREDENTIALS_KEY": "",
+        }, clear=False):
+            data = self.auth("no-key@example.com")
+            headers = {"Authorization": f"Bearer {data['token']}"}
+            response = self.client.put("/auth/model-config", headers=headers, json={
+                "provider": "deepseek", "model": "deepseek-flash",
+                "base_url": "https://api.deepseek.com", "api_key": "sk-no-store",
+            })
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("OFFICE_MODEL_CREDENTIALS_KEY", response.json()["error"])
+
     def test_register_short_password_is_readable(self):
         res = self.client.post("/auth/register", json={"email": "a@example.com", "password": "123"})
         self.assertEqual(res.status_code, 422)
@@ -208,11 +416,11 @@ class OfficeApiTests(unittest.TestCase):
     def test_assistant_status_reports_model_name(self):
         data = self.auth("a@example.com")
         headers = {"Authorization": f"Bearer {data['token']}"}
-        with patch("server.model_name", return_value="deepseek-chat"), patch("server.model_configured", return_value=True), patch("server.model_api_key", return_value="sk-test"):
+        with patch("server.model_name", return_value="deepseek-flash"), patch("server.model_configured", return_value=True), patch("server.model_api_key", return_value="sk-test"):
             res = self.client.get("/assistant/status", headers=headers).json()
         self.assertTrue(res["configured"])
         self.assertTrue(res["has_api_key"])
-        self.assertEqual(res["model_name"], "deepseek-chat")
+        self.assertEqual(res["model_name"], "deepseek-flash")
 
     def test_assistant_run_without_model_is_unavailable(self):
         data = self.auth("a@example.com")
@@ -220,7 +428,7 @@ class OfficeApiTests(unittest.TestCase):
         with patch("server.model_configured", return_value=False):
             res = self.client.post("/assistant/run", headers=headers, json={"context": SHEET_CONTEXT, "intent": "清理空白"})
         self.assertEqual(res.status_code, 503)
-        self.assertEqual(res.json()["error"], "请先在后台配置模型。")
+        self.assertTrue(res.json()["error"])
 
     def test_assistant_run_streams_answer_and_patch(self):
         data = self.auth("a@example.com")
@@ -809,48 +1017,6 @@ class OfficeApiTests(unittest.TestCase):
         mcp = {"Authorization": "Bearer invpdevstatic32tokenpleasechange"}
         self.assertEqual(self.client.get("/auth/me", headers=mcp).status_code, 401)
 
-    def test_remote_data_posts_selection_and_returns_matrix(self):
-        data = self.auth("owner@example.com")
-        headers = {"Authorization": f"Bearer {data['token']}"}
-        class FakeResponse:
-            status_code = 200
-            content = b'{"values":[["A",2]]}'
-            text = '{"values":[["A",2]]}'
-            def json(self):
-                return {"values": [["A", 2]]}
-        class FakeClient:
-            def __init__(self, *args, **kwargs):
-                self.calls = []
-            def request(self, method, url, **kwargs):
-                self.calls.append((method, url, kwargs))
-                return FakeResponse()
-            def close(self):
-                pass
-        fake = FakeClient()
-        with patch("remote_data.httpx.Client", return_value=fake):
-            res = self.client.post("/sheets/remote-data", headers=headers, json={
-                "url": "https://example.com/fn",
-                "function": "score",
-                "values": [["月份", 1]],
-            })
-        self.assertEqual(res.status_code, 200)
-        self.assertEqual(res.json()["values"], [["A", 2]])
-        method, url, kwargs = fake.calls[0]
-        self.assertEqual(method, "POST")
-        self.assertEqual(url, "https://example.com/fn")
-        body = json.loads(kwargs["content"])
-        self.assertEqual(body, {"values": [["月份", 1]], "function": "score"})
-
-    def test_remote_data_rejects_bad_url(self):
-        data = self.auth("owner@example.com")
-        headers = {"Authorization": f"Bearer {data['token']}"}
-        res = self.client.post("/sheets/remote-data", headers=headers, json={"url": "file:///etc/passwd", "values": [["1"]]})
-        self.assertEqual(res.status_code, 400)
-        self.assertIn("http", res.json()["error"])
-
-    def test_remote_data_requires_login(self):
-        self.assertEqual(self.client.post("/sheets/remote-data", json={"url": "https://example.com", "values": []}).status_code, 401)
-
     def test_pdf_file_can_be_replaced(self):
         data = self.auth("pdf-save@example.com")
         headers = {"Authorization": f"Bearer {data['token']}"}
@@ -869,6 +1035,29 @@ class OfficeApiTests(unittest.TestCase):
         downloaded = self.client.get(f"/assets/{created['id']}/file", headers=headers)
         self.assertEqual(downloaded.status_code, 200)
         self.assertTrue(downloaded.content.startswith(b"%PDF"))
+
+    def test_pdf_notebook_is_saved_with_pdf_asset(self):
+        data = self.auth("pdf-notebook@example.com")
+        headers = {"Authorization": f"Bearer {data['token']}"}
+        created = self.client.post(
+            f"/projects/{data['user']['last_project_id']}/assets",
+            headers=headers,
+            json={"kind": "pdf", "name": "研报"},
+        ).json()
+        notebook = {"type": "doc", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "投资要点"}]}]}
+        saved = self.client.put(
+            f"/assets/{created['id']}",
+            headers=headers,
+            json={"revision": created["revision"], "content": {"notebook": notebook}},
+        )
+        self.assertEqual(saved.status_code, 200, saved.text)
+        self.assertEqual(saved.json()["content"], {"notebook": notebook})
+        rejected = self.client.put(
+            f"/assets/{created['id']}",
+            headers=headers,
+            json={"revision": saved.json()["revision"], "content": {"unexpected": "body"}},
+        )
+        self.assertEqual(rejected.status_code, 400)
 
     def _sample_pdf(self, text="Hello annotation sample"):
         import pymupdf
@@ -945,6 +1134,38 @@ class OfficeApiTests(unittest.TestCase):
             self.assertEqual(count, 0)
         finally:
             empty.close()
+
+    def test_portfolio_gateway_forwards_with_user_id(self):
+        import server as server_module
+
+        data = self.auth("holder@example.com")
+        headers = {"Authorization": f"Bearer {data['token']}"}
+        calls = []
+
+        async def fake_forward(method, path, *, user_id, query="", body=b""):
+            calls.append((method, path, user_id, query, body))
+            return 200, {"portfolios": [{"id": 1, "name": "A"}]}
+
+        with patch.object(server_module, "forward_portfolio", fake_forward):
+            listed = self.client.get("/portfolio/portfolios?x=1", headers=headers)
+            created = self.client.post("/portfolio/portfolios", headers=headers, json={"name": "A"})
+        self.assertEqual(listed.status_code, 200)
+        self.assertEqual(listed.json()["portfolios"][0]["name"], "A")
+        self.assertEqual(calls[0][:4], ("GET", "portfolios", data["user"]["id"], "x=1"))
+        self.assertEqual(calls[1][0], "POST")
+        self.assertEqual(json.loads(calls[1][4]), {"name": "A"})
+        self.assertEqual(created.status_code, 200)
+        self.assertEqual(self.client.get("/portfolio/portfolios").status_code, 401)
+
+    def test_portfolio_gateway_only_allows_portfolio_paths(self):
+        import portfolio_proxy
+        from fastapi import HTTPException
+
+        with self.assertRaises(HTTPException):
+            portfolio_proxy._target("documents/1")
+        self.assertTrue(portfolio_proxy._target("portfolios/3/stats").endswith("/api/portfolio/portfolios/3/stats"))
+        self.assertTrue(portfolio_proxy._target("overview/holdings").endswith("/api/portfolio/overview/holdings"))
+        self.assertTrue(portfolio_proxy._target("scheduler/tasks").endswith("/api/scheduler/tasks"))
 
 
 if __name__ == "__main__":

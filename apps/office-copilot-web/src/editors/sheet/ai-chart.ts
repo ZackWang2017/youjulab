@@ -5,6 +5,7 @@ import { GridComponent, LegendComponent, TooltipComponent } from 'echarts/compon
 import { CanvasRenderer } from 'echarts/renderers';
 import type { EChartsType } from 'echarts/core';
 import { mountThinkingStatus } from '../../ui/thinking-status';
+import './ai-chart.css';
 
 echarts.use([BarChart, LineChart, PieChart, ScatterChart, GridComponent, LegendComponent, TooltipComponent, CanvasRenderer]);
 
@@ -175,7 +176,10 @@ export function openAiChartAssistant(hooks: Hooks) {
         </form>
         <div class="sheet-ai-chart-thinking" data-thinking></div>
         <div class="sheet-ai-chart-result" data-result hidden>
-          <div class="sheet-ai-chart-meta"><strong data-chart-title></strong><span data-source></span></div>
+          <div class="sheet-ai-chart-meta">
+            <strong data-chart-title></strong><span data-source></span>
+            <button type="button" class="sheet-ai-chart-expand" data-expand title="放大图表" aria-label="放大图表"><i data-lucide="maximize-2"></i></button>
+          </div>
           <div class="sheet-ai-chart-canvas"></div>
           <p data-summary></p>
           <div class="sheet-ai-chart-save">
@@ -199,6 +203,7 @@ export function openAiChartAssistant(hooks: Hooks) {
   const list = win.querySelector<HTMLElement>('[data-list]')!;
   const result = win.querySelector<HTMLElement>('[data-result]')!;
   const canvas = win.querySelector<HTMLElement>('.sheet-ai-chart-canvas')!;
+  const expandButton = win.querySelector<HTMLButtonElement>('[data-expand]')!;
   const nameInput = win.querySelector<HTMLInputElement>('[data-name]')!;
   const saveButton = win.querySelector<HTMLButtonElement>('[data-save]')!;
   const saveRow = win.querySelector<HTMLElement>('.sheet-ai-chart-save')!;
@@ -212,6 +217,17 @@ export function openAiChartAssistant(hooks: Hooks) {
   submit.disabled = true;
 
   const normalizePrompt = (value: string) => value.trim().replace(/\s+/g, ' ');
+
+  const setChartExpanded = (expanded: boolean) => {
+    result.classList.toggle('is-expanded', expanded);
+    expandButton.title = expanded ? '还原图表' : '放大图表';
+    expandButton.setAttribute('aria-label', expandButton.title);
+    const icon = document.createElement('i');
+    icon.dataset.lucide = expanded ? 'minimize-2' : 'maximize-2';
+    expandButton.replaceChildren(icon);
+    createIcons({ icons });
+    requestAnimationFrame(() => chart?.resize());
+  };
 
   const refreshGenerateState = () => {
     const unchanged = currentPlan !== null
@@ -322,6 +338,7 @@ export function openAiChartAssistant(hooks: Hooks) {
   };
 
   const reset = () => {
+    setChartExpanded(false);
     input.value = '';
     nameInput.value = '';
     currentPlan = null;
@@ -337,10 +354,20 @@ export function openAiChartAssistant(hooks: Hooks) {
   updateSelection();
   void loadLibrary();
   win.querySelector<HTMLButtonElement>('[data-new]')!.onclick = reset;
+  expandButton.onclick = () => setChartExpanded(!result.classList.contains('is-expanded'));
+
+  const onKeydown = (event: KeyboardEvent) => {
+    if (event.key === 'Escape' && result.classList.contains('is-expanded')) {
+      event.preventDefault();
+      setChartExpanded(false);
+    }
+  };
+  window.addEventListener('keydown', onKeydown);
 
   const close = () => {
     closed = true;
     window.removeEventListener('resize', resize);
+    window.removeEventListener('keydown', onKeydown);
     chart?.dispose();
     chart = null;
     win.remove();

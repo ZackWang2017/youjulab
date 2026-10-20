@@ -16,9 +16,11 @@ export function bindPdfShots(options: {
   let windowEl: HTMLElement | null = null;
   let mask: HTMLElement | null = null;
   let stopSnip: (() => void) | null = null;
-  const button = options.container.querySelector<HTMLButtonElement>('[data-pdf-shot]');
-  const list = options.container.querySelector<HTMLElement>('[data-pdf-shots]');
-  if (!button || !list) return { sync() {} };
+  const foundButton = options.container.querySelector<HTMLButtonElement>('[data-pdf-shot]');
+  const foundList = options.container.querySelector<HTMLElement>('[data-pdf-shots]');
+  if (!foundButton || !foundList) return { sync() {} };
+  const button = foundButton;
+  const list = foundList;
 
   function storageKey(id = options.documentId()) {
     return id ? `office-pdf-shots:${id}` : '';

@@ -11,21 +11,27 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 HERE = Path(__file__).resolve().parents[2]
-SERVICE_PATH = HERE / "financial-data-service" / "service" / "statement_service.py"
+SERVICE_DIR = HERE / "financial-data-service" / "service"
+SERVICE_PATH = SERVICE_DIR / "statement_service.py"
+ENSURE_PATH = SERVICE_DIR / "statement_ensure.py"
 
 
-def _load_statement_service():
-    spec = importlib.util.spec_from_file_location("financial_statement_service", SERVICE_PATH)
+def _load_module(name: str, path: Path):
+    loaded = sys.modules.get(name)
+    if loaded is not None:
+        return loaded
+    spec = importlib.util.spec_from_file_location(name, path)
     if spec is None or spec.loader is None:
-        raise RuntimeError(f"cannot load service module: {SERVICE_PATH}")
+        raise RuntimeError(f"cannot load service module: {path}")
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
 
 
-_statement_service = _load_statement_service()
-query_financial_statements = _statement_service.query_financial_statements
+_statement_service = _load_module("financial_statement_service", SERVICE_PATH)
+_statement_ensure = _load_module("financial_statement_ensure", ENSURE_PATH)
+query_statements_with_sync = _statement_ensure.query_statements_with_sync
 SUPPORTED_CURRENCY_UNITS = _statement_service.SUPPORTED_CURRENCY_UNITS
 DEFAULT_CURRENCY_UNIT = _statement_service.DEFAULT_CURRENCY_UNIT
 
@@ -61,7 +67,7 @@ def _error(message: str, *, status: int, headers: dict[str, str]) -> JSONRespons
 async def list_financial_statements(request: Request, headers: dict[str, str]) -> JSONResponse:
     try:
         payload = _query_params_from_request(request)
-        rows = query_financial_statements(**payload)
+        result = query_statements_with_sync(**payload)
     except ValueError as exc:
         return _error(str(exc), status=400, headers=headers)
     except Exception as exc:  # noqa: BLE001
@@ -69,9 +75,10 @@ async def list_financial_statements(request: Request, headers: dict[str, str]) -
 
     return _ok(
         {
-            "total": len(rows),
-            "currency_unit": payload["currency_unit"],
-            "items": rows,
+            "total": len(result["items"]),
+            "currency_unit": result["currency_unit"],
+            "items": result["items"],
+            "sync": result["sync"],
         },
         headers=headers,
     )
@@ -83,14 +90,14 @@ async def list_financial_item_names(request: Request, headers: dict[str, str]) -
         payload = _query_params_from_request(request)
         payload.pop("source_item_name", None)
         payload.pop("standard_item_name", None)
-        rows = query_financial_statements(**payload)
-        names = sorted({row["source_item_name"] for row in rows if row.get("source_item_name")})
+        result = query_statements_with_sync(**payload)
+        names = sorted({row["source_item_name"] for row in result["items"] if row.get("source_item_name")})
     except ValueError as exc:
         return _error(str(exc), status=400, headers=headers)
     except Exception as exc:  # noqa: BLE001
         return _error(str(exc), status=500, headers=headers)
 
-    return _ok({"total": len(names), "items": names}, headers=headers)
+    return _ok({"total": len(names), "items": names, "sync": result["sync"]}, headers=headers)
 
 
 def register_routes(

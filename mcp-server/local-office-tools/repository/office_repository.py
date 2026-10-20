@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import json
 from typing import Any, Callable
 
 import httpx
@@ -100,6 +101,33 @@ class OfficeClient:
 
     def search_pdf(self, document_id: str, query: str, top_k: int = 8) -> dict:
         return self.call("POST", f"/internal/pdf/{document_id}/search", {"query": query, "top_k": top_k})
+
+    def generate_pdf_outline(self, document_id: str) -> dict:
+        """Consume the office-backend SSE pipeline and return its final event to an MCP caller."""
+        url = f"{self.base_url}/assets/{document_id}/outline/generate"
+        headers = {
+            "Authorization": f"Bearer {mcp_access_token()}",
+            "X-User-Access-Token": self.token,
+            "Content-Type": "application/json",
+        }
+        if not hasattr(self.http, "stream"):
+            raise OfficeError(500, "当前 HTTP 客户端不支持 PDF 大纲流式接口。")
+        with self.http.stream("POST", url, headers=headers) as response:
+            if response.status_code >= 400:
+                raise OfficeError(response.status_code, _error_message(response))
+            for line in response.iter_lines():
+                text = line.decode() if isinstance(line, bytes) else str(line)
+                if not text.startswith("data:"):
+                    continue
+                try:
+                    event = json.loads(text[5:].strip())
+                except json.JSONDecodeError:
+                    continue
+                if event.get("type") == "error":
+                    raise OfficeError(400, str(event.get("error") or "生成 PDF 大纲失败。"))
+                if event.get("type") == "done":
+                    return event
+        raise OfficeError(502, "PDF 大纲服务未返回结果。")
 
 
 def _error_message(response: Any) -> str:

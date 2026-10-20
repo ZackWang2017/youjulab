@@ -8,7 +8,8 @@ from collections.abc import AsyncIterator
 import httpx
 import yaml
 
-from config import ROOT, model_api_key, model_base_url, model_configured, model_name
+from config import ROOT
+from model_runtime import model_api_key, model_base_url, model_configuration_error, model_configured, model_name
 from office_context import OfficeContext, selection_has_content
 from office_patch import aim_sheet_write, create_patch
 
@@ -364,7 +365,7 @@ async def iter_chat_events(
     base = model_base_url()
     name = model_name()
     if not base or not name:
-        raise ValueError("请先在后台配置 OFFICE_MODEL_BASE_URL 和 OFFICE_MODEL_NAME。")
+        raise ValueError(model_configuration_error())
     headers = {"Content-Type": "application/json"}
     key = model_api_key()
     if key:
@@ -495,7 +496,7 @@ async def iter_assistant_events(
     if not intent.strip() or len(intent) > 4000:
         raise ValueError("任务需为 1 到 4000 个字符。")
     if not model_configured():
-        raise ValueError("请先在后台配置模型（OFFICE_MODEL_BASE_URL、OFFICE_MODEL_NAME）。")
+        raise ValueError(model_configuration_error())
     if task not in STREAM_HINT:
         raise ValueError("未知任务。")
     ctx = OfficeContext.model_validate(context)

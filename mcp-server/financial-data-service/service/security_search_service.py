@@ -31,5 +31,8 @@ def search_securities(query: str, limit: int = 8) -> list[dict]:
         if ticker in seen or ticker not in known:
             continue
         seen.add(ticker)
-        rows.append({"ticker_code": ticker, "name": hint_name[ticker]})
+        row = {"ticker_code": ticker, "name": hint_name[ticker]}
+        if known[ticker].get("security_type"):
+            row["security_type"] = known[ticker]["security_type"]
+        rows.append(row)
     return rows[:size]

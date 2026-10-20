@@ -7,7 +7,8 @@ from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from config import ROOT, digest_tz, model_configured
+from config import ROOT, digest_tz
+from model_runtime import model_configuration_error, model_configured
 from document_archive import MAX_DOCUMENT_BYTES, archive_document, content_bytes
 from digest_fetch import collect_topic_items
 from digest_render import markdown_to_tiptap_nodes, merge_into_document
@@ -135,7 +136,7 @@ def _digest_messages(title: str, topics_payload: list[dict]) -> list[dict]:
 
 async def _iter_llm_digest(title: str, topics_payload: list[dict]):
     if not model_configured():
-        raise ValueError("请先配置模型后再执行资讯任务。")
+        raise ValueError(model_configuration_error())
     answer = ""
     async for event in iter_chat_events(_digest_messages(title, topics_payload), stream=True, json_object=False, thinking=True):
         if event.get("type") != "delta" or not event.get("text"):

@@ -8,8 +8,8 @@ SKILLS = (
     {
         "id": "office",
         "name": "外部 Agent Skill",
-        "filename": "invp-office-skill.md",
-        "path": "invp-skills/SKILL.md",
+        "filename": "youjulab-skill.md",
+        "path": "youju-skills/SKILL.md",
     },
 )
 

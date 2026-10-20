@@ -6,6 +6,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from digest_job import due_jobs, run_digest_job
+from model_runtime import reset_current_model, set_current_model, settings_for_user
 
 if TYPE_CHECKING:
     from store import Store
@@ -18,6 +19,7 @@ async def digest_scheduler_loop(store: "Store", stop: asyncio.Event) -> None:
         try:
             jobs = due_jobs(store)
             for job in jobs:
+                token = set_current_model(settings_for_user(store, str(job.get("user_id") or "")))
                 try:
                     await run_digest_job(store, job)
                     log.info("digest ok document=%s", job.get("document_id"))
@@ -35,6 +37,8 @@ async def digest_scheduler_loop(store: "Store", stop: asyncio.Event) -> None:
                         )
                     except Exception:
                         pass
+                finally:
+                    reset_current_model(token)
         except Exception as exc:
             log.warning("digest scan error: %s", exc)
         try:

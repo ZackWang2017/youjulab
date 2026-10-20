@@ -4,18 +4,17 @@ import { UniverSheetsCorePreset } from '@univerjs/preset-sheets-core';
 import ZhCN from '@univerjs/preset-sheets-core/locales/zh-CN';
 import { UniverSheetsThreadCommentPreset } from '@univerjs/preset-sheets-thread-comment';
 import ThreadCommentZhCN from '@univerjs/preset-sheets-thread-comment/locales/zh-CN';
+import { SetStyleCommand } from '@univerjs/sheets';
 import { IMenuManagerService } from '@univerjs/ui';
 import '@univerjs/preset-sheets-core/lib/index.css';
 import '@univerjs/preset-sheets-thread-comment/lib/index.css';
 import { download, type EditorAdapter } from '../../context/types';
-import { launchAmountMomYoyChart, flattenMatrixNumbers, splitRangeSpecs, type SheetValueReader } from './custom-chart';
 import { openAiChartAssistant, type ChartResponse, type SavedSheetChart } from './ai-chart';
 import { office } from '../../office-client/client';
-import { openRemoteDataDialog, selectionMatrix, toUniverCells, coerceNumericString, inferOrKeepNumberFormat } from './remote-data';
+import { coerceNumericString, inferOrKeepNumberFormat } from './numeric-format';
 import { parseSheetStructure, serializeSheetStructure, STRUCTURE_JSON_MAX, type StructureCell } from './read-structure';
 import { patchSheetCache, putSheetCache, refreshSheetProfile } from './sheet-cache';
 import { computeSelectionStats, extractNumbers, formatStatsBrief } from './selection-stats';
-import { closeSelectDataPanel, getLockedSelectSurrounding, openSelectDataPanel } from './select-data';
 
 const SHEET_LOCALES = mergeLocales(ZhCN, ThreadCommentZhCN, {
   ui: {
@@ -32,6 +31,9 @@ function isSnapshot(content: unknown): content is Record<string, unknown> {
   return Boolean(content && typeof content === 'object' && !Array.isArray(content)
     && ('sheets' in content || 'sheetOrder' in content));
 }
+
+const SHEET_COMMENT_MANAGEMENT_MENU_ID = 'invp.sheet.comment-management';
+const TOGGLE_SHEET_COMMENT_PANEL_OPERATION_ID = 'sheet.operation.toggle-comment-panel';
 
 function rememberedSheetId(snapshot: Record<string, unknown>): string {
   const custom = snapshot.custom;
@@ -163,8 +165,6 @@ export function mountSheet(container: HTMLElement, changed: () => void, onDirty:
     if (lastReadPayloadJson && lastStructureSheetId === sheetId) {
       return tagSurrounding(lastReadPayloadJson, scope);
     }
-    const locked = getLockedSelectSurrounding(sheetId);
-    if (locked) return locked;
     if (lastStructureJson && lastStructureSheetId === sheetId) {
       return tagSurrounding(lastStructureJson, scope);
     }
@@ -256,32 +256,6 @@ export function mountSheet(container: HTMLElement, changed: () => void, onDirty:
     }
   };
 
-  function chartReader(): SheetValueReader {
-    return {
-      getActiveRangeA1: () => {
-        if (!workbook) return '';
-        const range = workbook.getActiveSheet().getSelection()?.getActiveRange();
-        return range?.getA1Notation() || '';
-      },
-      readNumbersByA1: (a1) => {
-        if (!workbook) throw new Error('表格尚未打开。');
-        const sheet = workbook.getActiveSheet();
-        const specs = splitRangeSpecs(a1);
-        if (!specs.length) throw new Error('请录入单元格坐标。');
-        const numbers: number[] = [];
-        for (const spec of specs) {
-          try {
-            const values = sheet.getRange(spec).getValues() as unknown[][];
-            numbers.push(...flattenMatrixNumbers(values));
-          } catch {
-            throw new Error(`无法解析区域「${spec}」。`);
-          }
-        }
-        return numbers;
-      },
-    };
-  }
-
   function openReadDataDialog() {
     if (!workbook) return;
     const sheet = workbook.getActiveSheet();
@@ -349,6 +323,12 @@ export function mountSheet(container: HTMLElement, changed: () => void, onDirty:
   function bindApi() {
     if (!univerAPI) return;
     ensureAiRibbonTab();
+    univerAPI.createMenu({
+      id: SHEET_COMMENT_MANAGEMENT_MENU_ID,
+      title: '评论管理',
+      tooltip: 'sheets-thread-comment-ui.menu.commentManagement',
+      action: () => univerAPI?.executeCommand(TOGGLE_SHEET_COMMENT_PANEL_OPERATION_ID),
+    }).appendTo('ribbon.data.others');
     univerAPI.addEvent(univerAPI.Event.LifeCycleChanged, markReady);
     univerAPI.addEvent(univerAPI.Event.SelectionChanged, changed);
     univerAPI.addEvent(univerAPI.Event.ActiveSheetChanged, () => {
@@ -359,35 +339,6 @@ export function mountSheet(container: HTMLElement, changed: () => void, onDirty:
       changed();
       scheduleSheetCache();
     });
-    univerAPI.createMenu({
-      id: 'office.sheet.remote-data',
-      title: '动态数据',
-      tooltip: '用当前选区调用远程接口，结果写入光标单元格',
-      action: () => {
-        if (!workbook) return;
-        const wb = workbook;
-        const sheet = wb.getActiveSheet();
-        const range = sheet.getSelection()?.getActiveRange();
-        if (!range) return;
-        openRemoteDataDialog({
-          selectionValues: () => selectionMatrix(range),
-          selectionAddress: () => range.getA1Notation(),
-          writeFromCursor: values => {
-            const cursor = sheet.getActiveCell() || range;
-            const start = cursor.getRange();
-            const cells = toUniverCells(values);
-            sheet.getRange(start.startRow, start.startColumn, cells.length, cells[0].length).setValues(cells);
-            onDirty(wb.save());
-            changed();
-            return {
-              address: sheet.getRange(start.startRow, start.startColumn, 1, 1).getA1Notation(),
-              rows: cells.length,
-              cols: cells[0].length,
-            };
-          },
-        });
-      },
-    }).appendTo('ribbon.data.others');
     univerAPI.createMenu({
       id: 'office.sheet.text-to-number',
       title: '文本转数值',
@@ -442,39 +393,27 @@ export function mountSheet(container: HTMLElement, changed: () => void, onDirty:
     }).appendTo('ribbon.data.others');
 
     univerAPI.createMenu({
-      id: 'office.sheet.select-data',
-      title: '选数据',
-      tooltip: '右上角面板收集选区（支持多选），可改数后锁定并记住近三次',
+      id: 'office.sheet.indent-text',
+      title: '缩进文本',
+      tooltip: '为当前选区增加一个汉字宽度的左侧缩进；再次点击取消',
       action: () => {
         if (!workbook || !univerAPI) return;
-        const api = univerAPI;
-        openSelectDataPanel({
-          getActiveSheet: () => workbook!.getActiveSheet(),
-          onSelectionChange: cb => {
-            const disposable = api.addEvent(api.Event.SelectionChanged, () => cb());
-            return () => {
-              if (disposable && typeof (disposable as { dispose?: () => void }).dispose === 'function') {
-                (disposable as { dispose: () => void }).dispose();
-              }
-            };
-          },
-          onDirty: () => {
-            if (!workbook) return;
-            onDirty(workbook.save());
-            changed();
-          },
+        const sheet = workbook.getActiveSheet();
+        const range = sheet.getSelection()?.getActiveRange();
+        if (!range) return;
+        const padding = range.getCellStyleData()?.pd || {};
+        const currentLeft = padding.l || 0;
+        const nextLeft = currentLeft >= 12 ? 0 : 12;
+        void univerAPI.executeCommand(SetStyleCommand.id, {
+          unitId: workbook.getId(),
+          subUnitId: sheet.getSheetId(),
+          range: range.getRange(),
+          style: { type: 'pd', value: { ...padding, l: nextLeft || undefined } },
+        }).catch(error => {
+          window.dispatchEvent(new CustomEvent('office-error', {
+            detail: error instanceof Error ? `设置缩进失败：${error.message}` : '设置缩进失败。',
+          }));
         });
-      },
-    }).appendTo('ribbon.data.others');
-
-    // 数据栏：自定义图表（点击即打开配置）
-    univerAPI.createMenu({
-      id: 'office.sheet.custom-charts',
-      title: '自定义图表',
-      tooltip: '自定义图表配置与生成',
-      action: () => {
-        if (!workbook) return;
-        launchAmountMomYoyChart(chartReader());
       },
     }).appendTo('ribbon.data.others');
 
@@ -571,11 +510,10 @@ export function mountSheet(container: HTMLElement, changed: () => void, onDirty:
     univerAPI = undefined;
     workbook = undefined;
     clearStructureCache();
-    closeSelectDataPanel();
     container.replaceChildren();
     container.inert = true;
     container.dataset.ready = 'false';
-    document.querySelectorAll<HTMLElement>('.sheet-chart-window, .sheet-ai-chart-window').forEach(el => {
+    document.querySelectorAll<HTMLElement>('.sheet-ai-chart-window').forEach(el => {
       const close = el.querySelector<HTMLButtonElement>('[data-close]');
       if (close) close.click();
       else el.remove();
@@ -589,6 +527,8 @@ export function mountSheet(container: HTMLElement, changed: () => void, onDirty:
           menu: {
             'sheet.toolbar.text-to-number': { hidden: true },
             'sheet.contextMenu.text-to-number': { hidden: true },
+            // Move the built-in comment panel entry from Insert to Data below.
+            [TOGGLE_SHEET_COMMENT_PANEL_OPERATION_ID]: { hidden: true },
           },
           sheets: {
             disableForceStringAlert: true,

@@ -1,14 +1,22 @@
 import { AnnotationMode, getDocument, GlobalWorkerOptions, type PDFDocumentProxy, type PDFDocumentLoadingTask } from 'pdfjs-dist';
 import { EventBus, PDFLinkService, PDFViewer, ScrollMode } from 'pdfjs-dist/web/pdf_viewer.mjs';
+import { Editor } from '@tiptap/core';
+import Link from '@tiptap/extension-link';
+import StarterKit from '@tiptap/starter-kit';
+import { createIcons, icons } from 'lucide';
 import worker from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import 'pdfjs-dist/web/pdf_viewer.css';
 import './style.css';
 import type { Context, EditorAdapter } from '../../context/types';
 import { persist, saved } from '../../context/types';
-import { askText } from '../../workspace/nav';
 import { isAiAskContent, parseAskThread } from './ask-ai';
 import { openAskAiDialog } from './ask-ai-dialog';
+import { openPdfAnnotationDialog, pdfAnnotationPreview } from './annotation-dialog';
+import { openOutlineDialog } from './outline-dialog';
+import { outlineToTiptap, type PdfOutlineItem } from './outline';
 import { bindPdfShots } from './shots';
+import { openPdfSummaryDialog } from './summary-dialog';
+import { circleBullet, collapsibleListItem, fourLevelBulletTab } from '../rich-text-lists';
 
 GlobalWorkerOptions.workerSrc = worker;
 
@@ -17,6 +25,7 @@ const MAX_ZOOM = 5;
 const MAX_PDF = 30 * 1024 * 1024;
 /** 与 office-backend PdfAnnotBody / pdf_annot 对齐；前端先按行合并再截断。 */
 const MAX_ANNOT_BOXES = 200;
+const EMPTY_NOTEBOOK = { type: 'doc', content: [{ type: 'paragraph' }] };
 
 /** 合并同行相邻矩形，减少大选区 getClientRects 数量。 */
 function mergeSelectionBoxes(boxes: number[][], yTol = 3, xGap = 6): number[][] {
@@ -82,6 +91,18 @@ type Pane = {
   lastWidth: number;
   ready: boolean;
 };
+type PdfAssetViewState = {
+  page?: number;
+  scale?: number | 'page-width';
+  split?: boolean;
+  active?: PaneId;
+  copyPage?: number;
+  copyScale?: number | 'page-width';
+  splitRatio?: number;
+  notebookOpen?: boolean;
+  notebookWidth?: number;
+  notebookScrollTop?: number;
+};
 
 function xrefOf(id: string) {
   const xref = Number.parseInt(id, 10);
@@ -115,37 +136,6 @@ function askDelete(title: string) {
   });
 }
 
-function askAnnot(title: string, initial: string) {
-  return new Promise<'delete' | string | null>(resolve => {
-    const overlay = document.createElement('div');
-    overlay.className = 'dialog-overlay';
-    overlay.innerHTML = `<form class="name-dialog name-dialog-note"><h2></h2><textarea required rows="6"></textarea><div class="dialog-actions"><button type="button" data-delete>删除</button><button type="button" data-cancel>取消</button><button class="primary">保存</button></div></form>`;
-    overlay.querySelector('h2')!.textContent = title;
-    const input = overlay.querySelector('textarea')!;
-    input.placeholder = '批注内容';
-    input.value = initial;
-    input.maxLength = 500;
-    const finish = (value: 'delete' | string | null) => { overlay.remove(); resolve(value); };
-    overlay.querySelector('[data-cancel]')!.addEventListener('click', () => finish(null));
-    overlay.querySelector('[data-delete]')!.addEventListener('click', () => finish('delete'));
-    overlay.addEventListener('click', e => { if (e.target === overlay) finish(null); });
-    overlay.querySelector('form')!.addEventListener('submit', e => {
-      e.preventDefault();
-      const name = input.value.trim();
-      if (name) finish(name);
-    });
-    input.addEventListener('keydown', e => {
-      if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
-        e.preventDefault();
-        overlay.querySelector('form')!.requestSubmit();
-      }
-    });
-    document.body.append(overlay);
-    input.focus();
-    if (initial) input.setSelectionRange(0, input.value.length);
-  });
-}
-
 function cloneBuffer(data: ArrayBuffer) {
   return data.slice(0);
 }
@@ -167,9 +157,10 @@ function createPane(id: PaneId, root: HTMLElement, scroller: HTMLDivElement): Pa
 export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
   onPickFile: (file: File) => Promise<void>;
   fetchFile: (id: string) => Promise<ArrayBuffer | null>;
-  onAnnotate: (body: { kind: AnnotKind; page: number; boxes: number[][]; content?: string }) => Promise<{ xref: number; mark_xref?: number } | void>;
-  onUpdateAnnot: (xref: number, content: string) => Promise<void>;
-  onDeleteAnnot: (xref: number) => Promise<{ deleted?: number[] } | void>;
+  onAnnotate: (body: { kind: AnnotKind; page: number; boxes: number[][]; content?: string }) => Promise<{ xref: number; mark_xref?: number; revision?: number } | void>;
+  onUpdateAnnot: (xref: number, content: string) => Promise<{ revision?: number } | void>;
+  onDeleteAnnot: (xref: number) => Promise<{ deleted?: number[]; revision?: number } | void>;
+  saveNotebook: (content: unknown, revision: number) => Promise<number>;
   userName: () => string;
   modelName: () => string;
   askAi: (body: {
@@ -179,8 +170,9 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
     document_id: string;
     filename: string;
     history: { role: 'user' | 'assistant'; content: string }[];
-    translate?: boolean;
   }, onEvent: (event: Record<string, any>) => void) => Promise<void>;
+  generateOutline: (onEvent: (event: Record<string, any>) => void) => Promise<void>;
+  generateSummary: (body: { selection: string; page: number }, onEvent: (event: Record<string, any>) => void) => Promise<void>;
 }): EditorAdapter {
   let pdf: PDFDocumentProxy | undefined;
   let copyPdf: PDFDocumentProxy | undefined;
@@ -189,9 +181,19 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
   let fileBytes: ArrayBuffer | null = null;
   let filename = '';
   let documentId = '';
+  let assetRevision = 0;
+  let notebookContent: unknown = EMPTY_NOTEBOOK;
+  let notebookEditor: Editor | null = null;
+  let notebookLoading = false;
+  let notebookPending: unknown | null = null;
+  let notebookSaving: Promise<void> = Promise.resolve();
+  let notebookSaveTimer: ReturnType<typeof setTimeout> | undefined;
   let selected: Context | null = null;
   let selectionVersion = 0;
   let busy = false;
+  let outlineBusy = false;
+  let summaryBusy = false;
+  let notebookInsertAt: number | null = null;
   let opening = false;
   let split = false;
   let pendingSplit: boolean | null = null;
@@ -206,6 +208,27 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
   const copyScroller = copyRoot.querySelector<HTMLDivElement>('.pdf-scroll')!;
   const empty = mainScroller.firstElementChild!;
   const counter = container.querySelector<HTMLElement>('[data-page]')!;
+  const notebookToggle = container.querySelector<HTMLButtonElement>('[data-pdf-notebook]')!;
+  const outlineToggle = container.querySelector<HTMLButtonElement>('[data-pdf-outline]')!;
+  container.querySelector<HTMLButtonElement>('[data-pdf-note-command="quote"]')?.remove();
+  const summaryToggle = document.createElement('button');
+  summaryToggle.type = 'button';
+  summaryToggle.className = 'pdf-summary-toggle';
+  summaryToggle.title = '整理选中文本摘要';
+  summaryToggle.setAttribute('aria-label', '整理选中文本摘要');
+  summaryToggle.innerHTML = '<i data-lucide="list-collapse"></i>';
+  outlineToggle.insertAdjacentElement('afterend', summaryToggle);
+  createIcons({ icons });
+  const notebookPanel = container.querySelector<HTMLElement>('[data-pdf-notebook-panel]')!;
+  const notebookEditorHost = container.querySelector<HTMLElement>('[data-pdf-notebook-editor]')!;
+  const notebookSplit = document.createElement('div');
+  notebookSplit.className = 'pdf-notebook-split';
+  notebookSplit.setAttribute('role', 'separator');
+  notebookSplit.setAttribute('aria-orientation', 'vertical');
+  notebookSplit.setAttribute('aria-label', '调整笔记本宽度');
+  notebookSplit.tabIndex = 0;
+  notebookSplit.hidden = true;
+  notebookPanel.insertAdjacentElement('afterend', notebookSplit);
   const input = container.querySelector<HTMLInputElement>('input[type="file"]')!;
   const pageInput = container.querySelector<HTMLInputElement>('[data-page-input]')!;
   const total = container.querySelector<HTMLElement>('[data-page-total]')!;
@@ -219,12 +242,11 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
   const askAiBtn = container.querySelector<HTMLButtonElement>('[data-ask-ai]')!;
   const annotateButtons = [...container.querySelectorAll<HTMLButtonElement>('[data-annotate]')];
   const error = (detail: string) => window.dispatchEvent(new CustomEvent('office-error', { detail }));
-  const SPLIT_RATIO_KEY = 'office-pdf-split-ratio';
   const MIN_PANE = 120;
-  let splitRatio = (() => {
-    const raw = Number(localStorage.getItem(SPLIT_RATIO_KEY));
-    return Number.isFinite(raw) && raw > 0 && raw < 1 ? raw : 0.5;
-  })();
+  const MIN_NOTEBOOK_WIDTH = 240;
+  let notebookWidth = 360;
+  let splitRatio = 0.5;
+  let notebookScrollTimer: ReturnType<typeof setTimeout> | undefined;
 
   function clampSplitRatio(ratio: number) {
     const total = stage.clientWidth || 1;
@@ -244,9 +266,7 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
     splitRatio = clampSplitRatio(ratio);
     stage.style.setProperty('--pdf-copy-width', `${(splitRatio * 100).toFixed(2)}%`);
     paneSplit.setAttribute('aria-valuenow', String(Math.round(splitRatio * 100)));
-    if (save) {
-      try { localStorage.setItem(SPLIT_RATIO_KEY, String(splitRatio)); } catch { /* ignore */ }
-    }
+    if (save) persistPdfViewState({ splitRatio });
     return splitRatio;
   }
   applySplitRatio(splitRatio);
@@ -297,6 +317,54 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
     }
   });
 
+  function clampNotebookWidth(width: number) {
+    const max = Math.max(MIN_NOTEBOOK_WIDTH, Math.min(620, (stage.clientWidth || 1000) * 0.55));
+    return Math.min(max, Math.max(MIN_NOTEBOOK_WIDTH, width));
+  }
+  function applyNotebookWidth(width: number, save = false) {
+    notebookWidth = clampNotebookWidth(width);
+    stage.style.setProperty('--pdf-notebook-width', `${Math.round(notebookWidth)}px`);
+    notebookSplit.setAttribute('aria-valuemin', String(MIN_NOTEBOOK_WIDTH));
+    notebookSplit.setAttribute('aria-valuemax', String(Math.round(Math.max(MIN_NOTEBOOK_WIDTH, Math.min(620, (stage.clientWidth || 1000) * 0.55)))));
+    notebookSplit.setAttribute('aria-valuenow', String(Math.round(notebookWidth)));
+    if (save) persistPdfViewState({ notebookWidth });
+  }
+  applyNotebookWidth(notebookWidth);
+  let draggingNotebook = false;
+  notebookSplit.addEventListener('pointerdown', event => {
+    if (notebookPanel.hidden || event.button !== 0) return;
+    event.preventDefault();
+    draggingNotebook = true;
+    container.classList.add('resizing-notebook');
+    try { notebookSplit.setPointerCapture(event.pointerId); } catch { /* ignore */ }
+  });
+  const onNotebookMove = (event: PointerEvent) => {
+    if (!draggingNotebook || notebookPanel.hidden) return;
+    const rect = stage.getBoundingClientRect();
+    if (!(rect.width > 0)) return;
+    applyNotebookWidth(event.clientX - rect.left, true);
+  };
+  notebookSplit.addEventListener('pointermove', onNotebookMove);
+  window.addEventListener('pointermove', onNotebookMove);
+  const stopNotebookDrag = () => {
+    if (!draggingNotebook) return;
+    draggingNotebook = false;
+    container.classList.remove('resizing-notebook');
+    refreshSplitPanes();
+  };
+  notebookSplit.addEventListener('pointerup', stopNotebookDrag);
+  notebookSplit.addEventListener('pointercancel', stopNotebookDrag);
+  window.addEventListener('pointerup', stopNotebookDrag);
+  notebookSplit.addEventListener('dblclick', () => setNotebookOpen(false));
+  notebookSplit.addEventListener('keydown', event => {
+    if (notebookPanel.hidden) return;
+    if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+      event.preventDefault();
+      applyNotebookWidth(notebookWidth + (event.key === 'ArrowLeft' ? -1 : 1) * (event.shiftKey ? 32 : 16), true);
+      refreshSplitPanes();
+    }
+  });
+
   const main = createPane('main', mainRoot, mainScroller);
   const copy = createPane('copy', copyRoot, copyScroller);
   const panes = () => (split ? [main, copy] : [main]);
@@ -339,6 +407,174 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
     if (!(current > 0) || Math.abs(nextScale - current) < 1e-4) { controls(); return; }
     pane.viewer.updateScale({ scaleFactor: nextScale / current, origin, drawingDelay: 80 });
   }
+  function notebookDocument(content: unknown) {
+    if (!content || typeof content !== 'object' || Array.isArray(content)) return EMPTY_NOTEBOOK;
+    const value = (content as { notebook?: unknown }).notebook;
+    return value && typeof value === 'object' ? value : EMPTY_NOTEBOOK;
+  }
+  function runNotebookCommand(command: string) {
+    if (!notebookEditor) return;
+    const chain = notebookEditor.chain().focus();
+    if (command === 'bold') chain.toggleBold().run();
+    if (command === 'italic') chain.toggleItalic().run();
+    if (command === 'heading') chain.toggleHeading({ level: 2 }).run();
+    if (command === 'heading3') chain.toggleHeading({ level: 3 }).run();
+    if (command === 'heading4') chain.toggleHeading({ level: 4 }).run();
+    if (command === 'heading5') chain.toggleHeading({ level: 5 }).run();
+    if (command === 'bullet') chain.toggleBulletList().run();
+    if (command === 'ordered') chain.toggleOrderedList().run();
+    if (command === 'quote') chain.toggleBlockquote().run();
+    if (command === 'undo') chain.undo().run();
+    if (command === 'redo') chain.redo().run();
+  }
+  function flushNotebookSave() {
+    clearTimeout(notebookSaveTimer);
+    notebookSaveTimer = undefined;
+    const content = notebookPending;
+    notebookPending = null;
+    if (!content || !documentId) return notebookSaving;
+    const id = documentId;
+    notebookSaving = notebookSaving.then(async () => {
+      try {
+        const revision = await hooks.saveNotebook(content, assetRevision);
+        if (id !== documentId) return;
+        assetRevision = revision;
+        window.dispatchEvent(new CustomEvent('office-saved'));
+      } catch (err) {
+        if (!notebookPending && id === documentId) notebookPending = content;
+        window.dispatchEvent(new CustomEvent('office-error', {
+          detail: `PDF 笔记保存失败：${err instanceof Error ? err.message : String(err)}`,
+        }));
+      }
+    });
+    return notebookSaving;
+  }
+  function queueNotebookSave(content: unknown) {
+    notebookPending = content;
+    clearTimeout(notebookSaveTimer);
+    notebookSaveTimer = setTimeout(() => {
+      notebookSaveTimer = undefined;
+      void flushNotebookSave();
+    }, 700);
+  }
+  function ensureNotebookEditor() {
+    if (notebookEditor) return;
+    notebookEditor = new Editor({
+      element: notebookEditorHost,
+      extensions: [
+        StarterKit.configure({ bulletList: false, listItem: false }),
+        Link.configure({ openOnClick: true, autolink: true, defaultProtocol: 'https' }),
+        circleBullet,
+        collapsibleListItem,
+        fourLevelBulletTab,
+      ],
+      content: notebookContent as any,
+      editable: Boolean(documentId),
+      onUpdate: ({ editor }) => {
+        if (!notebookLoading) queueNotebookSave(editor.getJSON());
+      },
+      onSelectionUpdate: ({ editor }) => {
+        if (editor.isFocused) notebookInsertAt = editor.state.selection.from;
+      },
+    });
+  }
+  function restoreNotebookScroll(id = documentId) {
+    const top = Number(pdfViewState(id).notebookScrollTop);
+    const scrollTop = Number.isFinite(top) && top >= 0 ? top : 0;
+    requestAnimationFrame(() => {
+      if (id === documentId && !notebookPanel.hidden) notebookEditorHost.scrollTop = scrollTop;
+    });
+  }
+  function rememberNotebookUi() {
+    if (!documentId) return;
+    persistPdfViewState({
+      notebookOpen: !notebookPanel.hidden,
+      notebookWidth,
+      notebookScrollTop: notebookEditorHost.scrollTop,
+      splitRatio,
+    });
+  }
+  function setNotebookOpen(open: boolean, save = true) {
+    if (open && !documentId) return;
+    if (!open && save) rememberNotebookUi();
+    if (open) ensureNotebookEditor();
+    notebookPanel.hidden = !open;
+    notebookSplit.hidden = !open;
+    notebookToggle.setAttribute('aria-pressed', open ? 'true' : 'false');
+    notebookToggle.title = open ? '关闭 PDF 笔记本' : '打开 PDF 笔记本';
+    if (open) applyNotebookWidth(notebookWidth);
+    if (save) persistPdfViewState({ notebookOpen: open });
+    if (open) restoreNotebookScroll();
+    requestAnimationFrame(() => refreshSplitPanes());
+  }
+  function loadNotebook(content: unknown, revision: number) {
+    notebookLoading = true;
+    notebookContent = notebookDocument(content);
+    assetRevision = revision;
+    notebookPending = null;
+    notebookInsertAt = null;
+    clearTimeout(notebookSaveTimer);
+    notebookSaveTimer = undefined;
+    notebookEditorHost.scrollTop = 0;
+    if (notebookEditor) {
+      notebookEditor.commands.setContent(notebookContent as any);
+      notebookEditor.setEditable(Boolean(documentId));
+    }
+    notebookLoading = false;
+  }
+  notebookEditorHost.addEventListener('scroll', () => {
+    if (!documentId || notebookPanel.hidden) return;
+    const id = documentId;
+    const scrollTop = notebookEditorHost.scrollTop;
+    clearTimeout(notebookScrollTimer);
+    notebookScrollTimer = setTimeout(() => {
+      notebookScrollTimer = undefined;
+      if (id === documentId) persistPdfViewState({ notebookScrollTop: scrollTop }, id);
+    }, 120);
+  }, { passive: true });
+  function appendOutline(outline: PdfOutlineItem[]) {
+    setNotebookOpen(true);
+    ensureNotebookEditor();
+    if (!notebookEditor) return;
+    notebookEditor.chain().focus('end').insertContent(outlineToTiptap(outline)).run();
+    queueNotebookSave(notebookEditor.getJSON());
+    // Outline generation is a completed PDF action; persist it before a refresh can discard it.
+    void flushNotebookSave();
+    changed();
+  }
+  function summaryToTiptap(raw: unknown, depth = 0): unknown[] {
+    if (!Array.isArray(raw) || depth >= 4) return [];
+    const content = raw.flatMap(item => {
+      if (!item || typeof item !== 'object') return [];
+      const value = item as { text?: unknown; children?: unknown };
+      const text = typeof value.text === 'string' ? value.text.trim().slice(0, 56) : '';
+      if (!text) return [];
+      const children = summaryToTiptap(value.children, depth + 1);
+      return [{ type: 'listItem', content: [{ type: 'paragraph', content: [{ type: 'text', text }] }, ...children] }];
+    });
+    return content.length ? [{ type: 'bulletList', content }] : [];
+  }
+  async function summarizeSelection() {
+    const dom = readDomSelection();
+    const text = (dom?.text || String(selected?.selection?.text || '')).trim();
+    const page = dom?.page || Number(selected?.selection?.page || 0);
+    if (!text || !page) { alertMessage('请先在 PDF 中选中需要整理的文字。'); return; }
+    if (!notebookEditor || notebookInsertAt === null) { alertMessage('请先在笔记文本区选择摘要插入位置。'); return; }
+    summaryBusy = true;
+    controls();
+    openPdfSummaryDialog({
+      run: onEvent => hooks.generateSummary({ selection: text, page }, onEvent),
+      onInsert: async items => {
+        const content = summaryToTiptap(items);
+        if (!content.length) throw new Error('未生成可插入的层级摘要。');
+        const position = Math.min(Math.max(1, notebookInsertAt!), notebookEditor!.state.doc.content.size);
+        notebookEditor!.chain().focus().insertContentAt(position, content).run();
+        notebookInsertAt = notebookEditor!.state.selection.from;
+        queueNotebookSave(notebookEditor!.getJSON());
+      },
+      onFinish: () => { summaryBusy = false; controls(); },
+    });
+  }
   function controls() {
     const pane = active();
     const current = pane.viewer.currentPageNumber || 1;
@@ -358,6 +594,9 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
     fitWidth.disabled = busy || !pane.ready;
     annotateButtons.forEach(button => { button.disabled = busy || !main.ready || !documentId; });
     askAiBtn.disabled = busy || !main.ready || !documentId;
+    notebookToggle.disabled = busy || !documentId;
+    outlineToggle.disabled = busy || outlineBusy || !main.ready || !documentId;
+    summaryToggle.disabled = busy || summaryBusy || !main.ready || !documentId || !notebookEditor;
     splitBtn.disabled = busy || !main.ready || !documentId || !fileBytes;
     splitBtn.setAttribute('aria-pressed', split ? 'true' : 'false');
     splitBtn.textContent = split ? '关闭浏览' : '复制浏览';
@@ -382,15 +621,34 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
   function viewKey(id = documentId) {
     return id ? `office-pdf-view:${id}` : '';
   }
+  function pdfViewState(id = documentId): PdfAssetViewState {
+    const value = saved(viewKey(id));
+    return value && typeof value === 'object' && !Array.isArray(value) ? value as PdfAssetViewState : {};
+  }
+  function persistPdfViewState(patch: Partial<PdfAssetViewState>, id = documentId) {
+    const key = viewKey(id);
+    if (!key) return;
+    persist(key, { ...pdfViewState(id), ...patch });
+  }
+  function restoreAssetUi(id = documentId) {
+    const state = pdfViewState(id);
+    const storedRatio = Number(state.splitRatio);
+    const storedWidth = Number(state.notebookWidth);
+    splitRatio = Number.isFinite(storedRatio) && storedRatio > 0 && storedRatio < 1 ? storedRatio : 0.5;
+    notebookWidth = Number.isFinite(storedWidth) && storedWidth >= MIN_NOTEBOOK_WIDTH ? storedWidth : 360;
+    applySplitRatio(splitRatio);
+    applyNotebookWidth(notebookWidth);
+    setNotebookOpen(state.notebookOpen === true, false);
+  }
   function scaleOf(pane: Pane) {
     const scaleValue = pane.viewer.currentScaleValue;
     return scaleValue === 'page-width' ? 'page-width' : pane.viewer.currentScale;
   }
-  function rememberView() {
+  function rememberView(force = false) {
     const key = viewKey();
-    if (!key || opening || busy || !main.ready || container.hidden) return;
-    const prev = saved(key) || {};
-    persist(key, {
+    if (!key || !main.ready || (!force && (opening || busy || container.hidden))) return;
+    const prev = pdfViewState();
+    persistPdfViewState({
       page: main.viewer.currentPageNumber || 1,
       scale: scaleOf(main),
       split: pendingSplit ?? split,
@@ -416,7 +674,7 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
       pane.ready = true;
       pane.viewer.scrollMode = ScrollMode.VERTICAL;
       if (pane.id === 'main') {
-        const stored = saved(viewKey());
+        const stored = pdfViewState();
         const legacyPage = Number(saved(documentId ? `office-pdf-page:${documentId}` : ''));
         const page = typeof stored?.page === 'number' ? stored.page
           : (Number.isInteger(legacyPage) ? legacyPage : 0);
@@ -429,7 +687,7 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
           void setSplit(true, focus).finally(() => { pendingSplit = null; });
         }
       } else {
-        const stored = saved(viewKey());
+        const stored = pdfViewState();
         applyStoredScale(pane, stored?.copyScale);
         jumpToStoredPage(pane, stored?.copyPage, copyPdf?.numPages || 0);
       }
@@ -468,7 +726,7 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
       pane.lastWidth = width;
       if (pane.id === 'main') {
         if (appeared) {
-          applyStoredScale(pane, saved(viewKey())?.scale);
+          applyStoredScale(pane, pdfViewState().scale);
           pane.viewer.update();
         } else if (pane.viewer.currentScaleValue === 'page-width') {
           fitToWidth(pane);
@@ -648,7 +906,7 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
       note.className = 'pdf-live-annot pdf-live-note' + (annot.aiAsk ? ' pdf-ai-badge' : '');
       note.dataset.xref = String(annot.xref);
       note.textContent = annot.aiAsk ? '问AI' : '批注';
-      note.title = annot.content || (annot.aiAsk ? '查看或继续问 AI' : '编辑或删除批注');
+      note.title = pdfAnnotationPreview(annot.content) || (annot.aiAsk ? '查看或继续问 AI' : '查看批注');
       note.setAttribute('aria-label', annot.aiAsk ? '查看或继续问 AI' : '编辑或删除批注');
       note.style.left = '8px';
       note.style.top = first.top;
@@ -674,6 +932,22 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
       }
     }
   }
+  async function createAnnot(kind: AnnotKind, target: NonNullable<ReturnType<typeof selectionBoxes>>, content: string) {
+    await withBusy(async () => {
+      const result = await hooks.onAnnotate({ kind, page: target.page, boxes: target.boxes, content });
+      if (!result?.xref) return;
+      if (typeof result.revision === 'number') assetRevision = result.revision;
+      liveAnnots.push({
+        xref: result.xref,
+        markXref: result.mark_xref && result.mark_xref > 0 ? result.mark_xref : undefined,
+        kind, page: target.page, boxes: target.boxes, content,
+        aiAsk: isAiAskContent(content),
+      });
+      paintLiveEverywhere(target.page);
+      window.getSelection()?.removeAllRanges();
+      clearSelection();
+    });
+  }
   async function annotate(kind: AnnotKind) {
     if (!selectionBoxes()) {
       const snap = readDomSelection();
@@ -688,25 +962,15 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
     }
     const target = selectionBoxes();
     if (!target) { error('请先在 PDF 中划选文字。'); return; }
-    let content = '';
     if (kind === 'text') {
-      const note = await askText('文字批注', '批注内容', '', 500, true);
-      if (!note) return;
-      content = note;
-    }
-    await withBusy(async () => {
-      const result = await hooks.onAnnotate({ kind, page: target.page, boxes: target.boxes, content });
-      if (!result?.xref) return;
-      liveAnnots.push({
-        xref: result.xref,
-        markXref: result.mark_xref && result.mark_xref > 0 ? result.mark_xref : undefined,
-        kind, page: target.page, boxes: target.boxes, content,
-        aiAsk: isAiAskContent(content),
+      await openPdfAnnotationDialog({
+        isNew: true,
+        editing: true,
+        onSave: content => createAnnot(kind, target, content),
       });
-      paintLiveEverywhere(target.page);
-      window.getSelection()?.removeAllRanges();
-      clearSelection();
-    });
+      return;
+    }
+    await createAnnot(kind, target, '');
   }
   async function annotContents(id: string, pageNumber: number) {
     const live = liveAnnots.find(item => String(item.xref) === id || item.xref === xrefOf(id));
@@ -759,9 +1023,20 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
       userName: hooks.userName() || '用户',
       modelName: hooks.modelName() || '模型',
       ask: hooks.askAi,
-      save: async content => hooks.onAnnotate({ kind: 'text', page: opts.page, boxes: opts.boxes, content }),
-      update: hooks.onUpdateAnnot,
-      remove: hooks.onDeleteAnnot,
+      save: async content => {
+        const saved = await hooks.onAnnotate({ kind: 'text', page: opts.page, boxes: opts.boxes, content });
+        if (typeof saved?.revision === 'number') assetRevision = saved.revision;
+        return saved;
+      },
+      update: async (xref, content) => {
+        const saved = await hooks.onUpdateAnnot(xref, content);
+        if (typeof saved?.revision === 'number') assetRevision = saved.revision;
+      },
+      remove: async xref => {
+        const saved = await hooks.onDeleteAnnot(xref);
+        if (typeof saved?.revision === 'number') assetRevision = saved.revision;
+        return saved ? { deleted: saved.deleted } : undefined;
+      },
     });
     if (result.action === 'closed') return;
     if (result.action === 'deleted') {
@@ -820,6 +1095,7 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
       if (!await askDelete('删除这个高亮？')) return;
       await withBusy(async () => {
         const result = await hooks.onDeleteAnnot(xref);
+        if (typeof result?.revision === 'number') assetRevision = result.revision;
         removeAnnotDom(xref, ...(result?.deleted || []));
       });
       return;
@@ -838,24 +1114,33 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
       });
       return;
     }
-    const nextValue = await askAnnot('编辑批注', current);
-    if (nextValue === null) return;
-    await withBusy(async () => {
-      if (nextValue === 'delete') {
+    const nextValue = await openPdfAnnotationDialog({
+      content: current,
+      onSave: async content => {
+        await withBusy(async () => {
+          const saved = await hooks.onUpdateAnnot(xref, content);
+          if (typeof saved?.revision === 'number') assetRevision = saved.revision;
+          const item = liveAnnots.find(entry => entry.xref === xref);
+          if (item) item.content = content;
+          for (const pane of panes()) {
+            pane.pages.querySelectorAll<HTMLElement>(`[data-xref="${xref}"], [data-annotation-id="${xref}R"]`).forEach(node => {
+              node.title = pdfAnnotationPreview(content);
+            });
+          }
+        });
+      },
+    });
+    if (nextValue.action === 'closed') return;
+    if (nextValue.action === 'deleted') {
+      await withBusy(async () => {
+        if (!await askDelete('删除这个批注？')) return;
         const marks = await linkedMarkXrefs(id, pageNumber);
         const result = await hooks.onDeleteAnnot(xref);
+        if (typeof result?.revision === 'number') assetRevision = result.revision;
         removeAnnotDom(xref, ...marks, ...(result?.deleted || []));
-        return;
-      }
-      await hooks.onUpdateAnnot(xref, nextValue);
-      const item = liveAnnots.find(entry => entry.xref === xref);
-      if (item) item.content = nextValue;
-      for (const pane of panes()) {
-        pane.pages.querySelectorAll<HTMLElement>(`[data-xref="${xref}"], [data-annotation-id="${xref}R"]`).forEach(node => {
-          node.title = nextValue;
-        });
-      }
-    });
+      });
+      return;
+    }
   }
   async function bindAnnotUi(pageDiv: HTMLElement, pane: Pane) {
     pageDiv.querySelectorAll('.pdf-annot-handle:not(.pdf-live-annot)').forEach(node => node.remove());
@@ -904,7 +1189,7 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
         if (aiAsk) section.classList.add('pdf-ai-badge');
         section.replaceChildren();
         section.textContent = aiAsk ? '问AI' : '批注';
-        section.title = aiAsk ? '查看或继续问 AI' : '编辑或删除批注';
+        section.title = aiAsk ? '查看或继续问 AI' : (pdfAnnotationPreview(contentsOf(id)) || '查看批注');
         section.addEventListener('click', open, true);
         return;
       }
@@ -954,7 +1239,7 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
     }
   }
 
-  async function setSplit(on: boolean, focus: PaneId = 'copy') {
+  async function setSplit(on: boolean, focus: PaneId = 'copy', remember = true) {
     if (on === split) return;
     if (on) {
       if (!main.ready || !fileBytes) return;
@@ -968,7 +1253,7 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
       try {
         await openCopy();
         refreshSplitPanes();
-        rememberView();
+        if (remember) rememberView();
       } catch (e) {
         split = false;
         stage.classList.remove('is-split');
@@ -990,7 +1275,7 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
     await destroyCopy();
     main.lastWidth = 0;
     if (main.ready) main.viewer.update();
-    rememberView();
+    if (remember) rememberView();
     controls();
   }
 
@@ -998,7 +1283,6 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
     busy = true; opening = true; input.disabled = true; liveAnnots = []; clearSelection(); controls();
     let task: PDFDocumentLoadingTask | undefined;
     try {
-      if (split) await setSplit(false);
       fileBytes = cloneBuffer(data);
       task = getDocument({ data: new Uint8Array(cloneBuffer(fileBytes)),
         cMapUrl: '/pdfjs/cmaps/', cMapPacked: true, standardFontDataUrl: '/pdfjs/standard_fonts/', wasmUrl: '/pdfjs/wasm/' });
@@ -1019,7 +1303,6 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
     } finally { busy = false; input.disabled = false; input.value = ''; controls(); }
   }
   async function showEmpty(id = '', name = '') {
-    if (split) await setSplit(false);
     main.ready = false; pdf = undefined; fileBytes = null; filename = name; documentId = id; selected = null; liveAnnots = [];
     const previous = loadingTask; loadingTask = undefined;
     try { main.viewer.setDocument(null as never); } catch { /* viewer 无文档 */ }
@@ -1058,7 +1341,32 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
   zoomIn.onclick = () => zoomTo(active().viewer.currentScale * 1.1);
   fitWidth.onclick = () => fitToWidth();
   splitBtn.onclick = () => { void setSplit(!split); };
-  window.addEventListener('pagehide', () => rememberView());
+  notebookToggle.onclick = () => setNotebookOpen(notebookPanel.hidden);
+  outlineToggle.onclick = () => {
+    if (outlineBusy || !documentId) return;
+    outlineBusy = true;
+    controls();
+    openOutlineDialog({
+      run: async onEvent => {
+        try {
+          await hooks.generateOutline(onEvent);
+        } finally {
+          outlineBusy = false;
+          controls();
+        }
+      },
+      onSuccess: appendOutline,
+    });
+  };
+  summaryToggle.onclick = () => { void summarizeSelection(); };
+  container.querySelectorAll<HTMLButtonElement>('[data-pdf-note-command]').forEach(button => {
+    button.addEventListener('mousedown', event => event.preventDefault());
+    button.onclick = () => runNotebookCommand(button.dataset.pdfNoteCommand || '');
+  });
+  window.addEventListener('pagehide', () => {
+    rememberView(true);
+    rememberNotebookUi();
+  });
   askAiBtn.addEventListener('mousedown', e => e.preventDefault());
   askAiBtn.onclick = () => { void startAskAi().catch(e => error(String(e))); };
   annotateButtons.forEach(button => {
@@ -1078,10 +1386,30 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
     apply() { throw new Error('PDF 不支持把助手修改写回正文，请用工具栏添加批注。'); },
     undo() {},
     export() {},
+    persist: async () => {
+      if (notebookEditor) queueNotebookSave(notebookEditor.getJSON());
+      await flushNotebookSave();
+      rememberView(true);
+      rememberNotebookUi();
+    },
     async load(asset) {
-      if (!asset.id) { await showEmpty(); return; }
+      await flushNotebookSave();
+      rememberView(true);
+      rememberNotebookUi();
+      clearTimeout(notebookScrollTimer);
+      notebookScrollTimer = undefined;
+      if (split) await setSplit(false, 'main', false);
+      if (!asset.id) {
+        documentId = '';
+        loadNotebook(EMPTY_NOTEBOOK, 0);
+        setNotebookOpen(false, false);
+        await showEmpty();
+        return;
+      }
       documentId = asset.id;
       filename = asset.name;
+      loadNotebook(asset.content, asset.revision);
+      restoreAssetUi(asset.id);
       const [data] = await Promise.all([hooks.fetchFile(asset.id), whenVisible()]);
       if (!data) { await showEmpty(asset.id, asset.name); return; }
       await openBuffer(asset.id, asset.filename || `${asset.name}.pdf`, data);

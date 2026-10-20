@@ -1,0 +1,60 @@
+#project-plan{min-width:0;min-height:0;background:#f6f7f8}
+#project-plan .project-plan-shell{height:100%;display:flex;flex-direction:column}
+#project-plan .project-plan-toolbar{height:52px;flex:0 0 52px;padding:8px 14px;display:flex;align-items:center;gap:8px;background:#fff;border-bottom:1px solid #dde1e5}
+#project-plan .project-plan-zoom{display:flex;gap:0;margin-left:4px}
+#project-plan .project-plan-zoom button:not(#sheet button){min-width:34px;padding:5px 8px;border-radius:0;border-right:0}
+#project-plan .project-plan-zoom button:first-child:not(#sheet button){border-radius:5px 0 0 5px}
+#project-plan .project-plan-zoom button:last-child:not(#sheet button){border-radius:0 5px 5px 0;border-right:1px solid #dce0e3}
+#project-plan .project-plan-zoom button.is-active:not(#sheet button){color:#0f6f64;background:#e7f4f2;border-color:#c8e2dc}
+#project-plan .project-plan-toolbar [data-export]{margin-left:auto;width:34px;min-width:34px;padding:5px}
+#project-plan .project-plan-body{--project-plan-inspector-width:0px;flex:1;min-height:0;display:grid;grid-template-columns:minmax(0,1fr) var(--project-plan-inspector-width);transition:grid-template-columns .18s ease}
+#project-plan .project-plan-body.inspector-open{--project-plan-inspector-width:292px}
+#project-plan .project-plan-gantt{min-width:0;min-height:0;position:relative;background:#fff}
+#project-plan .project-plan-gantt-host{height:100%;min-width:0}
+#project-plan .project-plan-tree-split{position:absolute;z-index:12;top:0;bottom:0;left:calc(var(--project-plan-tree-width,600px) - 3px);width:6px;margin:0;padding:0;border:0;background:transparent;cursor:col-resize;touch-action:none}
+#project-plan .project-plan-tree-split::after{position:absolute;inset:0 -3px;background:transparent;border-radius:3px;content:""}
+#project-plan .project-plan-tree-split:hover::after,#project-plan .project-plan-tree-split:focus-visible::after,#project-plan .project-plan-gantt.resizing-tree .project-plan-tree-split::after{background:#147c6e}
+#project-plan .project-plan-gantt.tree-collapsed .project-plan-tree-split{left:0;cursor:pointer}
+#project-plan .project-plan-gantt.tree-collapsed .project-plan-tree-split::after{background:#d5dce0}
+#project-plan .gantt_container{--dhx-gantt-base-colors-border-light:#edf0f2;--dhx-gantt-base-colors-border:#e2e7e9;--dhx-gantt-base-colors-background-alt:#fafbfb;--dhx-gantt-scale-border-vertical:1px solid #f0f3f4;--dhx-gantt-scale-border-horizontal:1px solid #e2e7e9;--dhx-gantt-grid-row-border:1px solid #edf0f2;--dhx-gantt-task-row-border:1px solid #edf0f2;--dhx-gantt-task-row-background:#fff;--dhx-gantt-task-row-background--odd:#fcfdfd;font-size:13px}
+#project-plan .project-plan-inspector{min-width:0;overflow:auto;padding:15px;border-left:1px solid #dde1e5;background:#fff;opacity:0;transform:translateX(14px);pointer-events:none;transition:opacity .18s ease,transform .18s ease}
+#project-plan .project-plan-body.inspector-open .project-plan-inspector{opacity:1;transform:none;pointer-events:auto}
+#project-plan .gantt_grid_scale,#project-plan .gantt_task_scale{background:#f8faf9;border-bottom:1px solid #dfe5e6}
+#project-plan .gantt_grid_head_cell,#project-plan .gantt_scale_cell{color:#66747b;font-size:12px;border-color:#edf0f2}
+#project-plan .gantt_grid_head_cell{font-weight:600;background:#f8faf9}
+#project-plan .gantt_scale_line{border-color:#eef1f2}
+#project-plan .gantt_scale_cell{font-weight:500}
+#project-plan .gantt_task_row,#project-plan .gantt_row{border-color:#edf0f2}
+#project-plan .gantt_task_row:hover,#project-plan .gantt_row:hover{background:#f4faf8}
+#project-plan .gantt_selected .gantt_task_row,#project-plan .gantt_row.gantt_selected{background:#edf7f5}
+#project-plan .gantt_cell{border-color:transparent}
+#project-plan .gantt_task_cell{border-color:#f2f4f5}
+#project-plan .gantt_task_cell.weekend{background:#fbfcfc}
+#project-plan .gantt_today{background:rgba(240,180,41,.08)}
+#project-plan .gantt_task_scale .gantt_today{box-shadow:inset 1px 0 #dfaa2d}
+#project-plan .gantt_task_line{border-radius:3px;background:#168274;border:1px solid #0d6d61}
+#project-plan .gantt_task_progress{background:#0e6158}
+#project-plan .gantt_task_content{font-size:12px;line-height:18px;padding:0 6px}
+#project-plan .project-plan-root .gantt_task_line{background:#2f6fed;border-color:#215ac5}
+#project-plan .project-plan-root .gantt_task_progress{background:#1d4fbb}
+#project-plan .gantt_selected .gantt_task_line{box-shadow:0 0 0 2px #f0b429}
+#project-plan .project-plan-inspector-head{display:flex;align-items:baseline;justify-content:space-between;margin-bottom:16px}
+#project-plan .project-plan-inspector-head>div{display:flex;align-items:center;gap:6px}
+#project-plan .project-plan-inspector-head button[data-close-inspector]:not(#sheet button){width:26px;min-width:26px;min-height:26px;padding:4px;border:0;color:#66747b}
+#project-plan .project-plan-inspector-head button[data-close-inspector] svg{width:16px;height:16px}
+#project-plan .project-plan-inspector-head strong{font-size:14px}
+#project-plan .project-plan-inspector-head span{font-size:11px;color:#78858d}
+#project-plan .project-plan-inspector label{display:grid;gap:6px;margin:0 0 14px;color:#59656d;font-size:12px}
+#project-plan .project-plan-inspector input,#project-plan .project-plan-inspector textarea{width:100%;border:1px solid #d8dde1;border-radius:4px;background:#fff;color:#24282d}
+#project-plan .project-plan-inspector input{height:34px;padding:0 8px}
+#project-plan .project-plan-inspector textarea{min-height:112px;padding:8px;resize:vertical;line-height:1.55}
+#project-plan .project-plan-inspector input:disabled{color:#68727b;background:#f5f7f8;cursor:not-allowed}
+#project-plan .project-plan-date-row{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+#project-plan .project-plan-derived{margin:-4px 0 14px;color:#78858d;font-size:12px;line-height:1.55}
+#project-plan .project-plan-actions{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr) auto;gap:6px;margin-top:22px;padding-top:14px;border-top:1px solid #eef1f3}
+#project-plan .project-plan-actions button{display:flex;align-items:center;justify-content:center;gap:4px;min-width:0;min-height:32px;padding:5px 7px;font-size:12px;white-space:nowrap}
+#project-plan .project-plan-actions button svg{width:14px;height:14px;flex:0 0 auto}
+#project-plan .project-plan-danger{color:#a23434;border-color:#e9c3c0}
+#project-plan .project-plan-empty{height:100%;display:grid;place-content:center;justify-items:center;color:#88939b;text-align:center;gap:6px}
+#project-plan .project-plan-empty p{margin:0;font-size:12px}
+@media(max-width:900px){#project-plan .project-plan-body.inspector-open{--project-plan-inspector-width:244px}#project-plan .gantt_grid{max-width:290px!important}}

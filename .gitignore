@@ -13,3 +13,10 @@ test-results/
 apps/office-copilot-web/public/pdfjs/
 wewe-rss/
 we-mp-rss/
+.prompts
+.prompt
+prompts
+prompt
+docs/
+private/
+.cursor/

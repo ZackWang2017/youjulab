@@ -5,6 +5,7 @@ import re
 import sys
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlparse
 
 from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
@@ -30,18 +31,22 @@ from sheet_profile import generate_sheet_profile  # noqa: E402
 from sheet_chart import generate_sheet_chart, iter_sheet_chart_events, validate_chart_plan  # noqa: E402
 from assistant_sessions import public_session, public_session_list_item, session_title, validate_session_turns  # noqa: E402
 from pdf_ask import iter_pdf_ask_events  # noqa: E402
+from pdf_summary import iter_pdf_selection_summary_events  # noqa: E402
 from pdf_glossary import delete_project_term, list_project_terms, upsert_project_term  # noqa: E402
-from pdf_translate import iter_pdf_translate_events  # noqa: E402
-from config import api_host, api_port, file_root, mcp_token_matches, model_api_key, model_configured, model_name  # noqa: E402
+from config import api_host, api_port, file_root, llm_config_set, mcp_token_matches  # noqa: E402
+from model_credentials import CredentialEncryptionError, encrypt_api_key, public_model_config  # noqa: E402
+from model_runtime import model_api_key, model_configuration_error, model_configured, model_name, set_current_model, settings_for_user  # noqa: E402
 from pdf_annot import add_pdf_annotation, delete_pdf_annotation, update_pdf_annotation  # noqa: E402
 from office_pdf_vector import delete_document_index, ensure_index, get_index_status, pg_configured, search_chunks  # noqa: E402
+from announcement_intelligence import iter_outline_events  # noqa: E402
 from digest_job import default_job, iter_digest_run_events, public_job, validate_job_body  # noqa: E402
 from document_archive import archive_document, exceeds, would_exceed  # noqa: E402
 from document_skill_run import iter_skill_run_events  # noqa: E402
 from document_skills import list_skill_types, public_skill, validate_skill  # noqa: E402
 from securities_lookup import lookup_securities  # noqa: E402
+from portfolio_proxy import forward as forward_portfolio  # noqa: E402
+from weread_proxy import login_status as fetch_weread_login_status, start_login as create_weread_login  # noqa: E402
 from digest_scheduler import digest_scheduler_loop  # noqa: E402
-from remote_data import call_remote  # noqa: E402
 from skills import list_skills, render_skill  # noqa: E402
 from store import (  # noqa: E402
     ACCESS_TOKEN_LENGTH,
@@ -59,13 +64,19 @@ from store import (  # noqa: E402
     default_document,
     default_mindmap,
     default_notebook,
+    default_project_plan,
     default_research,
     default_sheet,
     empty_last_assets,
+    recent_asset_histories,
+    recent_asset_ids,
+    remove_recent_asset,
     is_user_kind,
+    supports_scoped_visibility,
     public_asset,
     public_project,
     public_user,
+    hash_password,
     verify_password,
 )
 
@@ -115,6 +126,27 @@ class AuthBody(BaseModel):
     password: str = Field(min_length=6, max_length=128)
 
 
+class PasswordChangeBody(BaseModel):
+    current_password: str = Field(min_length=6, max_length=128)
+    new_password: str = Field(min_length=6, max_length=128)
+
+
+class UserModelConfigBody(BaseModel):
+    provider: Literal["deepseek"] = "deepseek"
+    model: str = Field(min_length=1, max_length=100)
+    base_url: str = Field(min_length=8, max_length=300)
+    api_key: str = Field(min_length=3, max_length=512)
+
+    @field_validator("base_url")
+    @classmethod
+    def validate_base_url(cls, value: str) -> str:
+        cleaned = value.strip().rstrip("/")
+        parsed = urlparse(cleaned)
+        if parsed.scheme not in ("https", "http") or not parsed.netloc:
+            raise ValueError("API 地址必须是完整的 HTTP(S) 地址。")
+        return cleaned
+
+
 class NameBody(BaseModel):
     name: str = Field(min_length=1, max_length=80)
 
@@ -129,6 +161,7 @@ class SaveAssetBody(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=80)
     content: dict | list | None = None
     revision: int | None = Field(default=None, ge=0)
+    visibility: Literal["project", "user"] | None = None
 
 
 class HistoryTurn(BaseModel):
@@ -222,14 +255,6 @@ class ValidateBody(BaseModel):
     patch: dict
 
 
-class RemoteDataBody(BaseModel):
-    url: str = Field(min_length=1, max_length=2000)
-    method: str = "POST"
-    function: str = Field(default="", max_length=120)
-    headers: dict | str | None = None
-    values: list | None = None
-
-
 class PdfAnnotBody(BaseModel):
     kind: Literal["highlight", "text"]
     page: int = Field(ge=1, le=5000)
@@ -254,7 +279,16 @@ class PdfAskBody(BaseModel):
     document_id: str = Field(min_length=1, max_length=80)
     filename: str = Field(default="", max_length=240)
     history: list[PdfAskTurn] = Field(default_factory=list, max_length=20)
-    translate: bool = False
+
+
+class RecentAssetOrderBody(BaseModel):
+    project_id: str = Field(min_length=1, max_length=80)
+    asset_ids: list[str] = Field(default_factory=list, max_length=8)
+
+
+class PdfSummaryBody(BaseModel):
+    document_id: str = Field(min_length=1, max_length=128)
+    selection: str = Field(min_length=1, max_length=16_000)
 
 
 class ProjectTermBody(BaseModel):
@@ -290,7 +324,7 @@ def get_store(request: Request) -> Store:
     return request.app.state.store
 
 
-def user_from(request: Request, store: Store = Depends(get_store)) -> dict:
+async def user_from(request: Request, store: Store = Depends(get_store)) -> dict:
     header = request.headers.get("authorization") or ""
     if not header.lower().startswith("bearer "):
         raise HTTPException(401, "请先登录。")
@@ -300,16 +334,22 @@ def user_from(request: Request, store: Store = Depends(get_store)) -> dict:
         user = store.user_by_access_token(user_token)
         if not user:
             raise HTTPException(401, "访问令牌无效。")
-        return workspace_account(user)
+        account = workspace_account(user)
+        set_current_model(settings_for_user(store, account["id"]))
+        return account
     if len(token) == ACCESS_TOKEN_LENGTH:
         user = store.user_by_access_token(token)
         if not user:
             raise HTTPException(401, "访问令牌无效。")
-        return workspace_account(user)
+        account = workspace_account(user)
+        set_current_model(settings_for_user(store, account["id"]))
+        return account
     user = store.user_by_id(read_token(token))
     if not user:
         raise HTTPException(401, "请先登录。")
-    return workspace_account(user)
+    account = workspace_account(user)
+    set_current_model(settings_for_user(store, account["id"]))
+    return account
 
 
 def workspace_account(user: dict) -> dict:
@@ -392,6 +432,7 @@ def refresh_last_assets(store: Store, user_id: str, project_id: str, last: dict 
     maps = store.assets(user_id, project_id, "mindmap")
     research = store.assets(user_id, project_id, "research")
     diagrams = store.assets(user_id, project_id, "diagram")
+    plans = store.assets(user_id, project_id, "project_plan")
     cals = store.assets(user_id, project_id, "calendar")
     prev = last or {}
     return {
@@ -401,6 +442,7 @@ def refresh_last_assets(store: Store, user_id: str, project_id: str, last: dict 
         "mindmap": _pick_last(maps, prev.get("mindmap")),
         "research": _pick_last(research, prev.get("research")),
         "diagram": _pick_last(diagrams, prev.get("diagram")),
+        "project_plan": _pick_last(plans, prev.get("project_plan")),
         "calendar": _pick_last(cals, prev.get("calendar")),
     }
 
@@ -585,6 +627,86 @@ def create_app(store: Store | None = None) -> FastAPI:
         user = store.ensure_access_token(user)
         return {"access_token": user["access_token"]}
 
+    @app.put("/auth/password")
+    def change_password(body: PasswordChangeBody, user: dict = Depends(user_from), store: Store = Depends(get_store)):
+        account = store.user_by_id(user["id"])
+        if not account or not verify_password(body.current_password, account["password_hash"]):
+            raise HTTPException(400, "当前密码不正确。")
+        store.update_user(user["id"], password_hash=hash_password(body.new_password))
+        return {"ok": True}
+
+    @app.get("/auth/model-config")
+    def get_user_model_config(user: dict = Depends(user_from), store: Store = Depends(get_store)):
+        saved = public_model_config(store.get_user_model_config(user["id"]))
+        mode = llm_config_set()
+        return {
+            "ok": True,
+            **saved,
+            "mode": mode,
+            "source": "platform" if mode == 0 else "user",
+            "can_save": mode in (1, 3),
+            "active_configured": model_configured(),
+            "active_model": model_name() or "未配置",
+            "active_error": model_configuration_error() if not model_configured() else "",
+        }
+
+    @app.put("/auth/model-config")
+    def put_user_model_config(body: UserModelConfigBody, user: dict = Depends(user_from), store: Store = Depends(get_store)):
+        if llm_config_set() not in (1, 3):
+            raise HTTPException(400, "当前服务使用平台模型，不能修改用户自有模型配置。")
+        api_key = body.api_key.strip()
+        if not api_key:
+            raise HTTPException(400, "请填写 API Key。")
+        try:
+            ciphertext, nonce = encrypt_api_key(user["id"], api_key)
+        except CredentialEncryptionError as exc:
+            raise HTTPException(503, str(exc)) from exc
+        saved = store.upsert_user_model_config(user["id"], {
+            "provider": body.provider,
+            "model": body.model.strip(),
+            "base_url": body.base_url,
+            "api_key_ciphertext": ciphertext,
+            "api_key_nonce": nonce,
+            "api_key_last4": api_key[-4:],
+            "encryption_version": 1,
+        })
+        set_current_model(settings_for_user(store, user["id"]))
+        return {"ok": True, **public_model_config(saved)}
+
+    @app.delete("/auth/model-config")
+    def delete_user_model_config(user: dict = Depends(user_from), store: Store = Depends(get_store)):
+        if llm_config_set() not in (1, 3):
+            raise HTTPException(400, "当前服务使用平台模型，不能删除用户自有模型配置。")
+        deleted = store.delete_user_model_config(user["id"])
+        set_current_model(settings_for_user(store, user["id"]))
+        return {"ok": True, "deleted": deleted}
+
+    @app.post("/integrations/weread/login")
+    async def start_weread_login(user: dict = Depends(user_from)):
+        try:
+            session = await asyncio.to_thread(create_weread_login)
+        except ValueError as exc:
+            raise HTTPException(503, str(exc)) from exc
+        session_id = str(session.get("session_id") or "")
+        if session_id:
+            owners = getattr(app.state, "weread_login_owners", {})
+            owners[session_id] = user["id"]
+            app.state.weread_login_owners = owners
+        return session
+
+    @app.get("/integrations/weread/login/{session_id}")
+    async def get_weread_login_status(session_id: str, user: dict = Depends(user_from)):
+        owners = getattr(app.state, "weread_login_owners", {})
+        if owners.get(session_id) != user["id"]:
+            raise HTTPException(404, "扫码会话不存在。")
+        try:
+            session = await asyncio.to_thread(fetch_weread_login_status, session_id)
+        except ValueError as exc:
+            raise HTTPException(503, str(exc)) from exc
+        if session.get("status") in {"authenticated", "failed", "expired"}:
+            owners.pop(session_id, None)
+        return session
+
     @app.post("/auth/access-token/rotate")
     def rotate_access_token(user: dict = Depends(user_from), store: Store = Depends(get_store)):
         user = store.rotate_access_token(user["id"])
@@ -737,6 +859,8 @@ def create_app(store: Store | None = None) -> FastAPI:
             content = default_research()
         elif body.kind == "diagram":
             content = default_diagram()
+        elif body.kind == "project_plan":
+            content = default_project_plan()
         elif body.kind == "calendar":
             content = default_calendar()
         elif body.kind == "calc":
@@ -751,14 +875,68 @@ def create_app(store: Store | None = None) -> FastAPI:
             if existing:
                 current = store.asset(oid, existing[0]["id"]) or existing[0]
                 return public_asset(current, include_content=True)
-        placed = None if is_user_kind(body.kind) or (body.kind == "document" and body.visibility == "user") else project_id
+        placed = None if is_user_kind(body.kind) or (
+            supports_scoped_visibility(body.kind) and body.visibility == "user"
+        ) else project_id
         asset = store.create_asset(oid, placed, body.kind, body.name.strip(), content)
         owner = store.user_by_id(oid)
         if owner:
             last = {**empty_last_assets(), **dict(owner.get("last_assets") or {})}
             last[body.kind] = asset["id"]
-            store.update_user(oid, last_project_id=project_id, last_assets=last)
+            store.update_user(
+                oid,
+                last_project_id=project_id,
+                last_assets=last,
+                recent_assets_by_project=recent_asset_histories(owner, project_id, asset["id"]),
+            )
         return public_asset(asset, include_content=True)
+
+    @app.get("/assets/recent")
+    def list_recent_assets(project_id: str | None = None, user: dict = Depends(user_from), store: Store = Depends(get_store)):
+        """Return this user's opening history for one project."""
+        owner = store.user_by_id(user["id"]) or user
+        scope_project_id = project_id or owner.get("last_project_id")
+        if not scope_project_id or not store.project(user["id"], scope_project_id):
+            raise HTTPException(404, "项目不存在。")
+        rows: list[dict] = []
+        for asset_id in recent_asset_ids(owner, scope_project_id):
+            asset = store.asset(user["id"], asset_id)
+            if not asset or asset.get("kind") not in KINDS:
+                continue
+            asset_project_id = asset.get("project_id")
+            if asset_project_id and asset_project_id != scope_project_id:
+                continue
+            item = public_asset(asset)
+            item["project_name"] = store.project(user["id"], scope_project_id)["name"]
+            rows.append(item)
+        return {"assets": rows}
+
+    @app.put("/assets/recent")
+    def reorder_recent_assets(body: RecentAssetOrderBody, user: dict = Depends(user_from), store: Store = Depends(get_store)):
+        """Persist a manual order for the current project's recent assets."""
+        owner = store.user_by_id(user["id"]) or user
+        project = store.project(user["id"], body.project_id)
+        if not project:
+            raise HTTPException(404, "项目不存在。")
+
+        available: list[str] = []
+        for asset_id in recent_asset_ids(owner, body.project_id):
+            asset = store.asset(user["id"], asset_id)
+            if not asset or asset.get("kind") not in KINDS:
+                continue
+            asset_project_id = asset.get("project_id")
+            if asset_project_id and asset_project_id != body.project_id:
+                continue
+            available.append(asset_id)
+
+        requested = [asset_id.strip() for asset_id in body.asset_ids if asset_id.strip()]
+        if len(requested) != len(set(requested)) or set(requested) != set(available):
+            raise HTTPException(400, "最近浏览列表已变化，请刷新后重试。")
+
+        histories = dict(owner.get("recent_assets_by_project") or {})
+        histories[body.project_id] = requested
+        store.update_user(user["id"], recent_assets_by_project=histories)
+        return list_recent_assets(body.project_id, user, store)
 
     @app.get("/assets/{asset_id}")
     def get_asset(asset_id: str, user: dict = Depends(user_from), store: Store = Depends(get_store)):
@@ -777,12 +955,27 @@ def create_app(store: Store | None = None) -> FastAPI:
         fields: dict = {"revision": asset.get("revision", 0) + 1}
         if body.name is not None:
             fields["name"] = body.name.strip()
+        if body.visibility is not None:
+            if not supports_scoped_visibility(str(asset.get("kind") or "")):
+                raise HTTPException(400, "该资产不支持修改可见范围。")
+            if body.visibility == "user":
+                fields["visibility"] = "user"
+                fields["project_id"] = None
+            else:
+                target = asset.get("project_id") or user.get("last_project_id")
+                if not target or not store.project(asset["owner_id"], str(target)):
+                    raise HTTPException(400, "无法设为项目可见：缺少当前项目。")
+                fields["visibility"] = "project"
+                fields["project_id"] = target
         if body.content is not None and asset["kind"] == "document" and exceeds(body.content):
             archived = archive_document(store, asset["owner_id"], asset)
             fresh = public_asset(archived["asset"], include_content=True)
             fresh["archived_name"] = archived["archived_name"]
             return fresh
-        if body.content is not None and asset["kind"] != "pdf":
+        if body.content is not None:
+            if asset["kind"] == "pdf":
+                if not isinstance(body.content, dict) or set(body.content) != {"notebook"}:
+                    raise HTTPException(400, "PDF 仅支持保存关联笔记本。")
             fields["content"] = body.content
         updated = store.update_asset(asset["owner_id"], asset_id, **fields)
         return public_asset(updated, include_content=True)
@@ -816,20 +1009,32 @@ def create_app(store: Store | None = None) -> FastAPI:
                 path.unlink(missing_ok=True)
         user_doc = store.user_by_id(user["id"])
         last = dict(user_doc["last_assets"])
+        recent = remove_recent_asset(user_doc, asset_id)
         if last.get(asset["kind"]) == asset_id:
             remain = [a for a in same if a["id"] != asset_id]
             last[asset["kind"]] = remain[0]["id"] if remain else None
-            store.update_user(user["id"], last_assets=last)
+        store.update_user(user["id"], last_assets=last, recent_assets_by_project=recent)
         return {"ok": True}
 
     @app.post("/assets/{asset_id}/select")
-    def select_asset(asset_id: str, user: dict = Depends(user_from), store: Store = Depends(get_store)):
+    def select_asset(
+        asset_id: str,
+        track_recent: bool = True,
+        user: dict = Depends(user_from),
+        store: Store = Depends(get_store),
+    ):
         asset = store.asset(user["id"], asset_id)
         if not asset:
             raise HTTPException(404, "文件不存在。")
         last = dict(store.user_by_id(user["id"])["last_assets"])
         last[asset["kind"]] = asset["id"]
-        store.update_user(user["id"], last_project_id=asset["project_id"], last_assets=last)
+        owner = store.user_by_id(user["id"]) or user
+        scope_project_id = asset.get("project_id") or owner.get("last_project_id")
+        fields = {"last_project_id": scope_project_id, "last_assets": last}
+        if track_recent:
+            if scope_project_id:
+                fields["recent_assets_by_project"] = recent_asset_histories(owner, scope_project_id, asset["id"])
+        store.update_user(user["id"], **fields)
         return public_user(store.user_by_id(user["id"]))
 
     @app.put("/assets/{asset_id}/file")
@@ -921,7 +1126,13 @@ def create_app(store: Store | None = None) -> FastAPI:
     @app.get("/assistant/status")
     def assistant_status(_user: dict = Depends(user_from)):
         name = model_name()
-        return {"ok": True, "configured": model_configured(), "has_api_key": bool(model_api_key()), "model_name": name or "未配置"}
+        return {
+            "ok": True,
+            "configured": model_configured(),
+            "has_api_key": bool(model_api_key()),
+            "model_name": name or "未配置",
+            "error": model_configuration_error() if not model_configured() else "",
+        }
 
     def _sheet_asset(asset_id: str, user: dict, store: Store) -> tuple[dict, str]:
         asset = asset_of(store, user, asset_id)
@@ -968,7 +1179,7 @@ def create_app(store: Store | None = None) -> FastAPI:
     async def post_sheet_profile(asset_id: str, body: SheetCacheProfileBody, user: dict = Depends(user_from), store: Store = Depends(get_store)):
         _, oid = _sheet_asset(asset_id, user, store)
         if not model_configured():
-            raise HTTPException(503, "请先在后台配置模型。")
+            raise HTTPException(503, model_configuration_error())
         cache = store.get_sheet_cache(oid, asset_id, body.sheet_id)
         if not cache:
             raise HTTPException(404, "尚未缓存表结构。")
@@ -992,7 +1203,7 @@ def create_app(store: Store | None = None) -> FastAPI:
     ):
         _, oid = _sheet_asset(asset_id, user, store)
         if not model_configured():
-            raise HTTPException(503, "请先在后台配置模型。")
+            raise HTTPException(503, model_configuration_error())
         cache = store.get_sheet_cache(oid, asset_id, body.sheet_id)
         if not cache:
             raise HTTPException(404, "尚未缓存表结构，请稍后重试。")
@@ -1010,7 +1221,7 @@ def create_app(store: Store | None = None) -> FastAPI:
     ):
         _, oid = _sheet_asset(asset_id, user, store)
         if not model_configured():
-            raise HTTPException(503, "请先在后台配置模型。")
+            raise HTTPException(503, model_configuration_error())
         cache = store.get_sheet_cache(oid, asset_id, body.sheet_id)
         if not cache:
             raise HTTPException(404, "尚未缓存表结构，请稍后重试。")
@@ -1081,7 +1292,7 @@ def create_app(store: Store | None = None) -> FastAPI:
     @app.post("/assistant/run")
     async def assistant_run(body: RunBody, user: dict = Depends(user_from), store: Store = Depends(get_store)):
         if not model_configured():
-            raise HTTPException(503, "请先在后台配置模型。")
+            raise HTTPException(503, model_configuration_error())
 
         async def events():
             try:
@@ -1110,25 +1321,15 @@ def create_app(store: Store | None = None) -> FastAPI:
     @app.post("/assistant/pdf-ask")
     async def assistant_pdf_ask(body: PdfAskBody, user: dict = Depends(user_from), store: Store = Depends(get_store)):
         if not model_configured():
-            raise HTTPException(503, "请先在后台配置模型。")
+            raise HTTPException(503, model_configuration_error())
         if body.document_id.strip() == "":
             raise HTTPException(400, "缺少 document_id。")
         asset, path = pdf_file(body.document_id, user, store)
-        if not body.translate and not body.question.strip():
+        if not body.question.strip():
             raise HTTPException(400, "请填写问题。")
 
         async def events():
             try:
-                if body.translate:
-                    async for event in iter_pdf_translate_events(
-                        selection=body.selection,
-                        page=body.page,
-                        document_id=asset["id"],
-                        project_id=str(asset.get("project_id") or ""),
-                        note=body.question,
-                    ):
-                        yield sse_pack(event)
-                    return
                 async for event in iter_pdf_ask_events(
                     selection=body.selection,
                     question=body.question,
@@ -1144,6 +1345,52 @@ def create_app(store: Store | None = None) -> FastAPI:
                 yield sse_pack({"type": "error", "error": str(exc)})
             except Exception:
                 yield sse_pack({"type": "error", "error": "模型请求失败，请检查接口配置与服务日志。"})
+
+        return StreamingResponse(events(), media_type="text/event-stream", headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        })
+
+    @app.post("/assistant/pdf-summary")
+    async def assistant_pdf_summary(body: PdfSummaryBody, user: dict = Depends(user_from), store: Store = Depends(get_store)):
+        pdf_file(body.document_id, user, store)
+
+        async def events():
+            try:
+                async for event in iter_pdf_selection_summary_events(body.selection):
+                    yield sse_pack(event)
+            except ValueError as exc:
+                yield sse_pack({"type": "error", "error": str(exc)})
+            except Exception:
+                yield sse_pack({"type": "error", "error": "摘要生成失败，请检查模型配置与服务日志。"})
+
+        return StreamingResponse(events(), media_type="text/event-stream", headers={
+            "Cache-Control": "no-cache", "X-Accel-Buffering": "no",
+        })
+
+    @app.post("/assets/{asset_id}/outline/generate")
+    async def generate_pdf_outline(asset_id: str, user: dict = Depends(user_from), store: Store = Depends(get_store)):
+        """Generate a native-PDF outline without exposing cross-project assets."""
+        if not model_configured():
+            raise HTTPException(503, model_configuration_error())
+        asset, path = pdf_file(asset_id, user, store)
+
+        async def events():
+            try:
+                status = get_index_status(asset["id"])
+                if status.get("status") != "ready":
+                    yield sse_pack({"type": "progress", "stage": "index", "message": "正在准备 PDF 索引…"})
+                    status = ensure_index(document_id=asset["id"], user_id=user["id"], path=path)
+                    remember_index(store, user["id"], asset["id"], status)
+                if status.get("empty"):
+                    yield sse_pack({"type": "error", "error": "未提取到可用文本层，扫描件暂不支持生成大纲。"})
+                    return
+                async for event in iter_outline_events(asset["id"], str(path)):
+                    yield sse_pack(event)
+            except ValueError as exc:
+                yield sse_pack({"type": "error", "error": str(exc)})
+            except Exception:
+                yield sse_pack({"type": "error", "error": "生成大纲失败，请检查模型配置与服务日志。"})
 
         return StreamingResponse(events(), media_type="text/event-stream", headers={
             "Cache-Control": "no-cache",
@@ -1272,6 +1519,18 @@ def create_app(store: Store | None = None) -> FastAPI:
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
 
+    @app.api_route("/portfolio/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
+    async def portfolio_gateway(path: str, request: Request, user: dict = Depends(user_from)):
+        """持仓管理：组合/持仓/净值/计划任务都在 mcp-server，这里只带上用户 id 转发。"""
+        body = await request.body()
+        status, payload = await forward_portfolio(
+            request.method, path,
+            user_id=workspace_user_id(user),
+            query=request.url.query,
+            body=body,
+        )
+        return JSONResponse(payload, status_code=status)
+
     @app.get("/assets/{asset_id}/skills")
     def list_asset_skills(asset_id: str, user: dict = Depends(user_from), store: Store = Depends(get_store)):
         asset = asset_of(store, user, asset_id)
@@ -1396,18 +1655,6 @@ def create_app(store: Store | None = None) -> FastAPI:
             "Cache-Control": "no-cache",
             "X-Accel-Buffering": "no",
         })
-
-    @app.post("/sheets/remote-data")
-    def sheets_remote_data(body: RemoteDataBody, _user: dict = Depends(user_from)):
-        try:
-            values = call_remote(
-                body.url, body.values, body.method, body.function, body.headers,
-            )
-        except ValueError as exc:
-            raise HTTPException(400, str(exc)) from exc
-        rows = len(values)
-        cols = max((len(row) for row in values), default=0)
-        return {"ok": True, "values": values, "rows": rows, "cols": cols}
 
     @app.post("/assistant/validate")
     def assistant_validate(body: ValidateBody, _user: dict = Depends(user_from)):

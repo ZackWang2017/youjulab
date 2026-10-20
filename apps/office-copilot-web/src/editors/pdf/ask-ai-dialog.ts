@@ -12,7 +12,6 @@ type AskAiHooks = {
     document_id: string;
     filename: string;
     history: { role: 'user' | 'assistant'; content: string }[];
-    translate?: boolean;
   }, onEvent: (event: Record<string, any>) => void) => Promise<void>;
   save: (content: string) => Promise<{ xref: number; mark_xref?: number } | void>;
   update: (xref: number, content: string) => Promise<void>;
@@ -147,9 +146,9 @@ export function openAskAiDialog(args: AskAiOpenArgs, hooks: AskAiHooks) {
       <form class="ask-ai-composer">
         <textarea rows="3" maxlength="2000" placeholder="结合选区与全文相关段落提问…"></textarea>
         <div class="ask-ai-composer-side">
-          <label class="ask-ai-translate"><input type="checkbox" data-translate>英译中</label>
           <button type="submit" class="primary" data-ask>提问</button>
         </div>
+        <p class="ask-ai-request-error" data-request-error role="alert" hidden></p>
       </form>
       <div class="dialog-actions ask-ai-actions">
         <button type="button" data-delete>删除</button>
@@ -159,8 +158,8 @@ export function openAskAiDialog(args: AskAiOpenArgs, hooks: AskAiHooks) {
     const threadEl = panel.querySelector<HTMLElement>('.ask-ai-thread')!;
     const form = panel.querySelector<HTMLFormElement>('.ask-ai-composer')!;
     const input = panel.querySelector<HTMLTextAreaElement>('textarea')!;
-    const translateBox = panel.querySelector<HTMLInputElement>('[data-translate]')!;
     const askBtn = panel.querySelector<HTMLButtonElement>('[data-ask]')!;
+    const requestError = panel.querySelector<HTMLElement>('[data-request-error]')!;
     const saveBtn = panel.querySelector<HTMLButtonElement>('[data-save]')!;
     const deleteBtn = panel.querySelector<HTMLButtonElement>('[data-delete]')!;
     const dragHandle = panel.querySelector<HTMLElement>('[data-drag]')!;
@@ -180,7 +179,11 @@ export function openAskAiDialog(args: AskAiOpenArgs, hooks: AskAiHooks) {
       deleteBtn.disabled = busy || (!xref && !hasAnswer);
       askBtn.disabled = busy;
       input.disabled = busy;
-      translateBox.disabled = busy;
+    }
+
+    function setRequestError(message = '') {
+      requestError.hidden = !message;
+      requestError.textContent = message;
     }
 
     function fillBody(el: HTMLElement, text: string, asMarkdown: boolean) {
@@ -261,10 +264,10 @@ export function openAskAiDialog(args: AskAiOpenArgs, hooks: AskAiHooks) {
     }
 
     async function askQuestion(question: string) {
-      const translate = translateBox.checked;
-      const q = question.trim() || (translate ? '选区英译中' : '');
+      const q = question.trim();
       if (!q || busy) return;
       const history = historyForApi(thread);
+      setRequestError();
       thread.turns.push({ role: 'user', speaker: hooks.userName, text: q });
       dirty = true;
       input.value = '';
@@ -282,7 +285,6 @@ export function openAskAiDialog(args: AskAiOpenArgs, hooks: AskAiHooks) {
           document_id: args.document_id,
           filename: args.filename,
           history,
-          translate,
         }, event => {
           if (event.type === 'delta' && event.text) {
             if (event.part === 'reasoning') {
@@ -311,12 +313,14 @@ export function openAskAiDialog(args: AskAiOpenArgs, hooks: AskAiHooks) {
           await persistThread();
         }
       } catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
         thread.turns.pop();
         if (thread.turns.length && thread.turns[thread.turns.length - 1]?.role === 'user') {
           thread.turns.pop();
         }
         dirty = serializeAskThread(thread) !== lastSaved;
-        window.dispatchEvent(new CustomEvent('office-error', { detail: e instanceof Error ? e.message : String(e) }));
+        setRequestError(message);
+        window.dispatchEvent(new CustomEvent('office-error', { detail: message }));
       } finally {
         setBusy(false);
       }

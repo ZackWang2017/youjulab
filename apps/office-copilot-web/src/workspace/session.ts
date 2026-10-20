@@ -21,6 +21,9 @@ export interface Asset {
   content?: any;
   placement?: 'user' | 'project';
 }
+export interface RecentAsset extends Asset {
+  project_name: string;
+}
 export interface Workspace {
   user: User;
   projects: Project[];
@@ -29,9 +32,10 @@ export interface Workspace {
   selected: Record<Kind, Asset | null>;
   calc: Asset | null;
   notebook: Asset | null;
+  recentAssets: RecentAsset[];
 }
 
-const KINDS: Kind[] = ['sheet', 'document', 'pdf', 'mindmap', 'research', 'diagram', 'calendar'];
+const KINDS: Kind[] = ['sheet', 'document', 'pdf', 'mindmap', 'research', 'diagram', 'project_plan', 'calendar'];
 const serverRevision = new Map<string, number>();
 let queued: { id: string; content: unknown } | null = null;
 let saveTimer: ReturnType<typeof setTimeout> | undefined;
@@ -99,6 +103,7 @@ async function loadAssets(projectId: string) {
     mindmap: [] as Asset[],
     research: [] as Asset[],
     diagram: [] as Asset[],
+    project_plan: [] as Asset[],
     calendar: [] as Asset[],
   };
   await Promise.all(KINDS.map(async kind => {
@@ -117,6 +122,17 @@ async function loadUserTool(projectId: string, kind: 'calc' | 'notebook') {
   }
 }
 
+export async function loadRecentAssets(projectId: string) {
+  return (await office.json<{ assets: RecentAsset[] }>(`/assets/recent?project_id=${encodeURIComponent(projectId)}`)).assets;
+}
+
+export async function reorderRecentAssets(projectId: string, assetIds: string[]) {
+  return (await office.json<{ assets: RecentAsset[] }>('/assets/recent', {
+    method: 'PUT',
+    body: JSON.stringify({ project_id: projectId, asset_ids: assetIds }),
+  })).assets;
+}
+
 function pick(list: Asset[], last: string | null) {
   return list.find(item => item.id === last) || list[0] || null;
 }
@@ -129,6 +145,7 @@ function selectedFrom(assets: Record<Kind, Asset[]>, last: Record<Kind, string |
     mindmap: pick(assets.mindmap, last.mindmap),
     research: pick(assets.research, last.research),
     diagram: pick(assets.diagram, last.diagram),
+    project_plan: pick(assets.project_plan, last.project_plan),
     calendar: pick(assets.calendar, last.calendar),
   };
 }
@@ -147,6 +164,7 @@ export async function bootstrap(): Promise<Workspace> {
     selected: selectedFrom(assets, user.last_assets),
     calc: await loadUserTool(project.id, 'calc'),
     notebook: await loadUserTool(project.id, 'notebook'),
+    recentAssets: await loadRecentAssets(project.id),
   };
 }
 
@@ -163,10 +181,13 @@ async function flushSaveSoft() {
   }
 }
 
-export async function openAsset(id: string) {
+export async function openAsset(id: string, trackRecent = true) {
   await flushSaveSoft();
-  const asset = await getAsset(id);
-  const user = await office.json<User>(`/assets/${id}/select`, { method: 'POST' });
+  const suffix = trackRecent ? '' : '?track_recent=false';
+  const [asset, user] = await Promise.all([
+    getAsset(id),
+    office.json<User>(`/assets/${id}/select${suffix}`, { method: 'POST' }),
+  ]);
   return { asset, user };
 }
 
@@ -176,12 +197,16 @@ export async function selectProject(id: string) {
   const { projects } = await office.json<{ projects: Project[] }>('/projects');
   const project = projects.find(item => item.id === id);
   if (!project) throw new Error('项目不存在。');
-  const assets = await loadAssets(id);
+  const [assets, calc, notebook, recentAssets] = await Promise.all([
+    loadAssets(id),
+    loadUserTool(id, 'calc'),
+    loadUserTool(id, 'notebook'),
+    loadRecentAssets(id),
+  ]);
   return {
     user, projects, project, assets,
     selected: selectedFrom(assets, user.last_assets),
-    calc: await loadUserTool(id, 'calc'),
-    notebook: await loadUserTool(id, 'notebook'),
+    calc, notebook, recentAssets,
   } satisfies Workspace;
 }
 
@@ -191,10 +216,20 @@ export async function renameProject(id: string, name: string) {
 }
 
 export async function renameAsset(id: string, name: string) {
+  return updateAsset(id, { name });
+}
+
+export async function updateAsset(
+  id: string,
+  fields: { name?: string; visibility?: 'project' | 'user' },
+) {
   await flushSaveSoft();
+  const body: Record<string, unknown> = { revision: serverRevision.get(id) };
+  if (fields.name !== undefined) body.name = fields.name;
+  if (fields.visibility !== undefined) body.visibility = fields.visibility;
   const saved = await office.json<Asset>(`/assets/${id}`, {
     method: 'PUT',
-    body: JSON.stringify({ name, revision: serverRevision.get(id) }),
+    body: JSON.stringify(body),
   });
   rememberRevision(saved.id, saved.revision);
   return saved;

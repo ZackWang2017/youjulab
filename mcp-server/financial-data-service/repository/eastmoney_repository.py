@@ -4,7 +4,9 @@
 不依赖 AKShare；数值保留原始 HKD 最小单位，入库单位字段为「元」。
 
 用法（在 mcp-server 目录下）：
-  ../.venv/bin/python data-providor/eastmoney_financial_data.py --ticker 00700.HK
+  ../.venv/bin/python financial-data-service/repository/eastmoney_repository.py --ticker 00700.HK
+
+A 股财报在同目录 a_share_statement_repository.py，复用本文件的请求与入库。
 """
 
 from __future__ import annotations
@@ -115,13 +117,14 @@ class EastMoneyHkClient:
         report_name: str,
         secucode: str,
         page_number: int,
+        page_size: int = EM_PAGE_SIZE,
     ) -> dict:
         params = {
             "reportName": report_name,
             "columns": "ALL",
             "filter": f'(SECUCODE="{secucode}")',
             "pageNumber": page_number,
-            "pageSize": EM_PAGE_SIZE,
+            "pageSize": page_size,
             "sortTypes": -1,
             "sortColumns": "REPORT_DATE",
             "source": "F10",
@@ -167,6 +170,17 @@ class EastMoneyHkClient:
             )
             for row in result.get("data") or []:
                 yield row
+
+    def fetch_latest_row(self, *, report_name: str, secucode: str) -> dict | None:
+        """按报告期倒序取最新一行，供增量检查，不拉全表。"""
+        result = self._get_page(
+            report_name=report_name,
+            secucode=secucode,
+            page_number=1,
+            page_size=1,
+        )
+        rows = result.get("data") or []
+        return rows[0] if rows else None
 
 
 def row_to_record(row: dict, *, ticker_code: str, item_category: str) -> FinancialStatementRecord | None:

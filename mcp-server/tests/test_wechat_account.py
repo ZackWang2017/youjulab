@@ -47,6 +47,13 @@ class WechatAccountTests(unittest.TestCase):
         listed.assert_called_once_with("MP_WXS_1", 5)
         self.assertEqual(out["results"][0]["title"], "早报")
 
+    def test_weread_missing_session_requests_interactive_login(self) -> None:
+        with patch.object(weread_repo, "load_cookie", return_value=""):
+            out = weread_service.list_shelf_articles(5)
+        self.assertTrue(out["login_required"])
+        self.assertEqual(out["accounts"], [])
+        self.assertIn("尚未登录", out["error"])
+
     def test_weread_review_link(self) -> None:
         payload = {"reviews": [{"subReviews": [{"review": {
             "reviewId": "MP_WXS_1_token~1",

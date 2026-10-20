@@ -1,6 +1,0 @@
-# 忽略备份产物（脚本与说明保留在仓库）
-archives/
-*.dump
-*.archive
-*.gz
-*.bson

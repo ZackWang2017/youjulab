@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import secrets
+import base64
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -80,6 +81,28 @@ def model_api_key() -> str:
 
 def model_configured() -> bool:
     return bool(model_base_url() and model_name())
+
+
+def llm_config_set() -> int:
+    """模型凭据来源：0 平台、1 当前用户、3 按用户选择（当前仅自有模型）。"""
+    raw = (os.environ.get("LLM_CONFIG_SET") or "0").strip()
+    try:
+        return int(raw)
+    except ValueError:
+        return -1
+
+
+def user_model_encryption_key() -> bytes | None:
+    """读取 AES-256-GCM 主密钥；缺失时拒绝保存，绝不降级为明文。"""
+    raw = (os.environ.get("OFFICE_MODEL_CREDENTIALS_KEY") or "").strip()
+    if not raw:
+        return None
+    try:
+        padded = raw + "=" * (-len(raw) % 4)
+        key = base64.urlsafe_b64decode(padded.encode("ascii"))
+    except (ValueError, UnicodeEncodeError):
+        return None
+    return key if len(key) == 32 else None
 
 
 def pg_url() -> str:

@@ -58,6 +58,9 @@ for _layer in (
     "local-tools/repository",
     "local-tools/service",
     "local-tools/endpoints",
+    "portfolio-service/repository",
+    "portfolio-service/service",
+    "portfolio-service/endpoints",
 ):
     sys.path.insert(0, str(HERE / _layer))
 
@@ -68,16 +71,17 @@ import spreadsheet_endpoint  # noqa: E402
 import document_endpoint  # noqa: E402
 import mindmap_endpoint  # noqa: E402
 import pdf_index_endpoint  # noqa: E402
+import announcement_outline_endpoint  # noqa: E402
 import statement_endpoint  # noqa: E402
 import security_search_endpoint  # noqa: E402
 import search_endpoint as external_tools  # noqa: E402
 import website_crawler_endpoint  # noqa: E402
 import wechat_search_endpoint  # noqa: E402
 import wechat_account_endpoint  # noqa: E402
-import weread_session_service  # noqa: E402
 import wechat_article_endpoint  # noqa: E402
 import preset_news_endpoint  # noqa: E402
 import feed_endpoint  # noqa: E402
+import portfolio_endpoint  # noqa: E402
 from access_token import bearer_matches, bearer_token, is_user_office_path, reset_incoming_access_token, set_incoming_access_token  # noqa: E402
 from dotenv import load_dotenv  # noqa: E402
 
@@ -92,6 +96,7 @@ spreadsheet_endpoint.register_tools(sheets_mcp)
 docs_mcp = FastMCP("invp-documents", streamable_http_path="/mcp/documents")
 document_endpoint.register_tools(docs_mcp)
 pdf_index_endpoint.register_tools(docs_mcp)
+announcement_outline_endpoint.register_tools(docs_mcp)
 mindmaps_mcp = FastMCP("invp-mindmaps", streamable_http_path="/mcp/mindmaps")
 mindmap_endpoint.register_tools(mindmaps_mcp)
 external_mcp = FastMCP("invp-external-tools", streamable_http_path="/mcp/external-tools")
@@ -169,6 +174,8 @@ def _run_http() -> None:
     preset_news_endpoint.register_routes(app, _CORS)
     wechat_account_endpoint.register_routes(app, _CORS)
     feed_endpoint.register_routes(app, _CORS)
+    portfolio_endpoint.register_routes(app, _CORS)
+    portfolio_endpoint.mount_scheduler(app)
 
     host = os.environ.get("FINANCE_MCP_HOST", "0.0.0.0")
     port = int(os.environ.get("FINANCE_MCP_PORT", "8000"))
@@ -187,8 +194,10 @@ def _run_http() -> None:
     print(f"preset news: GET http://{host}:{port}/api/local-tools/preset-news", file=sys.stderr)
     print(f"wechat account: GET http://{host}:{port}/api/local-tools/wechat-account", file=sys.stderr)
     print(f"weread shelf: GET http://{host}:{port}/api/local-tools/weread-shelf", file=sys.stderr)
+    print(f"weread login: POST/GET http://{host}:{port}/api/local-tools/weread-login", file=sys.stderr)
     print(f"feed: POST http://{host}:{port}/api/local-tools/feed", file=sys.stderr)
-    weread_session_service.ensure_login()
+    print(f"portfolio: GET/POST http://{host}:{port}/api/portfolio/portfolios (header X-Office-User-Id)", file=sys.stderr)
+    print(f"scheduler: GET http://{host}:{port}/api/scheduler/tasks, POST /api/scheduler/tasks/{{name}}/run", file=sys.stderr)
     uvicorn.run(app, host=host, port=port, log_level="info")
 
 
@@ -199,5 +208,4 @@ if __name__ == "__main__":
     else:
         # stdio 传输：DSH 的 dsh-mcp-client 以子进程方式拉起
         print("finresearch MCP server: stdio (waiting for DSH client)", file=sys.stderr)
-        weread_session_service.ensure_login()
         mcp.run(transport="stdio")

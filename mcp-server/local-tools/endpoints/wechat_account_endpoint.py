@@ -41,5 +41,13 @@ def register_routes(app, cors_headers: dict[str, str]) -> None:
         payload = weread_service.list_shelf_articles(num)
         return JSONResponse(payload, headers=cors_headers)
 
+    async def weread_login_route(_request: Request):
+        return JSONResponse(weread_service.start_login(), headers=cors_headers)
+
+    async def weread_login_status_route(request: Request):
+        return JSONResponse(weread_service.login_status(request.path_params["session_id"]), headers=cors_headers)
+
     app.add_route("/api/local-tools/wechat-account", account_route, methods=["GET", "OPTIONS"])
     app.add_route("/api/local-tools/weread-shelf", shelf_route, methods=["GET", "OPTIONS"])
+    app.add_route("/api/local-tools/weread-login", weread_login_route, methods=["POST", "OPTIONS"])
+    app.add_route("/api/local-tools/weread-login/{session_id}", weread_login_status_route, methods=["GET", "OPTIONS"])

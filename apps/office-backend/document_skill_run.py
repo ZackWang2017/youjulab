@@ -15,10 +15,17 @@ import httpx
 from assistant import iter_chat_events
 from config import ROOT, digest_tz, mcp_access_token, mcp_http_base
 from document_skills import SKILL_TYPES
+from weread_proxy import start_login as start_weread_login
 
 _MAX_SEARCH = 5
 _MAX_TEXT = 4000
 _MAX_SEEN = 1000
+
+
+class WeReadLoginRequired(Exception):
+    def __init__(self, session: dict):
+        self.session = session
+        super().__init__("微信读书需要扫码登录。")
 
 
 def run_document_skill(skill: dict, *, project_name: str, document_name: str, user_token: str) -> dict[str, Any]:
@@ -395,6 +402,9 @@ async def iter_skill_run_events(
     yield {"type": "status", "text": "正在获取资讯…"}
     try:
         fresh, added, seen = await asyncio.to_thread(_fresh_items, skill)
+    except WeReadLoginRequired as exc:
+        yield {"type": "weread_login_required", **exc.session}
+        return
     except ValueError as exc:
         yield {"type": "error", "error": str(exc)}
         return
@@ -438,6 +448,8 @@ def _source_ids(params: dict) -> list[str]:
 
 def _weread_items() -> list[dict]:
     fetched = _fetch_weread_shelf()
+    if fetched.get("login_required"):
+        raise WeReadLoginRequired(start_weread_login())
     accounts = fetched.get("accounts") or []
     article_count = sum(len(account.get("results") or []) for account in accounts if isinstance(account, dict))
     if fetched.get("error") and not accounts:

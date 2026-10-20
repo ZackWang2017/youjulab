@@ -1,6 +1,88 @@
 #pdf { position: relative; display: flex; flex-direction: column; min-height: 0; }
 #pdf .pdf-toolbar { flex-shrink: 0; height: auto; min-height: 52px; flex-wrap: wrap; gap: 6px; }
-#pdf .pdf-stage { position: relative; flex: 1; min-height: 0; display: flex; --pdf-copy-width: 50%; }
+#pdf .pdf-stage { position: relative; flex: 1; min-height: 0; display: flex; --pdf-copy-width: 50%; --pdf-notebook-width: 360px; }
+#pdf .pdf-notebook-panel {
+  flex: 0 0 var(--pdf-notebook-width);
+  min-width: 280px;
+  min-height: 0;
+  overflow: hidden;
+  border-right: 1px solid #d9e1df;
+  background: #fff;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+}
+#pdf .pdf-notebook-panel[hidden] { display: none !important; }
+#pdf .pdf-notebook-split {
+  position: relative;
+  flex: 0 0 8px;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: col-resize;
+  outline: none;
+  touch-action: none;
+}
+#pdf .pdf-notebook-split[hidden] { display: none !important; }
+#pdf .pdf-notebook-split::after {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 1px;
+  transform: translateX(-50%);
+  background: #d9e1df;
+  content: "";
+}
+#pdf .pdf-notebook-split:hover::after,
+#pdf .pdf-notebook-split:focus-visible::after,
+#pdf.resizing-notebook .pdf-notebook-split::after { width: 2px; background: #168274; }
+#pdf .pdf-notebook-panel .notebook-editor { min-height: 0; overflow: auto; padding: 18px 20px; }
+#pdf .pdf-notebook-panel .notebook-editor .tiptap { min-height: 100%; outline: 0; line-height: 1.75; color: #242b29; }
+#pdf .pdf-notebook-panel .notebook-editor .tiptap p { margin: 0 0 10px; }
+#pdf .pdf-notebook-panel .notebook-editor .tiptap h2 { margin: 18px 0 8px; font-size: 18px; }
+#pdf .pdf-notebook-panel .notebook-editor .tiptap h3 { margin: 14px 0 6px; font-size: 15px; }
+#pdf .pdf-notebook-panel .notebook-editor .tiptap h4 { margin: 12px 0 5px; font-size: 14px; }
+#pdf .pdf-notebook-panel .notebook-editor .tiptap h5 { margin: 10px 0 4px; font-size: 13px; }
+#pdf .pdf-notebook-panel .notebook-editor .tiptap ul,
+#pdf .pdf-notebook-panel .notebook-editor .tiptap ol { margin: 0 0 10px; padding-left: 1.4em; }
+#pdf .pdf-notebook-panel .notebook-editor .tiptap ul { list-style-type: disc; }
+#pdf .pdf-notebook-panel .notebook-editor .tiptap ul[data-marker="circle"],
+#pdf .pdf-notebook-panel .notebook-editor .tiptap ul ul:not([data-marker]) { list-style-type: circle; }
+#pdf .pdf-notebook-panel .notebook-editor .tiptap ul[data-marker="square"],
+#pdf .pdf-notebook-panel .notebook-editor .tiptap ul ul ul:not([data-marker]) { list-style-type: square; }
+#pdf .pdf-notebook-panel .notebook-editor .tiptap ul[data-marker="hollow-square"],
+#pdf .pdf-notebook-panel .notebook-editor .tiptap ul ul ul ul:not([data-marker]) { list-style: none; padding-left: 1.4em; }
+#pdf .pdf-notebook-panel .notebook-editor .tiptap ul[data-marker="hollow-square"] > li,
+#pdf .pdf-notebook-panel .notebook-editor .tiptap ul ul ul ul:not([data-marker]) > li { position: relative; }
+#pdf .pdf-notebook-panel .notebook-editor .tiptap ul[data-marker="hollow-square"] > li::before,
+#pdf .pdf-notebook-panel .notebook-editor .tiptap ul ul ul ul:not([data-marker]) > li::before {
+  content: '';
+  position: absolute;
+  left: -1.08em;
+  top: 0.63em;
+  width: 0.48em;
+  height: 0.48em;
+  box-sizing: border-box;
+  border: 1px solid #526660;
+}
+#pdf .pdf-notebook-panel .notebook-editor .tiptap li { position: relative; }
+#pdf .pdf-notebook-panel .notebook-editor .tiptap li[data-collapsed="true"] > ul,
+#pdf .pdf-notebook-panel .notebook-editor .tiptap li[data-collapsed="true"] > ol { display: none; }
+#pdf .pdf-notebook-panel .notebook-editor .tiptap .pdf-list-fold-toggle {
+  position: absolute; z-index: 2; left: -1.45em; top: 0.52em; width: 0.95em; min-width: 0.95em;
+  height: 0.95em; min-height: 0.95em; padding: 0; border: 0; border-radius: 3px; background: #f3f7f6;
+  cursor: pointer;
+}
+#pdf .pdf-notebook-panel .notebook-editor .tiptap .pdf-list-fold-toggle::before {
+  content: ''; position: absolute; left: 0.34em; top: 0.24em; width: 0.32em; height: 0.32em;
+  border-right: 1.5px solid #4d625d; border-bottom: 1.5px solid #4d625d; transform: rotate(45deg);
+}
+#pdf .pdf-notebook-panel .notebook-editor .tiptap li[data-collapsed="true"] > .pdf-list-fold-toggle::before { top: 0.31em; left: 0.25em; transform: rotate(-45deg); }
+#pdf .pdf-notebook-panel .notebook-editor .tiptap .pdf-list-fold-toggle:hover,
+#pdf .pdf-notebook-panel .notebook-editor .tiptap .pdf-list-fold-toggle:focus-visible { background: #dcefeb; outline: 0; }
+#pdf .pdf-notebook-panel .notebook-editor .tiptap blockquote { margin: 12px 0; padding-left: 12px; border-left: 3px solid #a9bbb5; color: #65716d; }
+#pdf .pdf-notebook-panel .notebook-editor .tiptap a { color: #0f6f68; text-decoration: underline; }
 #pdf .pdf-pane {
   position: relative;
   flex: 1 1 auto;
@@ -74,6 +156,18 @@
 #pdf .pdf-annotate button span { line-height: 1; }
 #pdf [data-pdf-shot].is-active { background: #e7f5f2; border-color: #168274; color: #0f5c52; }
 #pdf .pdf-shots { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; min-width: 0; }
+#pdf .pdf-notebook-toggle { flex-shrink: 0; margin-left: 2px; padding: 6px 8px; gap: 4px; font-size: 12px; border-left-color: #d6dfdd; }
+#pdf .pdf-notebook-toggle[aria-pressed="true"] { background: #e7f4f2; border-color: #b7d8d2; color: #0f6f64; }
+#pdf .pdf-ask-ai { flex-shrink: 0; padding: 6px 8px; gap: 4px; font-size: 12px; }
+#pdf .pdf-ask-ai span { line-height: 1; }
+#pdf .pdf-outline-toggle { flex-shrink: 0; min-width: 32px; padding: 6px 7px; color: #0f6f64; }
+#pdf .pdf-outline-toggle:hover:not(:disabled) { background: #e7f4f2; border-color: #b7d8d2; }
+.pdf-outline-float { width: min(420px, calc(100vw - 16px)); min-height: 250px; }
+.pdf-outline-content { display: grid; grid-template-rows: auto minmax(90px, 1fr); gap: 12px; padding: 14px 16px 16px; }
+.pdf-outline-content .thinking-status { padding: 10px; border: 1px solid #e0e8e6; border-radius: 5px; background: #f8fbfa; }
+.pdf-outline-log { margin: 0; padding: 0 2px 0 22px; max-height: 220px; overflow: auto; color: #58656a; font-size: 12px; line-height: 1.65; }
+.pdf-outline-log li { padding: 2px 0; }
+#pdf .pdf-toolbar-spacer { flex: 1 1 auto; min-width: 12px; }
 #pdf .pdf-shot-name { min-height: 28px; padding: 2px 8px; font-size: 12px; }
 #pdf .pdf-shot-name.is-open { background: #e7f5f2; border-color: #168274; color: #0f5c52; }
 #pdf .pdf-shot-mask { position: absolute; inset: 0; z-index: 8; cursor: crosshair; touch-action: none; background: rgba(22, 40, 60, 0.08); }
@@ -93,6 +187,9 @@ button.pdf-shot-close:not(#sheet button):hover { background: #e7ebed; }
 button.pdf-shot-resize:not(#sheet button) { position: absolute; right: 0; bottom: 0; z-index: 2; width: 16px; height: 16px; min-width: 16px; min-height: 16px; padding: 0; border: 0; background: transparent; cursor: nwse-resize; touch-action: none; }
 button.pdf-shot-resize:not(#sheet button):hover { background: transparent; }
 .pdf-shot-resize::before { content: ""; position: absolute; right: 3px; bottom: 3px; width: 8px; height: 8px; border-right: 2px solid #8b98a3; border-bottom: 2px solid #8b98a3; }
+@media (max-width: 860px) {
+  #pdf .pdf-notebook-panel { max-width: 42%; min-width: 240px; }
+}
 #pdf .annotationLayer .textAnnotation.pdf-note-badge.pdf-ai-badge,
 #pdf .pdf-live-note.pdf-ai-badge {
   border-color: #2f6fed; background: #dce9ff; color: #1d4fbf;
@@ -141,3 +238,46 @@ button.pdf-shot-resize:not(#sheet button):hover { background: transparent; }
   color: #5c4d12; font-size: 11px; line-height: 1.2; font-weight: 600; white-space: nowrap;
   box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.85);
 }
+.pdf-annotation-overlay { z-index: 1200; padding: 24px; }
+.pdf-annotation-dialog {
+  width: min(680px, calc(100vw - 48px)); max-height: min(720px, calc(100vh - 48px));
+  display: flex; flex-direction: column; overflow: hidden; border: 1px solid #d7dfdd;
+  border-radius: 8px; background: #fff; color: #26302e; box-shadow: 0 22px 64px rgba(24, 42, 39, .22);
+}
+.pdf-annotation-head { display: flex; align-items: center; justify-content: space-between; min-height: 52px; padding: 0 14px 0 18px; border-bottom: 1px solid #e6ecea; }
+.pdf-annotation-head > div { display: flex; align-items: center; gap: 9px; color: #146b62; }
+.pdf-annotation-head h2 { margin: 0; font-size: 16px; font-weight: 650; }
+.pdf-annotation-head svg { width: 17px; height: 17px; }
+.pdf-annotation-head button, .pdf-annotation-toolbar button { display: inline-grid; place-items: center; width: 30px; min-width: 30px; height: 30px; min-height: 30px; padding: 0; border: 0; border-radius: 4px; background: transparent; color: #52625e; }
+.pdf-annotation-head button:hover, .pdf-annotation-toolbar button:hover { background: #edf4f2; color: #0f6f64; }
+.pdf-annotation-toolbar { display: flex; align-items: center; gap: 2px; min-height: 42px; padding: 5px 16px; border-bottom: 1px solid #e6ecea; background: #fafcfb; }
+.pdf-annotation-toolbar span { flex: 1; }
+.pdf-annotation-toolbar svg { width: 15px; height: 15px; }
+.pdf-annotation-error { margin: 10px 20px -2px; padding: 8px 10px; border: 1px solid #e8b8b8; border-radius: 4px; background: #fff4f4; color: #9a3939; font-size: 13px; }
+.pdf-annotation-editor { min-height: 180px; max-height: min(520px, calc(100vh - 228px)); overflow: auto; padding: 22px 24px 28px; background: #fff; }
+.pdf-annotation-editor .tiptap { min-height: 100%; outline: 0; color: #273330; font-size: 14px; line-height: 1.8; white-space: pre-wrap; }
+.pdf-annotation-editor .tiptap p { margin: 0 0 12px; }
+.pdf-annotation-editor .tiptap h2 { margin: 20px 0 9px; font-size: 18px; line-height: 1.45; }
+.pdf-annotation-editor .tiptap ul, .pdf-annotation-editor .tiptap ol { margin: 0 0 12px; padding-left: 1.5em; }
+.pdf-annotation-editor .tiptap blockquote { margin: 14px 0; padding: 4px 14px; border-left: 3px solid #81bbb1; color: #52625e; background: #f6faf9; }
+.pdf-annotation-editor .tiptap a { color: #0f6f64; text-decoration: underline; }
+.pdf-annotation-dialog:not(.is-editing) .pdf-annotation-editor { background: #fbfcfc; cursor: text; }
+.pdf-annotation-editor.has-error { box-shadow: inset 0 0 0 2px #bb4a4a; }
+.pdf-annotation-actions { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 58px; padding: 10px 16px 10px 20px; border-top: 1px solid #e6ecea; background: #fafcfb; }
+.pdf-annotation-actions > span { color: #75817e; font-size: 12px; }
+.pdf-annotation-actions > div { display: flex; align-items: center; gap: 8px; }
+.pdf-annotation-actions button { min-height: 32px; padding: 5px 11px; border-radius: 4px; }
+.pdf-annotation-actions button svg { width: 14px; height: 14px; }
+.pdf-annotation-actions .primary, .pdf-annotation-delete { display: inline-flex; align-items: center; gap: 5px; }
+.pdf-annotation-delete { margin-right: 10px; border-color: transparent !important; background: transparent !important; color: #a34242; }
+.pdf-annotation-delete:hover { background: #fff0f0 !important; }
+.pdf-summary-preview { max-height: 260px; overflow: auto; margin: 12px 0 0; padding: 10px 12px; border: 1px solid #d9e7e3; border-radius: 5px; background: #f7fbfa; color: #31413d; font-size: 13px; line-height: 1.65; }
+.pdf-summary-preview ul { margin: 0; padding-left: 1.25em; }
+.pdf-summary-preview ul + ul { margin-top: 5px; }
+.pdf-summary-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+.pdf-summary-float { height: min(680px, calc(100vh - 24px)); min-height: 0; }
+.pdf-summary-float .pdf-outline-content { flex: 1; min-height: 0; display: flex; flex-direction: column; grid-template-rows: none; overflow: hidden; }
+.pdf-summary-float .pdf-outline-log { flex: 0 0 auto; max-height: 110px; }
+.pdf-summary-float .pdf-summary-preview { flex: 1 1 auto; min-height: 0; max-height: none; margin-top: 0; }
+.pdf-summary-float .pdf-summary-actions { flex: 0 0 auto; margin-top: 12px; }
+@media (max-width: 640px) { .pdf-annotation-overlay { padding: 12px; } .pdf-annotation-dialog { width: 100%; max-height: calc(100vh - 24px); } .pdf-annotation-editor { padding: 18px; } .pdf-annotation-actions { padding-left: 14px; } }
