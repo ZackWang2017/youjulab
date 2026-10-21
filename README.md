@@ -24,7 +24,14 @@ PDF 向量检索使用 embedding 服务，默认连宿主机 `http://host.docker
 
 脚本会检查本机是否已有数据库镜像，没有则拉取 `pgvector/pgvector:pg16` 和 `mongo:7`，再构建应用镜像（安装 Python 与前端依赖）并启动。首次构建需要下载依赖，时间会比较长。
 
-启动后打开 http://www.youjulab.com 或 https://www.youjulab.com ，注册邮箱账号即可使用。把域名解析到这台机器的 80 和 443。正式证书放在 `deploy/certs/fullchain.pem` 和 `deploy/certs/privkey.pem`；目录为空时容器会生成一张临时自签证书，浏览器会提示不受信任。
+启动后打开 https://www.youjulab.com ，注册邮箱账号即可使用。域名需解析到机器的 80/443。正式环境用 Let's Encrypt：
+
+```sh
+apt-get install -y certbot
+CERTBOT_EMAIL=你的邮箱@example.com ./deploy/certbot/issue.sh
+```
+
+`certbot.timer` 会自动续期；续期后 `deploy/certbot/deploy-hook.sh` 会把证书拷到 `deploy/certs/` 并 reload Nginx。根域名 `youjulab.com` 需在 DNS 配好 A 记录后，用 `CERTBOT_INCLUDE_APEX=1` 再签发。目录为空时容器会生成临时自签证书。
 
 常用参数：
 

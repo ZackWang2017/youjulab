@@ -12,7 +12,13 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     FINANCE_PDF_ROOT=/app/data
 
 COPY mcp-server/requirements.txt /tmp/requirements.txt
-RUN pip install --no-cache-dir -r /tmp/requirements.txt
+ARG PIP_INDEX_URL=https://mirrors.cloud.tencent.com/pypi/simple
+ARG PIP_TRUSTED_HOST=mirrors.cloud.tencent.com
+RUN pip install --upgrade pip \
+    && pip install --no-cache-dir \
+      -i "${PIP_INDEX_URL}" \
+      --trusted-host "${PIP_TRUSTED_HOST}" \
+      -r /tmp/requirements.txt
 
 COPY mcp-server /app/mcp-server
 COPY deploy/entrypoint-mcp.sh /entrypoint.sh

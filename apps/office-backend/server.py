@@ -33,7 +33,7 @@ from assistant_sessions import public_session, public_session_list_item, session
 from pdf_ask import iter_pdf_ask_events  # noqa: E402
 from pdf_summary import iter_pdf_selection_summary_events  # noqa: E402
 from pdf_glossary import delete_project_term, list_project_terms, upsert_project_term  # noqa: E402
-from config import api_host, api_port, file_root, llm_config_set, mcp_token_matches  # noqa: E402
+from config import api_host, api_port, file_root, llm_config_set, mcp_token_matches, resolve_asset_file_path  # noqa: E402
 from model_credentials import CredentialEncryptionError, encrypt_api_key, public_model_config  # noqa: E402
 from model_runtime import model_api_key, model_configuration_error, model_configured, model_name, set_current_model, settings_for_user  # noqa: E402
 from pdf_annot import add_pdf_annotation, delete_pdf_annotation, update_pdf_annotation  # noqa: E402
@@ -532,8 +532,8 @@ def create_app(store: Store | None = None) -> FastAPI:
         asset = store.asset(user["id"], document_id)
         if not asset or asset.get("kind") != "pdf" or not asset.get("file_path"):
             raise HTTPException(404, "PDF 不存在或尚未上传。")
-        path = Path(asset["file_path"])
-        if not path.is_file():
+        path = resolve_asset_file_path(asset.get("file_path"), asset.get("id"))
+        if not path:
             raise HTTPException(404, "PDF 文件缺失。")
         return asset, path
 
@@ -939,11 +939,12 @@ def create_app(store: Store | None = None) -> FastAPI:
         return list_recent_assets(body.project_id, user, store)
 
     @app.get("/assets/{asset_id}")
-    def get_asset(asset_id: str, user: dict = Depends(user_from), store: Store = Depends(get_store)):
+    def get_asset(asset_id: str, meta: int = 0, user: dict = Depends(user_from), store: Store = Depends(get_store)):
         asset = asset_of(store, user, asset_id)
         if not asset:
             raise HTTPException(404, "文件不存在。")
-        return public_asset(asset, include_content=True)
+        # meta=1 只回版本等元数据，供浏览器本地缓存命中时跳过整份 JSON。
+        return public_asset(asset, include_content=meta != 1)
 
     @app.put("/assets/{asset_id}")
     def save_asset(asset_id: str, body: SaveAssetBody, user: dict = Depends(user_from), store: Store = Depends(get_store)):
@@ -1069,9 +1070,16 @@ def create_app(store: Store | None = None) -> FastAPI:
         asset = store.asset(user["id"], asset_id)
         if not asset or asset["kind"] != "pdf" or not asset.get("file_path"):
             raise HTTPException(404, "尚未上传 PDF。")
-        path = Path(asset["file_path"])
-        if not path.is_file():
+        path = resolve_asset_file_path(asset.get("file_path"), asset_id)
+        if not path:
             raise HTTPException(404, "尚未上传 PDF。")
+        # 旧绝对路径失效时，写回当前根目录，避免每次都靠兜底。
+        if str(path) != str(asset.get("file_path") or ""):
+            try:
+                store.update_asset(user["id"], asset_id, file_path=str(path))
+                asset["file_path"] = str(path)
+            except Exception:
+                pass
         return asset, path
 
     def save_pdf_file(user: dict, asset: dict, path: Path, store: Store):
@@ -1114,14 +1122,19 @@ def create_app(store: Store | None = None) -> FastAPI:
 
     @app.get("/assets/{asset_id}/file")
     def download_pdf(asset_id: str, user: dict = Depends(user_from), store: Store = Depends(get_store)):
-        asset = store.asset(user["id"], asset_id)
-        if not asset or asset["kind"] != "pdf" or not asset.get("file_path"):
-            raise HTTPException(404, "尚未上传 PDF。")
-        path = Path(asset["file_path"])
-        if not path.is_file():
-            raise HTTPException(404, "尚未上传 PDF。")
-        return FileResponse(path, media_type="application/pdf", filename=asset.get("filename") or f"{asset['name']}.pdf",
-                            headers={"Cache-Control": "no-store"})
+        asset, path = pdf_file(asset_id, user, store)
+        revision = str(asset.get("revision", 0))
+        return FileResponse(
+            path,
+            media_type="application/pdf",
+            filename=asset.get("filename") or f"{asset['name']}.pdf",
+            headers={
+                "Cache-Control": "no-store",
+                "ETag": f'"{asset_id}-{revision}"',
+                "X-Asset-Revision": revision,
+                "Accept-Ranges": "bytes",
+            },
+        )
 
     @app.get("/assistant/status")
     def assistant_status(_user: dict = Depends(user_from)):

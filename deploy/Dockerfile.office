@@ -10,7 +10,14 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     OFFICE_FILE_ROOT=/data/office-files
 
 COPY apps/office-backend/requirements.txt /tmp/requirements.txt
-RUN pip install --no-cache-dir -r /tmp/requirements.txt
+# 国内云主机直连 PyPI 很慢；腾讯云镜像加速。可用构建参数覆盖。
+ARG PIP_INDEX_URL=https://mirrors.cloud.tencent.com/pypi/simple
+ARG PIP_TRUSTED_HOST=mirrors.cloud.tencent.com
+RUN pip install --upgrade pip \
+    && pip install --no-cache-dir \
+      -i "${PIP_INDEX_URL}" \
+      --trusted-host "${PIP_TRUSTED_HOST}" \
+      -r /tmp/requirements.txt
 
 COPY apps/office-backend /app/apps/office-backend
 COPY skills /app/skills

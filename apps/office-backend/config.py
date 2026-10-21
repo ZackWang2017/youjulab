@@ -29,6 +29,32 @@ def file_root() -> Path:
     return path
 
 
+def resolve_asset_file_path(stored: str | None, asset_id: str | None = None) -> Path | None:
+    """把库里的 file_path 解析到当前 OFFICE_FILE_ROOT。
+
+    备份/换机器后绝对路径常失效；只要相对 office-files/ 之后的后缀还在，就能找回文件。
+    """
+    if not stored:
+        return None
+    raw = Path(stored).expanduser()
+    if raw.is_file():
+        return raw
+    text = stored.replace("\\", "/")
+    marker = "office-files/"
+    idx = text.find(marker)
+    root = file_root()
+    if idx >= 0:
+        candidate = root / text[idx + len(marker) :]
+        if candidate.is_file():
+            return candidate
+    if asset_id:
+        # 当前上传约定：{root}/{owner}/{project}/{asset_id}.pdf
+        matches = list(root.glob(f"*/*/{asset_id}.pdf"))
+        if len(matches) == 1 and matches[0].is_file():
+            return matches[0]
+    return None
+
+
 def jwt_secret() -> str:
     return os.environ.get("OFFICE_JWT_SECRET", "office-dev-secret-please-change-32").strip() or "office-dev-secret-please-change-32"
 

@@ -27,8 +27,7 @@ function kindIcon(kind: Kind) {
 export function renderAuth(root: HTMLElement) {
   root.innerHTML = `<div class="auth-page" id="auth-page">
     <form id="auth" class="auth-card">
-      <h1>有据 - AI 价投实验室</h1>
-      <p>登录后进入你的项目工作区</p>
+      <h1>有据 - AI 价值投资实验室</h1>
       <label class="field-label" for="auth-email">邮箱</label>
       <input id="auth-email" name="email" type="email" autocomplete="username" required>
       <label class="field-label" for="auth-password">密码</label>

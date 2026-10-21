@@ -83,6 +83,9 @@ class OfficeApiTests(unittest.TestCase):
         self.assertEqual(document["name"], "未命名文档")
         self.assertEqual(document["placement"], "project")
         self.assertEqual(document["content"], {"type": "doc", "content": [{"type": "paragraph"}]})
+        meta = self.client.get(f"/assets/{user['last_assets']['document']}?meta=1", headers=headers).json()
+        self.assertEqual(meta["revision"], document["revision"])
+        self.assertNotIn("content", meta)
         self.assertEqual(research["content"]["format"], "invp-research-diagram-v1")
         self.assertEqual(research["content"]["type"], "timeline")
         self.assertEqual(calendar["name"], "日常工作")
@@ -994,6 +997,8 @@ class OfficeApiTests(unittest.TestCase):
         self.assertIn("/mcp/sheets", skill.text)
         self.assertIn("/api/spreadsheets/read", skill.text)
         self.assertIn("/mcp/documents", skill.text)
+        self.assertIn("generate_pdf_outline", skill.text)
+        self.assertNotIn("announcement-pdf/SKILL.md", skill.text)
 
     def test_rotate_token_keeps_projects_on_login_account(self):
         data = self.auth("owner@example.com")

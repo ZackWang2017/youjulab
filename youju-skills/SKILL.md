@@ -1,11 +1,9 @@
 ---
 name: youjulab
-description: Read and write youjulab spreadsheets, documents, and mind maps through mcp-server. Use MCP when available, otherwise the REST routes on the same process.
+description: Read and write youjulab spreadsheets, documents, mind maps, and native PDF outlines through mcp-server. Use MCP when available, otherwise the REST routes on the same process.
 ---
 
 # youjulab 表格、文档与导图
-
-公告 PDF 的结构提取参见同目录 announcement-pdf/SKILL.md：调用 generate_pdf_outline(document_id)，仅处理有文本层的 PDF；模型只选择规则，全文解析在本地完成。
 
 用同一 mcp-server 进程读写办公表格、文档和思维导图。能连接 MCP 时用 MCP；只能发 HTTP 时用同路径的 REST。不要调用财务 `/mcp`（指标、报表、PDF 解析），也不要走 `/api/office` 选区 Agent。
 
@@ -19,11 +17,20 @@ description: Read and write youjulab spreadsheets, documents, and mind maps thro
 | --- | --- | --- |
 | 表格 | `http://127.0.0.1:8000/mcp/sheets` | `POST http://127.0.0.1:8000/api/spreadsheets/{create,read,write,merge,unmerge,background,border,font}` |
 | 文档 | `http://127.0.0.1:8000/mcp/documents` | `POST http://127.0.0.1:8000/api/documents/{create,read,write,format}` |
+| PDF 大纲 | `http://127.0.0.1:8000/mcp/documents` | 仅 MCP：`generate_pdf_outline` |
 | 导图 | `http://127.0.0.1:8000/mcp/mindmaps` | `POST http://127.0.0.1:8000/api/mindmaps/{create,read,write,add-node,update-node,delete-node,move-node}` |
 
 stdio 拉起的财务入口不含这些工具。财务地址 `http://127.0.0.1:8000/mcp` 不要混用。
 
 输入一律用名称，不要用内部 ID。
+
+## 公告 PDF 大纲
+
+调用 `generate_pdf_outline(document_id)` 为当前用户有权限访问的原生文本 PDF 生成标题结构。仅用于有文本层的 PDF；不要用于扫描件、图片型 PDF、OCR、摘要生成或表格数值抽取。
+
+工具会复用该 PDF 的向量索引与版式块。模型只根据受限的版式画像和代表性样本选择已配置规则包，随后由本地规则解析全文结构；不会让模型读取全文、评估命中率、返回正则或生成补充规则。
+
+结果 `status` 为 `unsupported` 时，向用户说明“文档结构复杂，暂时无法生成”，不要根据不可靠候选自行补全标题。工具不会改变 PDF 正文或笔记。
 
 ## 表格
 

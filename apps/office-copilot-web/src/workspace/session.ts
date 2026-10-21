@@ -1,5 +1,6 @@
 import { office } from '../office-client/client';
 import type { Surface } from '../context/types';
+import { clearLocalStore, deleteLocalAsset, getLocalJson, putLocalJson, type LocalJson } from '../local-store';
 
 export type Kind = Surface;
 export interface User {
@@ -41,6 +42,31 @@ let queued: { id: string; content: unknown } | null = null;
 let saveTimer: ReturnType<typeof setTimeout> | undefined;
 let saving: Promise<void> = Promise.resolve();
 let saveFailed = false;
+const localWrites = new Map<string, Promise<void>>();
+
+function rememberLocal(
+  id: string,
+  content: unknown,
+  revision: number,
+  pending: boolean,
+  extra?: Pick<LocalJson, 'kind' | 'name' | 'project_id'>,
+) {
+  const prev = localWrites.get(id) ?? Promise.resolve();
+  const next = prev.then(async () => {
+    const existing = await getLocalJson(id).catch(() => null);
+    await putLocalJson({
+      id,
+      content,
+      revision,
+      baseRevision: revision,
+      pending,
+      kind: extra?.kind ?? existing?.kind,
+      name: extra?.name ?? existing?.name,
+      project_id: extra?.project_id ?? existing?.project_id ?? null,
+    });
+  }).catch(() => {});
+  localWrites.set(id, next);
+}
 
 export function rememberRevision(id: string, revision: number) {
   serverRevision.set(id, revision);
@@ -62,6 +88,12 @@ export async function flushSave() {
         body: JSON.stringify({ content: job.content, revision: serverRevision.get(job.id) ?? 0 }),
       });
       serverRevision.set(saved.id, saved.revision);
+      const newer = queued && queued.id === job.id ? queued : null;
+      rememberLocal(saved.id, newer ? newer.content : job.content, saved.revision, Boolean(newer), {
+        kind: saved.kind,
+        name: saved.name,
+        project_id: saved.project_id,
+      });
       saveFailed = false;
       if (saved.id !== job.id) {
         queued = null;
@@ -86,6 +118,7 @@ export async function flushSave() {
 export function queueSave(id: string, content: unknown) {
   queued = { id, content };
   saveFailed = false;
+  rememberLocal(id, content, serverRevision.get(id) ?? 0, true);
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => { void flushSave(); }, 400);
 }
@@ -168,10 +201,47 @@ export async function bootstrap(): Promise<Workspace> {
   };
 }
 
+function assetFromLocal(id: string, local: LocalJson): Asset {
+  return {
+    id,
+    project_id: local.project_id ?? null,
+    kind: (local.kind || 'document') as Asset['kind'],
+    name: local.name || '未命名',
+    revision: local.pending ? local.baseRevision : local.revision,
+    updated_at: new Date(local.updatedAt).toISOString(),
+    content: local.content,
+  };
+}
+
 export async function getAsset(id: string) {
+  let local: LocalJson | null = null;
+  try { local = await getLocalJson(id); } catch { local = null; }
+  let meta: Asset;
+  try {
+    meta = await office.json<Asset>(`/assets/${id}?meta=1`);
+  } catch (e) {
+    if (local) return assetFromLocal(id, local);
+    throw e;
+  }
+  rememberRevision(meta.id, meta.revision);
+  if (local && local.pending && local.baseRevision === meta.revision) {
+    return { ...meta, content: local.content };
+  }
+  if (local && !local.pending && local.revision === meta.revision) {
+    return { ...meta, content: local.content };
+  }
   const asset = await office.json<Asset>(`/assets/${id}`);
   rememberRevision(asset.id, asset.revision);
+  rememberLocal(asset.id, asset.content, asset.revision, false, {
+    kind: asset.kind,
+    name: asset.name,
+    project_id: asset.project_id,
+  });
   return asset;
+}
+
+export function forgetLocalAsset(id: string) {
+  void deleteLocalAsset(id).catch(() => {});
 }
 
 async function flushSaveSoft() {
@@ -254,13 +324,13 @@ export async function createAsset(projectId: string, kind: Kind, name: string, v
 export async function uploadPdf(projectId: string, file: File) {
   const name = file.name.replace(/\.pdf$/i, '') || '未命名 PDF';
   const asset = await createAsset(projectId, 'pdf', name);
-  const uploaded = await office.upload(asset.id, file);
+  const uploaded = await office.upload<Asset>(asset.id, file);
   rememberRevision(uploaded.id, uploaded.revision);
   return uploaded;
 }
 
 export async function savePdfFile(id: string, file: File) {
-  const uploaded = await office.upload(id, file);
+  const uploaded = await office.upload<Asset>(id, file);
   rememberRevision(uploaded.id, uploaded.revision);
   window.dispatchEvent(new CustomEvent('office-saved'));
   return uploaded;
@@ -288,4 +358,5 @@ export function logout() {
   saveFailed = false;
   serverRevision.clear();
   office.setToken(null);
+  void clearLocalStore().catch(() => {});
 }

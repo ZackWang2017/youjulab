@@ -17,6 +17,7 @@ import { outlineToTiptap, type PdfOutlineItem } from './outline';
 import { bindPdfShots } from './shots';
 import { openPdfSummaryDialog } from './summary-dialog';
 import { circleBullet, collapsibleListItem, fourLevelBulletTab } from '../rich-text-lists';
+import type { PdfFileOptions, PdfFileProgress } from '../../office-client/client';
 
 GlobalWorkerOptions.workerSrc = worker;
 
@@ -140,6 +141,12 @@ function cloneBuffer(data: ArrayBuffer) {
   return data.slice(0);
 }
 
+function formatBytes(value: number) {
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+  return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 function createPane(id: PaneId, root: HTMLElement, scroller: HTMLDivElement): Pane {
   const pages = document.createElement('div');
   pages.className = 'pdfViewer';
@@ -156,7 +163,7 @@ function createPane(id: PaneId, root: HTMLElement, scroller: HTMLDivElement): Pa
 
 export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
   onPickFile: (file: File) => Promise<void>;
-  fetchFile: (id: string) => Promise<ArrayBuffer | null>;
+  fetchFile: (id: string, opts?: PdfFileOptions) => Promise<ArrayBuffer | null>;
   onAnnotate: (body: { kind: AnnotKind; page: number; boxes: number[][]; content?: string }) => Promise<{ xref: number; mark_xref?: number; revision?: number } | void>;
   onUpdateAnnot: (xref: number, content: string) => Promise<{ revision?: number } | void>;
   onDeleteAnnot: (xref: number) => Promise<{ deleted?: number[]; revision?: number } | void>;
@@ -181,10 +188,13 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
   let fileBytes: ArrayBuffer | null = null;
   let filename = '';
   let documentId = '';
+  let loadToken = 0;
+  let openedFingerprint = '';
   let assetRevision = 0;
   let notebookContent: unknown = EMPTY_NOTEBOOK;
   let notebookEditor: Editor | null = null;
   let notebookLoading = false;
+  let notebookRestoreGen = 0;
   let notebookPending: unknown | null = null;
   let notebookSaving: Promise<void> = Promise.resolve();
   let notebookSaveTimer: ReturnType<typeof setTimeout> | undefined;
@@ -195,6 +205,11 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
   let summaryBusy = false;
   let notebookInsertAt: number | null = null;
   let opening = false;
+  // pagesinit 里跳到上次页码后，pdf.js 还会同步 update()。这段时间不能把页码写回第 1 页。
+  let restoringView = false;
+  let viewEpoch = 0;
+  let openingToken = 0;
+  let inflightOpen: { fp: string; promise: Promise<boolean> } | null = null;
   let split = false;
   let pendingSplit: boolean | null = null;
   let activeId: PaneId = 'main';
@@ -207,6 +222,20 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
   const mainScroller = mainRoot.querySelector<HTMLDivElement>('.pdf-scroll')!;
   const copyScroller = copyRoot.querySelector<HTMLDivElement>('.pdf-scroll')!;
   const empty = mainScroller.firstElementChild!;
+  const downloadOverlay = document.createElement('div');
+  downloadOverlay.className = 'pdf-download';
+  downloadOverlay.hidden = true;
+  downloadOverlay.innerHTML = [
+    '<div class="pdf-download-card" role="status" aria-live="polite">',
+    '<p class="pdf-download-title">正在打开 PDF</p>',
+    '<p class="pdf-download-meta" data-pdf-download-meta>准备中…</p>',
+    '<div class="pdf-download-track"><div class="pdf-download-bar" data-pdf-download-bar></div></div>',
+    '</div>',
+  ].join('');
+  mainRoot.append(downloadOverlay);
+  const downloadTitle = downloadOverlay.querySelector<HTMLElement>('.pdf-download-title')!;
+  const downloadMeta = downloadOverlay.querySelector<HTMLElement>('[data-pdf-download-meta]')!;
+  const downloadBar = downloadOverlay.querySelector<HTMLElement>('[data-pdf-download-bar]')!;
   const counter = container.querySelector<HTMLElement>('[data-page]')!;
   const notebookToggle = container.querySelector<HTMLButtonElement>('[data-pdf-notebook]')!;
   const outlineToggle = container.querySelector<HTMLButtonElement>('[data-pdf-outline]')!;
@@ -481,12 +510,33 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
   function restoreNotebookScroll(id = documentId) {
     const top = Number(pdfViewState(id).notebookScrollTop);
     const scrollTop = Number.isFinite(top) && top >= 0 ? top : 0;
-    requestAnimationFrame(() => {
-      if (id === documentId && !notebookPanel.hidden) notebookEditorHost.scrollTop = scrollTop;
-    });
+    const gen = ++notebookRestoreGen;
+    const apply = (attempt: number) => {
+      if (gen !== notebookRestoreGen || id !== documentId) return;
+      if (notebookPanel.hidden) {
+        notebookLoading = false;
+        return;
+      }
+      notebookEditorHost.scrollTop = scrollTop;
+      const applied = notebookEditorHost.scrollTop;
+      const room = notebookEditorHost.scrollHeight - notebookEditorHost.clientHeight;
+      if (applied + 1 < scrollTop && room > applied + 1 && attempt < 6) {
+        requestAnimationFrame(() => apply(attempt + 1));
+        return;
+      }
+      // 编辑器换内容后还会再滚回顶部，多等一拍再放开滚动记录。
+      setTimeout(() => {
+        if (gen !== notebookRestoreGen || id !== documentId) return;
+        if (!notebookPanel.hidden && notebookEditorHost.scrollTop + 1 < scrollTop) {
+          notebookEditorHost.scrollTop = scrollTop;
+        }
+        notebookLoading = false;
+      }, 80);
+    };
+    requestAnimationFrame(() => apply(0));
   }
   function rememberNotebookUi() {
-    if (!documentId) return;
+    if (!documentId || notebookLoading) return;
     persistPdfViewState({
       notebookOpen: !notebookPanel.hidden,
       notebookWidth,
@@ -505,9 +555,11 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
     if (open) applyNotebookWidth(notebookWidth);
     if (save) persistPdfViewState({ notebookOpen: open });
     if (open) restoreNotebookScroll();
+    else notebookLoading = false;
     requestAnimationFrame(() => refreshSplitPanes());
   }
   function loadNotebook(content: unknown, revision: number) {
+    notebookRestoreGen += 1;
     notebookLoading = true;
     notebookContent = notebookDocument(content);
     assetRevision = revision;
@@ -515,15 +567,19 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
     notebookInsertAt = null;
     clearTimeout(notebookSaveTimer);
     notebookSaveTimer = undefined;
-    notebookEditorHost.scrollTop = 0;
+    clearTimeout(notebookScrollTimer);
+    notebookScrollTimer = undefined;
     if (notebookEditor) {
       notebookEditor.commands.setContent(notebookContent as any);
       notebookEditor.setEditable(Boolean(documentId));
     }
-    notebookLoading = false;
   }
   notebookEditorHost.addEventListener('scroll', () => {
-    if (!documentId || notebookPanel.hidden) return;
+    if (!documentId || notebookPanel.hidden || notebookLoading) {
+      clearTimeout(notebookScrollTimer);
+      notebookScrollTimer = undefined;
+      return;
+    }
     const id = documentId;
     const scrollTop = notebookEditorHost.scrollTop;
     clearTimeout(notebookScrollTimer);
@@ -586,7 +642,9 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
     pageInput.max = String(count || 1);
     pageInput.value = String(current);
     total.textContent = '/ ' + count;
-    counter.textContent = busy ? '正在打开…' : filename || '未打开文件';
+    counter.textContent = busy
+      ? (downloadOverlay.hidden ? '正在打开…' : downloadTitle.textContent || '正在下载…')
+      : filename || '未打开文件';
     counter.title = filename;
     zoomLabel.textContent = Math.round(scale * 100) + '%';
     zoomOut.disabled = busy || !pane.ready || scale <= MIN_ZOOM + 1e-6;
@@ -646,6 +704,8 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
   }
   function rememberView(force = false) {
     const key = viewKey();
+    // 恢复上次位置期间，强制保存也会把刚被 pdf.js 拉回的第 1 页写进去。
+    if (restoringView) return;
     if (!key || !main.ready || (!force && (opening || busy || container.hidden))) return;
     const prev = pdfViewState();
     persistPdfViewState({
@@ -666,7 +726,8 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
   }
   function jumpToStoredPage(pane: Pane, page: unknown, pageCount: number) {
     if (!Number.isInteger(page) || (page as number) < 1 || (page as number) > pageCount) return;
-    if (page !== pane.viewer.currentPageNumber) pane.viewer.currentPageNumber = page as number;
+    // 页码相同也会重新滚到该页。pdf.js 的 update() 可能只改了滚动位置、没改页码。
+    pane.viewer.currentPageNumber = page as number;
   }
 
   function wirePane(pane: Pane) {
@@ -678,14 +739,35 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
         const legacyPage = Number(saved(documentId ? `office-pdf-page:${documentId}` : ''));
         const page = typeof stored?.page === 'number' ? stored.page
           : (Number.isInteger(legacyPage) ? legacyPage : 0);
+        restoringView = true;
+        const epoch = viewEpoch;
+        const tokenAtInit = openingToken;
         applyStoredScale(pane, stored?.scale);
         if (stored?.split) pendingSplit = true;
-        jumpToStoredPage(pane, page, pdf?.numPages || 0);
-        opening = false;
+        const storedPage = page;
+        jumpToStoredPage(pane, storedPage, pdf?.numPages || 0);
         if (stored?.split) {
           const focus: PaneId = stored.active === 'main' ? 'main' : 'copy';
           void setSplit(true, focus).finally(() => { pendingSplit = null; });
         }
+        // pdf.js 在 pagesinit 返回后会立刻 update()，此时页面高度可能还没排好，可见页会变回 1。
+        // 等下一帧再跳一次，并在此之前禁止 rememberView。
+        requestAnimationFrame(() => {
+          if (epoch !== viewEpoch) return;
+          applyStoredScale(pane, pdfViewState().scale);
+          jumpToStoredPage(pane, storedPage, pdf?.numPages || 0);
+          requestAnimationFrame(() => {
+            if (epoch !== viewEpoch) return;
+            jumpToStoredPage(pane, storedPage, pdf?.numPages || 0);
+            // 滚动触发的 pdf.js update() 在下一帧。先别放开记录，否则会把第 1 页写回去。
+            requestAnimationFrame(() => {
+              if (epoch !== viewEpoch) return;
+              restoringView = false;
+              if (openingToken === tokenAtInit) opening = false;
+              controls();
+            });
+          });
+        });
       } else {
         const stored = pdfViewState();
         applyStoredScale(pane, stored?.copyScale);
@@ -720,7 +802,7 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
       zoomTo(pane.viewer.currentScale * (e.deltaY < 0 ? 1.1 : 1 / 1.1), [e.clientX, e.clientY], pane);
     }, { passive: false });
     new ResizeObserver(() => {
-      if (!pane.ready || container.hidden || pane.root.hidden || !pane.scroller.clientWidth) return;
+      if (!pane.ready || opening || restoringView || container.hidden || pane.root.hidden || !pane.scroller.clientWidth) return;
       const width = pane.scroller.clientWidth;
       const appeared = pane.lastWidth < 8 && width >= 8;
       pane.lastWidth = width;
@@ -1279,31 +1361,116 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
     controls();
   }
 
-  async function openBuffer(id: string, name: string, data: ArrayBuffer) {
-    busy = true; opening = true; input.disabled = true; liveAnnots = []; clearSelection(); controls();
+  function setDownloadProgress(progress: PdfFileProgress | null, label?: string) {
+    if (!progress) {
+      downloadOverlay.hidden = true;
+      downloadOverlay.classList.remove('is-indeterminate');
+      downloadBar.style.width = '0%';
+      downloadBar.style.transform = '';
+      controls();
+      return;
+    }
+    downloadOverlay.hidden = false;
+    const fromCache = progress.source === 'cache';
+    downloadTitle.textContent = fromCache ? '正在从本地打开' : '正在下载 PDF';
+    if (label) downloadTitle.textContent = label;
+    const total = progress.total;
+    const ratio = total && total > 0 ? Math.min(1, progress.loaded / total) : null;
+    if (ratio === null) {
+      downloadOverlay.classList.add('is-indeterminate');
+      downloadBar.style.width = '';
+      downloadMeta.textContent = progress.loaded > 0
+        ? `已接收 ${formatBytes(progress.loaded)}`
+        : '连接服务器…';
+    } else {
+      downloadOverlay.classList.remove('is-indeterminate');
+      downloadBar.style.transform = '';
+      downloadBar.style.width = `${Math.round(ratio * 100)}%`;
+      downloadMeta.textContent = fromCache
+        ? `本地缓存 ${formatBytes(progress.loaded)}`
+        : `${formatBytes(progress.loaded)} / ${formatBytes(total!)}（${Math.round(ratio * 100)}%）`;
+    }
+    controls();
+  }
+
+  function fingerprint(id: string, data: ArrayBuffer) {
+    return `${id}:${data.byteLength}`;
+  }
+
+  function bufferReady(fp: string) {
+    return openedFingerprint === fp && !!pdf && documentId.length > 0 && main.ready && (pdf.numPages || 0) > 0;
+  }
+  async function openBuffer(id: string, name: string, data: ArrayBuffer, token: number) {
+    if (token !== loadToken) return;
+    const fp = fingerprint(id, data);
+    // 仅当页面已真正渲染就绪时跳过；否则缓存命中会短路导致白屏。
+    if (bufferReady(fp) && documentId === id) return;
+    // 本地缓存和网络会各打开一次。第二次 setDocument 会把阅读位置重置到第 1 页。
+    if (inflightOpen?.fp === fp) {
+      const opened = await inflightOpen.promise;
+      if (token !== loadToken) return;
+      if (opened && documentId === id && openedFingerprint === fp) return;
+    }
+    let finishOpen!: (opened: boolean) => void;
+    const promise = new Promise<boolean>(resolve => { finishOpen = resolve; });
+    inflightOpen = { fp, promise };
+    busy = true; opening = true; openingToken = token; input.disabled = true; liveAnnots = []; clearSelection(); controls();
     let task: PDFDocumentLoadingTask | undefined;
     try {
+      // PDF.js 可能转移/改写缓冲；fileBytes 另存一份给对照窗格。
       fileBytes = cloneBuffer(data);
-      task = getDocument({ data: new Uint8Array(cloneBuffer(fileBytes)),
+      task = getDocument({ data: new Uint8Array(cloneBuffer(data)),
         cMapUrl: '/pdfjs/cmaps/', cMapPacked: true, standardFontDataUrl: '/pdfjs/standard_fonts/', wasmUrl: '/pdfjs/wasm/' });
       const loaded = await task.promise;
+      if (token !== loadToken) {
+        await task.destroy();
+        if (openingToken === token) {
+          opening = false;
+          restoringView = false;
+        }
+        finishOpen(false);
+        return;
+      }
       main.ready = false;
       const previous = loadingTask;
       loadingTask = task; pdf = loaded;
       filename = name; documentId = id;
+      openedFingerprint = fingerprint(id, data);
       empty.remove();
+      viewEpoch += 1;
       main.linkService.setDocument(loaded);
       main.viewer.setDocument(loaded);
       await previous?.destroy();
+      finishOpen(true);
     } catch (e) {
-      opening = false;
+      if (token !== loadToken) {
+        if (openingToken === token) {
+          opening = false;
+          restoringView = false;
+        }
+        finishOpen(false);
+        return;
+      }
+      if (openingToken === token) {
+        opening = false;
+        restoringView = false;
+      }
       fileBytes = null;
+      openedFingerprint = '';
       if (task !== loadingTask) await task?.destroy();
       error('PDF 打开失败：' + String(e));
-    } finally { busy = false; input.disabled = false; input.value = ''; controls(); }
+      finishOpen(false);
+    } finally {
+      if (inflightOpen?.promise === promise) inflightOpen = null;
+      if (token === loadToken) {
+        busy = false; input.disabled = false; input.value = ''; controls();
+      }
+    }
   }
   async function showEmpty(id = '', name = '') {
     main.ready = false; pdf = undefined; fileBytes = null; filename = name; documentId = id; selected = null; liveAnnots = [];
+    openedFingerprint = '';
+    setDownloadProgress(null);
     const previous = loadingTask; loadingTask = undefined;
     try { main.viewer.setDocument(null as never); } catch { /* viewer 无文档 */ }
     if (!empty.isConnected) main.scroller.prepend(empty);
@@ -1393,7 +1560,9 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
       rememberNotebookUi();
     },
     async load(asset) {
+      const token = ++loadToken;
       await flushNotebookSave();
+      if (token !== loadToken) return;
       rememberView(true);
       rememberNotebookUi();
       clearTimeout(notebookScrollTimer);
@@ -1406,13 +1575,70 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
         await showEmpty();
         return;
       }
+      // 每次显式 load 都允许重新挂载，避免「已打开」指纹挡住未渲染成功的白屏。
+      openedFingerprint = '';
+      main.ready = false;
       documentId = asset.id;
       filename = asset.name;
+      assetRevision = asset.revision;
       loadNotebook(asset.content, asset.revision);
       restoreAssetUi(asset.id);
-      const [data] = await Promise.all([hooks.fetchFile(asset.id), whenVisible()]);
-      if (!data) { await showEmpty(asset.id, asset.name); return; }
-      await openBuffer(asset.id, asset.filename || `${asset.name}.pdf`, data);
+      busy = true;
+      setDownloadProgress({ loaded: 0, total: asset.size || null, source: 'network' }, '正在准备 PDF');
+      let openedLocal = false;
+      const fileName = asset.filename || `${asset.name}.pdf`;
+      try {
+        await whenVisible();
+        if (token !== loadToken) return;
+        const data = await hooks.fetchFile(asset.id, {
+          revision: asset.revision,
+          expectedSize: asset.size,
+          onProgress: progress => {
+            if (token !== loadToken) return;
+            if (openedLocal && progress.source === 'network') {
+              setDownloadProgress(progress, '正在更新到最新版本');
+              return;
+            }
+            setDownloadProgress(progress);
+          },
+          onLocal: (bytes, localRevision) => {
+            if (token !== loadToken) return;
+            openedLocal = true;
+            if (localRevision !== asset.revision) {
+              setDownloadProgress({
+                loaded: bytes.byteLength,
+                total: asset.size || bytes.byteLength,
+                source: 'cache',
+              }, '本地版本较旧，正在更新');
+            }
+            void openBuffer(asset.id, fileName, bytes, token);
+          },
+        });
+        if (token !== loadToken) return;
+        if (!data) {
+          if (!openedLocal) await showEmpty(asset.id, asset.name);
+          else setDownloadProgress(null);
+          return;
+        }
+        setDownloadProgress({
+          loaded: data.byteLength,
+          total: data.byteLength,
+          source: 'network',
+        }, '正在解析 PDF');
+        await openBuffer(asset.id, fileName, data, token);
+      } catch (e) {
+        if (token !== loadToken) return;
+        if (!openedLocal) {
+          setDownloadProgress(null);
+          error(e instanceof Error ? e.message : String(e));
+          await showEmpty(asset.id, asset.name);
+          return;
+        }
+        setDownloadProgress(null);
+        error(e instanceof Error ? e.message : String(e));
+      } finally {
+        if (token === loadToken) setDownloadProgress(null);
+      }
     },
   };
 }

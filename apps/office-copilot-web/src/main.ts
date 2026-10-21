@@ -14,7 +14,7 @@ import { renderPatch } from './patches/preview';
 import type { Context, EditorAdapter, Patch, Surface } from './context/types';
 import { persist, saved } from './context/types';
 import {
-  bootstrap, createAsset, createProject, flushSave, getAsset, hasUnsavedWork, login, logout, openAsset, queueSave,
+  bootstrap, createAsset, createProject, flushSave, forgetLocalAsset, getAsset, hasUnsavedWork, login, logout, openAsset, queueSave,
   loadRecentAssets, register, rememberRevision, renameAsset, renameProject, reorderRecentAssets, retrySave, selectProject, updateAsset, uploadPdf,
   type Asset, type Kind, type Workspace,
 } from './workspace/session';
@@ -590,6 +590,7 @@ async function loadEditor(kind: Kind) {
     }
     return;
   }
+  if (kind === 'pdf') office.prefetchFile(meta.id, meta.revision, meta.size);
   rememberRevision(meta.id, meta.revision);
   const hasBody = Boolean(meta.content && (
     meta.content.sheets || meta.content.sheetOrder || meta.content.nodeData || meta.content.type === 'doc' || meta.content.format === 'drawio-v1' || meta.content.format === 'mermaid-v1' || meta.content.format === 'invp-research-diagram-v1' || meta.content.format === 'invp-project-plan-v1'
@@ -602,6 +603,10 @@ async function loadEditor(kind: Kind) {
 
 async function chooseAsset(kind: Kind, id: string, trackRecent = true) {
   if (!workspace || !editors) return;
+  if (kind === 'pdf') {
+    const listed = workspace.assets.pdf.find(item => item.id === id);
+    office.prefetchFile(id, listed?.revision, listed?.size);
+  }
   const { asset } = await openAsset(id, trackRecent);
   resetAssistantThread();
   workspace.selected[kind] = asset;
@@ -661,6 +666,7 @@ async function deleteAsset(kind: Kind, id: string) {
   const ok = await askConfirm(`删除「${current.name}」？删除后无法恢复。`);
   if (!ok) return;
   await office.json(`/assets/${id}`, { method: 'DELETE' });
+  forgetLocalAsset(id);
   workspace.assets[kind] = workspace.assets[kind].filter(item => item.id !== id);
   if (workspace.selected[kind]?.id === id) {
     const next = workspace.assets[kind][0] || null;
@@ -699,6 +705,7 @@ async function deletePdf(id: string) {
   const ok = await askConfirm(`删除「${current.name}」？删除后无法恢复。`);
   if (!ok) return false;
   await office.json(`/assets/${id}`, { method: 'DELETE' });
+  forgetLocalAsset(id);
   const folders = loadPdfFolders(workspace.project.id);
   placePdf(folders, id, null);
   savePdfFolders(workspace.project.id, folders);
@@ -926,7 +933,12 @@ function bindWorkspace() {
     ),
     pdf: mountPdf($('#pdf'), refresh, {
       onPickFile: handlePdfUpload,
-      fetchFile: id => office.file(id),
+      fetchFile: (id, opts) => office.file(id, {
+        revision: opts?.revision ?? workspace?.selected.pdf?.revision,
+        expectedSize: opts?.expectedSize ?? workspace?.selected.pdf?.size,
+        onProgress: opts?.onProgress,
+        onLocal: opts?.onLocal,
+      }),
       onAnnotate: async body => {
         const result = await savePdfAnnot(`/assets/${workspace!.selected.pdf!.id}/annotations`, { method: 'POST', body: JSON.stringify(body) });
         return result?.annot ? { ...result.annot, revision: result.revision } : undefined;

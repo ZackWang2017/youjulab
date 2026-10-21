@@ -8,6 +8,6 @@
 # 入口：/mcp/documents 与 /api/documents/*
 #
 # 鉴权：32 位 token 只用来找到登录邮箱账号；项目挂在账号下，不挂在可轮换的 token 上。
-# 下载：登录后点击右上角邮箱，下载已写入当前 token 的 skill。
+# 下载：登录后点击右上角邮箱，下载已写入当前 token 的单文件 self-contained skill。
 
 SKILL.md

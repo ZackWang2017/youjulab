@@ -38,7 +38,14 @@ export interface EditorAdapter {
   apply(patch: Patch): void;
   undo(): void;
   export(): void;
-  load(asset: { id: string; name: string; revision: number; content?: unknown; filename?: string | null }): Promise<void> | void;
+  load(asset: {
+    id: string;
+    name: string;
+    revision: number;
+    content?: unknown;
+    filename?: string | null;
+    size?: number | null;
+  }): Promise<void> | void;
   snapshot?(): unknown;
   persist?: () => Promise<void>;
 }
