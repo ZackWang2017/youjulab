@@ -5,7 +5,7 @@ import {
   placePdf, renamePdfFolder, savePdfFolders, type PdfFolder,
 } from './pdf-folders';
 import { office } from '../office-client/client';
-import { changeRemotePassword, DEFAULT_REMOTE_BASE, remoteBase, remoteToken, setRemoteBase } from '../remote/client';
+import { changeRemotePassword, DEFAULT_REMOTE_BASE, remoteBase, remoteLogin, remoteToken, setRemoteBase, type BackupRecord } from '../remote/client';
 import type { Asset, Kind, Workspace } from './session';
 import { openCalcWindow } from './calc-window';
 
@@ -32,18 +32,11 @@ export function renderAuth(root: HTMLElement) {
       <h1>有据 - AI 价值投资实验室</h1>
       <label class="auth-field" for="auth-email"><span>邮箱</span><input id="auth-email" name="email" type="email" autocomplete="username"></label>
       <label class="auth-field" for="auth-password"><span>密码</span><input id="auth-password" name="password" type="password" autocomplete="current-password" minlength="6"></label>
-      <div class="auth-field">
-        <label for="auth-captcha-code">验证码</label>
-        <div class="auth-captcha">
-          <input id="auth-captcha-code" name="captcha" autocomplete="off" inputmode="numeric" maxlength="8">
-          <img id="auth-captcha" alt="验证码，点击换一张" title="点击换一张" width="120" height="40">
-        </div>
-      </div>
+      <label class="auth-auto-login" for="auth-auto-login"><input id="auth-auto-login" type="checkbox"><span>自动登录</span><small data-auto-login-status hidden></small></label>
       <div id="auth-error" class="auth-error" role="alert" hidden></div>
       <div class="auth-actions">
         <button class="primary" id="auth-login" type="submit">登录</button>
         <button id="auth-register" type="button">注册</button>
-        <button id="auth-offline" type="button">离线进入</button>
       </div>
     </form>
     <button type="button" id="auth-local-settings" class="auth-settings-link">设置</button>
@@ -79,7 +72,7 @@ export function renderChrome(root: HTMLElement) {
       <div id="result" aria-live="polite"><div class="result-meta" id="result-meta"></div><div id="answer" class="assistant-thread"></div><div id="patch-preview"></div><div id="patch-actions" hidden><button class="primary" id="apply"><i data-lucide="check"></i>接受修改</button><button id="discard">放弃</button></div></div>
     </div>
     <form id="ask" class="assistant-composer"><div id="error" role="alert" hidden></div><div class="task-modes" role="radiogroup" aria-label="任务类型"><label class="task-mode"><input type="radio" name="task-mode" id="task-explain" value="explain" checked>选区解释</label><label class="task-mode"><input type="radio" name="task-mode" id="task-generate" value="generate">生成内容</label></div><div class="assistant-composer-row"><textarea id="intent" rows="3" required placeholder="请输入您的任务描述"></textarea><div class="assistant-composer-actions"><button class="primary" id="run" type="submit" title="运行（Ctrl/⌘+Enter）"><i data-lucide="play"></i><span>运行</span></button><button type="button" id="new-assistant-thread" title="新对话"><i data-lucide="message-square-plus"></i><span>新对话</span></button></div></div></form>
-  </aside></main><footer><span class="footer-left"><span id="footer-surface">工作区</span><span id="save-status" hidden></span></span><span id="footer-user">本地工作区</span></footer>`;
+  </aside></main><footer><span class="footer-left"><span id="footer-surface">工作区</span><span id="save-status" hidden></span></span><span class="footer-right"><button type="button" id="backup-status" title="查看数据备份记录" hidden></button><span id="footer-user">本地工作区</span></span></footer>`;
 }
 
 export function askConfirm(title: string, confirmLabel = '删除') {
@@ -239,6 +232,91 @@ export function alertSaveError(message: string) {
   });
 }
 
+function formatBackupTime(value: string) {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? '未知时间' : date.toLocaleString('zh-CN', { hour12: false });
+}
+
+async function restoreBackupRecord(record: BackupRecord, email: string) {
+  const overlay = document.createElement('div');
+  overlay.className = 'dialog-overlay';
+  overlay.innerHTML = `<form class="name-dialog backup-restore-dialog"><h2>恢复数据备份</h2><p>将恢复 ${formatBackupTime(record.createdAt)} 的备份，并覆盖当前全部数据。系统会先创建一份“恢复前”备份。</p><label class="field-label">当前账号<input name="email" type="email" required readonly></label><label class="field-label">当前密码<input name="password" type="password" autocomplete="current-password" minlength="6" required></label><p class="backup-restore-error" hidden></p><div class="dialog-actions"><button type="button" data-cancel>取消</button><button class="primary" type="submit">确认恢复</button></div></form>`;
+  const form = overlay.querySelector<HTMLFormElement>('form')!;
+  const account = form.elements.namedItem('email') as HTMLInputElement;
+  const password = form.elements.namedItem('password') as HTMLInputElement;
+  const error = form.querySelector<HTMLElement>('.backup-restore-error')!;
+  const submit = form.querySelector<HTMLButtonElement>('[type="submit"]')!;
+  account.value = email;
+  const close = () => overlay.remove();
+  overlay.querySelector('[data-cancel]')!.addEventListener('click', close);
+  overlay.addEventListener('click', event => { if (event.target === overlay) close(); });
+  form.addEventListener('submit', async event => {
+    event.preventDefault();
+    error.hidden = true;
+    submit.disabled = true;
+    try {
+      // 先由账户服务验证当前密码，再核对备份绑定的稳定账户身份。
+      const session = await remoteLogin({ email, password: password.value });
+      await window.youju?.restoreBackup?.({ id: record.id, email, accountId: session.user.id });
+      alert('数据已恢复完成。应用将退出，请重新打开后继续使用。');
+      await window.youju?.quitAfterRestore?.();
+    } catch (cause) {
+      error.hidden = false;
+      error.textContent = cause instanceof Error ? cause.message : String(cause);
+      submit.disabled = false;
+    }
+  });
+  document.body.append(overlay);
+  password.focus();
+}
+
+async function renderBackupRecords(host: HTMLElement, email: string, onChanged?: (lastBackupAt: string) => void) {
+  if (!window.youju?.backupStatus) {
+    host.textContent = '数据备份仅在桌面应用中可用。';
+    return;
+  }
+  host.replaceChildren(document.createTextNode('正在读取备份记录…'));
+  try {
+    const status = await window.youju.backupStatus(email);
+    onChanged?.(status.lastBackupAt);
+    host.replaceChildren();
+    if (!status.records.length) {
+      host.textContent = '当前目录还没有此账号可恢复的备份。';
+      return;
+    }
+    for (const record of status.records) {
+      const row = document.createElement('div');
+      row.className = 'backup-record';
+      const info = document.createElement('div');
+      const title = document.createElement('strong');
+      title.textContent = record.kind === 'pre-restore' ? '恢复前备份' : '数据备份';
+      const detail = document.createElement('small');
+      detail.textContent = formatBackupTime(record.createdAt);
+      info.append(title, detail);
+      const action = document.createElement('button');
+      action.type = 'button';
+      action.textContent = '数据恢复';
+      action.addEventListener('click', () => { void restoreBackupRecord(record, email); });
+      row.append(info, action);
+      host.append(row);
+    }
+  } catch (cause) {
+    host.textContent = cause instanceof Error ? cause.message : String(cause);
+  }
+}
+
+export async function openBackupRecordsDialog(email: string) {
+  const overlay = document.createElement('div');
+  overlay.className = 'dialog-overlay';
+  overlay.innerHTML = `<div class="name-dialog backup-records-dialog" role="dialog"><header><h2>数据备份记录</h2><button type="button" data-close title="关闭" aria-label="关闭"><i data-lucide="x"></i></button></header><div data-records></div></div>`;
+  const close = () => overlay.remove();
+  overlay.querySelector('[data-close]')!.addEventListener('click', close);
+  overlay.addEventListener('click', event => { if (event.target === overlay) close(); });
+  document.body.append(overlay);
+  createIcons({ icons });
+  await renderBackupRecords(overlay.querySelector<HTMLElement>('[data-records]')!, email);
+}
+
 export async function openSettingsDialog(email: string, onLogout: () => void, onLogin: () => void) {
   const overlay = document.createElement('div');
   overlay.className = 'dialog-overlay settings-overlay';
@@ -253,6 +331,7 @@ export async function openSettingsDialog(email: string, onLogout: () => void, on
       <button type="button" data-settings-category="account" role="tab" aria-selected="false"><i data-lucide="user-round"></i><span>用户账号</span></button>
       <button type="button" data-settings-category="agent" role="tab" aria-selected="false"><i data-lucide="bot"></i><span>外部 Agent</span></button>
       <button type="button" data-settings-category="model" role="tab" aria-selected="false"><i data-lucide="brain-circuit"></i><span>大模型配置</span></button>
+      <button type="button" data-settings-category="data" role="tab" aria-selected="false"><i data-lucide="database-backup"></i><span>数据管理</span></button>
       <button type="button" class="settings-nav-account" data-account-action><i data-lucide="log-out"></i><span>退出登录</span></button>
     </nav>
     <div class="settings-content">
@@ -292,6 +371,19 @@ export async function openSettingsDialog(email: string, onLogout: () => void, on
       </div>
       <div class="settings-inline-actions"><button type="button" data-save-model>保存配置</button><button type="button" class="settings-danger" data-delete-model hidden>移除配置</button><p data-model-note>API Key 仅在服务端加密保存，页面不会回显完整密钥。</p></div>
     </section>
+    <section class="settings-section" data-settings-panel="data" role="tabpanel" aria-labelledby="settings-data-title" hidden>
+      <div class="settings-section-title"><i data-lucide="database-backup"></i><div><h3 id="settings-data-title">数据管理</h3><p>每日 12:00 和 18:00 自动备份办公数据、持仓数据和 PDF 文件。</p></div></div>
+      <div class="settings-subsection">
+        <h4>备份配置</h4>
+        <label class="settings-field"><span>数据备份目录</span><input data-backup-directory spellcheck="false" placeholder="/Users/you/Documents/youjulab-backups"></label>
+        <div class="settings-inline-actions"><button type="button" data-save-backup-directory>保存目录</button><button type="button" data-create-backup>立即备份</button></div>
+      </div>
+      <div class="settings-subsection settings-restore-section">
+        <h4>数据恢复</h4>
+        <p class="settings-note">恢复会覆盖当前全部业务数据。恢复前会自动创建一份“恢复前”备份。</p>
+        <div class="backup-records" data-backup-records><p class="settings-note">正在读取备份记录…</p></div>
+      </div>
+    </section>
     </div>
     </div>
   </div>`;
@@ -310,6 +402,8 @@ export async function openSettingsDialog(email: string, onLogout: () => void, on
   const modelNote = overlay.querySelector<HTMLElement>('[data-model-note]')!;
   const platformSource = overlay.querySelector<HTMLElement>('[data-platform-source]')!;
   const userSource = overlay.querySelector<HTMLElement>('[data-user-source]')!;
+  const backupDirectoryInput = overlay.querySelector<HTMLInputElement>('[data-backup-directory]')!;
+  const backupRecords = overlay.querySelector<HTMLElement>('[data-backup-records]')!;
   const categoryButtons = Array.from(overlay.querySelectorAll<HTMLButtonElement>('[data-settings-category]'));
   const categoryPanels = Array.from(overlay.querySelectorAll<HTMLElement>('[data-settings-panel]'));
   let accessToken = '';
@@ -373,6 +467,27 @@ export async function openSettingsDialog(email: string, onLogout: () => void, on
   };
   overlay.querySelector('[data-save-local]')!.addEventListener('click', () => { void saveLocal(false); });
   overlay.querySelector('[data-reset-local]')!.addEventListener('click', () => { void saveLocal(true); });
+  const refreshBackups = async () => {
+    await renderBackupRecords(backupRecords, email);
+  };
+  overlay.querySelector('[data-save-backup-directory]')!.addEventListener('click', async () => {
+    try {
+      await window.youju?.setBackupDirectory?.(backupDirectoryInput.value.trim());
+      showNote('备份目录已保存，将在每日 12:00 和 18:00 自动备份。');
+      await refreshBackups();
+    } catch (e) {
+      showNote(e instanceof Error ? e.message : String(e));
+    }
+  });
+  overlay.querySelector('[data-create-backup]')!.addEventListener('click', async () => {
+    try {
+      await window.youju?.createBackup?.();
+      showNote('已创建数据备份。');
+      await refreshBackups();
+    } catch (e) {
+      showNote(e instanceof Error ? e.message : String(e));
+    }
+  });
   overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
   overlay.querySelector('[data-close]')!.addEventListener('click', close);
   overlay.querySelector('[data-copy]')!.addEventListener('click', async () => {
@@ -423,13 +538,12 @@ export async function openSettingsDialog(email: string, onLogout: () => void, on
     if (!apiKey) { showNote('请填写 API Key；已保存的密钥不会再次显示。'); return; }
     saveModel.disabled = true;
     try {
-      const saved = await office.json<ModelConfig>('/auth/model-config', {
+      await office.json<ModelConfig>('/auth/model-config', {
         method: 'PUT',
         body: JSON.stringify({ provider: providerInput.value, model: modelInput.value.trim(), base_url: baseUrlInput.value.trim(), api_key: apiKey }),
       });
       apiKeyInput.value = '';
-      const current = await office.json<ModelConfig>('/auth/model-config');
-      setModelConfig({ ...current, ...saved });
+      setModelConfig(await office.json<ModelConfig>('/auth/model-config'));
       showNote('自有模型配置已加密保存。');
     } catch (e) {
       showNote(e instanceof Error ? e.message : String(e));
@@ -458,6 +572,13 @@ export async function openSettingsDialog(email: string, onLogout: () => void, on
   });
   document.body.append(overlay);
   createIcons({ icons });
+  const readBackupStatus = window.youju?.backupStatus;
+  if (readBackupStatus) {
+    void readBackupStatus(email).then(status => {
+      backupDirectoryInput.value = status.directory;
+      return renderBackupRecords(backupRecords, email);
+    }).catch(e => { backupRecords.textContent = e instanceof Error ? e.message : String(e); });
+  }
   void office.json<{ access_token: string }>('/auth/access-token').then(data => {
     setToken(data.access_token);
   }).catch(e => {

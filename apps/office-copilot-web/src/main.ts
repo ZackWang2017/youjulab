@@ -11,7 +11,7 @@ import { mountCalendar } from './editors/calendar';
 import { mountProjectPlan } from './editors/project-plan';
 import { office, AuthError } from './office-client/client';
 import {
-  loadCaptcha, remoteBase, remoteEmail, remoteHealthy, remoteLogin, remoteRegister,
+  remoteBase, remoteEmail, remoteHealthy, remoteLogin, remoteRegister,
   remoteToken, setRemoteBase, setRemoteToken,
   RemoteAuthError, RemoteDownError,
 } from './remote/client';
@@ -25,7 +25,7 @@ import {
 } from './workspace/session';
 import {
   alertSaveError, askConfirm, askDocumentCreate, askProjectPlanCreate, askScopedAssetEdit, askText,
-  renderAuth, renderChrome, renderNav, type PortfolioNavState, type PortfolioNavView,
+  openBackupRecordsDialog, renderAuth, renderChrome, renderNav, type PortfolioNavState, type PortfolioNavView,
 } from './workspace/nav';
 import { mountPortfolio, type PortfolioController } from './portfolio';
 import { ALL_PORTFOLIOS_ID, ALL_PORTFOLIOS_NAME, portfolioApi } from './portfolio/api';
@@ -335,6 +335,22 @@ function paintFooterUser() {
   const el = document.querySelector<HTMLElement>('#footer-user');
   if (!el) return;
   const email = remoteEmail();
+  const backup = document.querySelector<HTMLButtonElement>('#backup-status');
+  if (backup) {
+    if (email && window.youju?.backupStatus) {
+      backup.hidden = false;
+      backup.textContent = '备份记录';
+      backup.onclick = () => { void openBackupRecordsDialog(email); };
+      void window.youju.backupStatus(email).then(status => {
+        const date = status.lastBackupAt ? new Date(status.lastBackupAt) : null;
+        backup.textContent = date && !Number.isNaN(date.getTime())
+          ? `备份 ${date.toLocaleString('zh-CN', { hour12: false })}`
+          : '尚未备份';
+      }).catch(() => { backup.textContent = '备份记录'; });
+    } else {
+      backup.hidden = true;
+    }
+  }
   if (remoteToken() && email) {
     el.replaceChildren(document.createTextNode(email));
     return;
@@ -1299,28 +1315,29 @@ function bindAuth(afterLogin?: () => Promise<void>) {
   const error = form.querySelector<HTMLElement>('#auth-error')!;
   const email = form.querySelector<HTMLInputElement>('#auth-email')!;
   const password = form.querySelector<HTMLInputElement>('#auth-password')!;
-  const captchaInput = form.querySelector<HTMLInputElement>('#auth-captcha-code')!;
-  const captchaImg = form.querySelector<HTMLImageElement>('#auth-captcha')!;
+  const autoLogin = form.querySelector<HTMLInputElement>('#auth-auto-login')!;
+  const autoStatus = form.querySelector<HTMLElement>('[data-auto-login-status]')!;
   const loginBtn = form.querySelector<HTMLButtonElement>('#auth-login')!;
   const registerBtn = form.querySelector<HTMLButtonElement>('#auth-register')!;
   const closeBtn = form.querySelector<HTMLButtonElement>('#auth-close')!;
-  let captchaId = '';
+  let online = false;
+  let autoCountdown = false;
+  let autoTimer: number | null = null;
   const showError = (message: string) => { error.hidden = false; error.textContent = message; };
   const popup = form.closest('.dialog-overlay');
   if (popup) {
     closeBtn.hidden = false;
     closeBtn.onclick = () => popup.remove();
   }
-  const setOnline = (online: boolean) => {
-    for (const field of [email, password, captchaInput, loginBtn, registerBtn]) field.disabled = !online;
-    captchaImg.style.opacity = online ? '1' : '0.35';
-    captchaImg.style.pointerEvents = online ? 'auto' : 'none';
+  const updateActions = () => {
+    loginBtn.disabled = !online || autoCountdown;
+    registerBtn.disabled = !online || autoCountdown;
   };
-  const refreshCaptcha = async () => {
-    const captcha = await loadCaptcha();
-    captchaId = captcha.captcha_id;
-    captchaImg.src = `data:${captcha.image_type};base64,${captcha.image_base64}`;
-    captchaInput.value = '';
+  const setOnline = (value: boolean) => {
+    online = value;
+    email.disabled = !value;
+    password.disabled = !value;
+    updateActions();
   };
   const openLocalSettings = async () => {
     const prefs = await office.json<{ pdf_dir: string; pdf_dir_default: string }>('/local/preferences').catch(() => ({
@@ -1329,20 +1346,14 @@ function bindAuth(afterLogin?: () => Promise<void>) {
     const desktop = await window.youju?.getConfig?.();
     const overlay = document.createElement('div');
     overlay.className = 'dialog-overlay';
-    const showDataMode = Boolean(window.youju?.isDesktop);
     overlay.innerHTML = `<form class="name-dialog auth-local-dialog">
       <h2>设置</h2>
       <label class="field-label" for="local-remote">远程服务地址</label>
       <input id="local-remote" spellcheck="false" placeholder="http://127.0.0.1:8000">
       <label class="field-label" for="local-pdf">本地 PDF 目录</label>
       <input id="local-pdf" spellcheck="false" placeholder="留空使用默认目录">
-      ${showDataMode ? `<label class="field-label" for="local-data-mode">本机数据位置</label>
-      <select id="local-data-mode">
-        <option value="repo">与开发共用（仓库 data/）</option>
-        <option value="userData">独立副本（Application Support）</option>
-      </select>
-      <p class="auth-local-note" data-data-path></p>` : ''}
-      <p class="auth-local-note">不改则使用默认值。部署到服务器后，把远程地址改成服务器 URL。embedding 走该地址下的 /api/embeddings。切换数据位置后请重启桌面应用。</p>
+      ${window.youju?.isDesktop ? '<p class="auth-local-note" data-data-path></p>' : ''}
+      <p class="auth-local-note">不改则使用默认值。部署到服务器后，把远程地址改成服务器 URL。embedding 走该地址下的 /api/embeddings。</p>
       <div class="dialog-actions">
         <button type="button" data-reset>恢复默认</button>
         <button type="button" data-cancel>取消</button>
@@ -1351,20 +1362,11 @@ function bindAuth(afterLogin?: () => Promise<void>) {
     </form>`;
     const remoteField = overlay.querySelector<HTMLInputElement>('#local-remote')!;
     const pdfField = overlay.querySelector<HTMLInputElement>('#local-pdf')!;
-    const dataModeField = overlay.querySelector<HTMLSelectElement>('#local-data-mode');
     const dataPathNote = overlay.querySelector<HTMLElement>('[data-data-path]');
     remoteField.value = desktop?.remoteBaseUrl || remoteBase();
     const customPdf = desktop?.pdfDir || (prefs.pdf_dir && prefs.pdf_dir !== prefs.pdf_dir_default ? prefs.pdf_dir : '');
     pdfField.value = customPdf;
     if (prefs.pdf_dir_default) pdfField.placeholder = prefs.pdf_dir_default;
-    if (dataModeField) {
-      dataModeField.value = desktop?.dataMode === 'userData' ? 'userData' : 'repo';
-      if (!desktop?.repoDataAvailable) {
-        const repoOpt = dataModeField.querySelector('option[value="repo"]');
-        if (repoOpt) repoOpt.setAttribute('disabled', 'true');
-        dataModeField.value = 'userData';
-      }
-    }
     if (dataPathNote) {
       dataPathNote.textContent = desktop?.sqlitePath
         ? `当前库：${desktop.sqlitePath}`
@@ -1374,10 +1376,9 @@ function bindAuth(afterLogin?: () => Promise<void>) {
     const save = async (reset: boolean) => {
       const remote = reset ? '' : remoteField.value.trim();
       const pdfDir = reset ? '' : pdfField.value.trim();
-      const dataMode = reset ? (desktop?.repoDataAvailable ? 'repo' : 'userData') : (dataModeField?.value as 'repo' | 'userData' | undefined);
       setRemoteBase(remote);
       await office.json('/local/preferences', { method: 'PUT', body: JSON.stringify({ pdf_dir: pdfDir }) }).catch(() => {});
-      await window.youju?.setConfig?.({ remoteBaseUrl: remoteBase(), pdfDir, dataMode });
+      await window.youju?.setConfig?.({ remoteBaseUrl: remoteBase(), pdfDir, dataMode: 'userData' });
       close();
       await probe();
     };
@@ -1388,60 +1389,91 @@ function bindAuth(afterLogin?: () => Promise<void>) {
     document.body.append(overlay);
     remoteField.focus();
   };
+  const saveLoginPreference = async (passwordValue: string, accountId = '') => {
+    if (!window.youju?.saveLoginPreference) return;
+    await window.youju.saveLoginPreference({
+      enabled: autoLogin.checked,
+      email: email.value.trim(),
+      password: autoLogin.checked ? passwordValue : '',
+      accountId,
+    });
+  };
+  const cancelAutoLogin = () => {
+    if (autoTimer !== null) window.clearTimeout(autoTimer);
+    autoTimer = null;
+    if (!autoCountdown) return;
+    autoCountdown = false;
+    autoLogin.checked = false;
+    password.value = '';
+    autoStatus.hidden = true;
+    updateActions();
+    void saveLoginPreference('');
+  };
   const probe = async () => {
     const online = await remoteHealthy();
     setOnline(online);
     if (!online) {
-      showError('远程服务不可用，只能离线进入。');
+      showError('认证服务不可用，请检查网络或设置中的服务地址。');
       return;
     }
     error.hidden = true;
-    try { await refreshCaptcha(); } catch (e) { showError(e instanceof Error ? e.message : String(e)); }
+    return true;
   };
   const submit = async (mode: 'login' | 'register') => {
     error.hidden = true;
     const body = {
       email: email.value.trim(),
       password: password.value,
-      captcha_id: captchaId,
-      captcha_code: captchaInput.value.trim(),
     };
-    if (!body.email || body.password.length < 6 || !body.captcha_code) {
-      showError('请填写邮箱、至少 6 位密码和验证码。');
-      captchaInput.focus();
+    if (!body.email || body.password.length < 6) {
+      showError('请填写邮箱和至少 6 位密码。');
+      password.focus();
       return;
     }
     loginBtn.disabled = true;
     registerBtn.disabled = true;
     try {
-      if (mode === 'register') await remoteRegister(body);
-      else await remoteLogin(body);
-      sessionStorage.setItem('youju-offline', '1');
+      const session = mode === 'register' ? await remoteRegister(body) : await remoteLogin(body);
+      await saveLoginPreference(body.password, session.user.id);
       const popup = form.closest('.dialog-overlay');
       if (popup) popup.remove();
-      // boot 内会 bindLocalAccount 一次；这里不再重复绑，避免连续打两次 /api/account/me
-      await boot({ offline: true });
+      await boot();
       if (afterLogin) await afterLogin();
     } catch (e) {
       showError(e instanceof Error ? e.message : String(e));
-      await refreshCaptcha().catch(() => {});
-      captchaInput.focus();
+      password.focus();
     } finally {
-      const online = !email.disabled;
-      loginBtn.disabled = !online;
-      registerBtn.disabled = !online;
+      updateActions();
     }
+  };
+  const startAutoLogin = (savedPassword: string) => {
+    if (!online || !autoLogin.checked || !savedPassword || autoCountdown) return;
+    autoCountdown = true;
+    let seconds = 5;
+    const tick = () => {
+      if (!autoLogin.checked) {
+        cancelAutoLogin();
+        return;
+      }
+      autoStatus.hidden = false;
+      autoStatus.textContent = `${seconds} 秒后自动登录`;
+      updateActions();
+      if (seconds === 0) {
+        autoTimer = null;
+        autoCountdown = false;
+        autoStatus.hidden = true;
+        void submit('login');
+        return;
+      }
+      seconds -= 1;
+      autoTimer = window.setTimeout(tick, 1000);
+    };
+    tick();
   };
   form.onsubmit = e => { e.preventDefault(); void submit('login'); };
   registerBtn.onclick = () => { void submit('register'); };
-  captchaImg.onclick = () => {
-    if (captchaImg.style.pointerEvents === 'none') return;
-    void refreshCaptcha().catch(e => showError(e instanceof Error ? e.message : String(e)));
-  };
-  form.querySelector<HTMLButtonElement>('#auth-offline')!.onclick = () => {
-    if (popup) { popup.remove(); return; }
-    sessionStorage.setItem('youju-offline', '1');
-    void boot({ offline: true });
+  autoLogin.onchange = () => {
+    if (!autoLogin.checked) cancelAutoLogin();
   };
   const settingsLink = form.parentElement?.querySelector<HTMLButtonElement>('#auth-local-settings');
   if (settingsLink) settingsLink.onclick = () => { void openLocalSettings(); };
@@ -1451,24 +1483,50 @@ function bindAuth(afterLogin?: () => Promise<void>) {
     if (config?.pdfDir) {
       await office.json('/local/preferences', { method: 'PUT', body: JSON.stringify({ pdf_dir: config.pdfDir }) }).catch(() => {});
     }
-    await probe();
+    const preference = await window.youju?.getLoginPreference?.().catch(() => undefined);
+    const lastEmail = preference?.email || config?.lastLoginEmail || '';
+    if (lastEmail) email.value = lastEmail;
+    if (preference?.enabled && preference.password) {
+      autoLogin.checked = true;
+      password.value = preference.password;
+    }
+    if (preference && !preference.available) {
+      autoLogin.disabled = true;
+      autoStatus.hidden = false;
+      autoStatus.textContent = '当前系统不支持安全保存密码';
+    } else if (preference?.unavailableReason) {
+      autoStatus.hidden = false;
+      autoStatus.textContent = preference.unavailableReason;
+    }
+    if (await probe() && preference?.enabled && preference.password) startAutoLogin(preference.password);
   })();
 }
 
-async function boot(options?: { forceAuth?: boolean; offline?: boolean }) {
+async function boot(options?: { forceAuth?: boolean }) {
   ready = false;
   editors = null;
   workspace = null;
   pending = null;
-  const offline = options?.offline || sessionStorage.getItem('youju-offline') === '1';
-  if (options?.forceAuth || !offline) {
+  if (options?.forceAuth || !remoteToken()) {
     renderAuth(root);
     createIcons({ icons });
     bindAuth();
     return;
   }
-  if (remoteToken()) {
-    try { await bindLocalAccount(); } catch { /* 远程暂不可用时继续用本机访客/已有令牌 */ }
+  try {
+    await bindLocalAccount();
+  } catch (e) {
+    logout();
+    renderAuth(root);
+    createIcons({ icons });
+    bindAuth();
+    const message = e instanceof Error ? e.message : '无法验证登录账号。';
+    const authError = root.querySelector<HTMLElement>('#auth-error');
+    if (authError) {
+      authError.hidden = false;
+      authError.textContent = message;
+    }
+    return;
   }
   try {
     workspace = await bootstrap();

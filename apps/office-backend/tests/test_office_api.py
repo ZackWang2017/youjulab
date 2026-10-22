@@ -1022,6 +1022,8 @@ class OfficeApiTests(unittest.TestCase):
         self.assertEqual(skill.status_code, 200)
         self.assertIn(token, skill.text)
         self.assertNotIn("__ACCESS_TOKEN__", skill.text)
+        self.assertNotIn("__MCP_BASE_URL__", skill.text)
+        self.assertIn("http://127.0.0.1:8000/mcp/sheets", skill.text)
         self.assertIn("/mcp/sheets", skill.text)
         self.assertIn("/api/spreadsheets/read", skill.text)
         self.assertIn("/mcp/documents", skill.text)

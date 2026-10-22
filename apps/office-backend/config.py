@@ -134,6 +134,14 @@ def mcp_remote_base() -> str:
     return f"http://{host}:{port}"
 
 
+def mcp_local_base() -> str:
+    """供外部 Agent 访问当前桌面随应用启动的 MCP 服务。"""
+    explicit = (os.environ.get("MCP_LOCAL_BASE_URL") or "").strip().rstrip("/")
+    if explicit:
+        return explicit
+    return mcp_remote_base()
+
+
 def mcp_http_base() -> str:
     return mcp_remote_base()
 
@@ -172,8 +180,14 @@ def model_configured() -> bool:
 
 
 def llm_config_set() -> int:
-    """模型凭据来源：0 平台、1 当前用户、3 按用户选择（当前仅自有模型）。"""
-    raw = (os.environ.get("LLM_CONFIG_SET") or "0").strip()
+    """模型凭据来源：0 平台、1 当前用户、3 按用户选择（当前仅自有模型）。
+
+    桌面进程（OFFICE_DESKTOP=1）未显式配置时默认 1，避免打包态读不到仓库 .env
+    时回落到平台空配置，导致已保存的自有模型不生效。
+    """
+    raw = (os.environ.get("LLM_CONFIG_SET") or "").strip()
+    if not raw:
+        raw = "1" if (os.environ.get("OFFICE_DESKTOP") or "").strip() in ("1", "true", "yes") else "0"
     try:
         return int(raw)
     except ValueError:

@@ -8,22 +8,28 @@
     "start": "electron .",
     "dev": "electron . --dev",
     "build:sidecar": "bash sidecar/build.sh",
+    "build:mcp-sidecar": "bash mcp-sidecar/build.sh",
+    "build:services": "npm run build:sidecar && npm run build:mcp-sidecar",
+    "build:desktop": "npm --prefix ../office-copilot-web run build && npm run build:services && npm run pack:mac",
     "pack": "electron-builder --dir",
     "pack:mac": "electron-builder --mac --dir",
     "dist": "electron-builder --mac --win",
     "dist:mac": "electron-builder --mac dmg",
-    "dist:mac:full": "npm run build:sidecar && npm run dist:mac"
+    "dist:mac:full": "npm run build:services && npm run dist:mac"
   },
   "build": {
     "appId": "com.youjulab.desktop",
     "productName": "youjulab",
     "directories": {
-      "output": "release"
+      "output": "release",
+      "buildResources": "build"
     },
+    "icon": "build/icon.png",
     "files": [
       "main.mjs",
       "preload.cjs",
-      "package.json"
+      "package.json",
+      "build/icon.png"
     ],
     "extraResources": [
       {
@@ -36,9 +42,17 @@
         "filter": [
           "**/*"
         ]
+      },
+      {
+        "from": "mcp-sidecar/dist/youju-mcp-server",
+        "to": "mcp-sidecar/youju-mcp-server",
+        "filter": [
+          "**/*"
+        ]
       }
     ],
     "mac": {
+      "icon": "build/icon.icns",
       "target": [
         "dmg",
         "dir"
@@ -47,6 +61,7 @@
       "identity": null
     },
     "win": {
+      "icon": "build/icon.ico",
       "target": [
         "nsis"
       ]

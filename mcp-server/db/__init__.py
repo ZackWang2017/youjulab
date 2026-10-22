@@ -1,6 +1,6 @@
-"""PostgreSQL 持久化层。"""
+"""MCP 结构化数据持久化层，支持桌面 SQLite 与服务端 PostgreSQL。"""
 
-from db.config import DatabaseConfig, load_config
+from db.config import DatabaseConfig, load_config, sqlite_path, store_mode
 from db.connection import connect, get_connection
 from db.schema import (
     CREATE_FINANCIAL_STATEMENTS,
@@ -15,6 +15,8 @@ from db.schema import (
 __all__ = [
     "DatabaseConfig",
     "load_config",
+    "store_mode",
+    "sqlite_path",
     "connect",
     "get_connection",
     "ensure_database",

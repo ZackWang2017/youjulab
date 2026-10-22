@@ -20,6 +20,9 @@ export function remoteBase() {
 
 /** 浏览器开发态对本机默认地址走 Vite /backend 代理，避免跨域 OPTIONS 预检。 */
 export function remoteFetchBase() {
+  // 桌面端服务随应用随机端口启动。不能再请求旧实例或默认 8000。
+  const localMcp = typeof window !== 'undefined' ? window.youju?.mcpApiBase : '';
+  if (typeof window !== 'undefined' && window.youju?.isDesktop && localMcp) return localMcp.replace(/\/$/, '');
   const base = remoteBase();
   // 桌面壳或本机 office-backend 托管页：直连远程，不要走 Vite /backend。
   if (typeof window !== 'undefined' && window.youju?.isDesktop) return base;
@@ -114,10 +117,6 @@ export async function remoteHealthy() {
   }
 }
 
-export async function loadCaptcha() {
-  return remoteJson<{ captcha_id: string; image_base64: string; image_type: string }>('/api/account/captcha');
-}
-
 export async function remoteLogin(body: Record<string, string>) {
   const data = await remoteJson<{ token: string; user: { id: string; email: string } }>('/api/account/login', {
     method: 'POST', body: JSON.stringify(body),
@@ -152,6 +151,8 @@ declare global {
       appVersion?: string;
       /** Electron 注入的本机 office-backend 根地址，例如 http://127.0.0.1:54321 */
       officeApiBase?: string;
+      /** Electron 注入的本机 mcp-server 根地址，例如 http://127.0.0.1:54322 */
+      mcpApiBase?: string;
       getConfig?: () => Promise<{
         remoteBaseUrl: string;
         pdfDir: string;
@@ -160,12 +161,43 @@ declare global {
         sqlitePath?: string;
         filesPath?: string;
         repoDataAvailable?: boolean;
+        lastLoginEmail?: string;
+        autoLogin?: boolean;
+        autoLoginAvailable?: boolean;
+        backupDir?: string;
+        lastBackupAt?: string;
       }>;
       setConfig?: (config: {
         remoteBaseUrl?: string;
         pdfDir?: string;
         dataMode?: 'repo' | 'userData';
       }) => Promise<Record<string, unknown>>;
+      getLoginPreference?: () => Promise<{
+        available: boolean;
+        enabled: boolean;
+        email: string;
+        password: string;
+        unavailableReason?: string;
+      }>;
+      saveLoginPreference?: (preference: {
+        enabled: boolean;
+        email: string;
+        password: string;
+        accountId?: string;
+      }) => Promise<Record<string, unknown>>;
+      backupStatus?: (email: string) => Promise<{ directory: string; lastBackupAt: string; records: BackupRecord[] }>;
+      setBackupDirectory?: (directory: string) => Promise<Record<string, unknown>>;
+      createBackup?: () => Promise<BackupRecord>;
+      restoreBackup?: (payload: { id: string; email: string; accountId: string }) => Promise<{ ok: boolean; restartRequired: boolean }>;
+      quitAfterRestore?: () => Promise<void>;
     };
   }
+}
+
+export interface BackupRecord {
+  id: string;
+  name: string;
+  createdAt: string;
+  kind: string;
+  email?: string;
 }

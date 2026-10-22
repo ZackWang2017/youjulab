@@ -1,4 +1,4 @@
-"""计划任务运行记录落 PostgreSQL（finresearch 库），重启后不重复跑。"""
+"""计划任务运行记录落数据库，重启后不重复跑。"""
 from __future__ import annotations
 
 import threading
@@ -78,11 +78,12 @@ class PgRunStore:
 
 
 def _record(row: dict) -> RunRecord:
+    data = dict(row)
     return RunRecord(
-        task_name=row["task_name"],
-        run_date=row["run_date"],
-        status=row["status"],
-        started_at=row.get("started_at"),
-        finished_at=row.get("finished_at"),
-        detail=row.get("detail"),
+        task_name=data["task_name"],
+        run_date=data["run_date"],
+        status=data["status"],
+        started_at=data.get("started_at"),
+        finished_at=data.get("finished_at"),
+        detail=data.get("detail"),
     )

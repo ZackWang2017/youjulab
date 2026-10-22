@@ -1,4 +1,4 @@
-"""百度 / 百度百科 / Google 搜索：开关 + 每日次数配额（PostgreSQL）。"""
+"""百度 / 百度百科 / Google 搜索：开关 + 每日次数配额。"""
 from __future__ import annotations
 
 import os
@@ -6,6 +6,8 @@ import threading
 from datetime import date, datetime
 from typing import Any
 from zoneinfo import ZoneInfo
+
+from db.connection import get_connection
 
 _lock = threading.Lock()
 _ensured = False
@@ -25,10 +27,6 @@ def _tz() -> ZoneInfo:
 
 def today_str() -> str:
     return datetime.now(_tz()).date().isoformat()
-
-
-def _pg_url() -> str:
-    return (os.environ.get("OFFICE_PG_URL") or "").strip()
 
 
 def _env_bool(key: str, default: bool = True) -> bool:
@@ -68,24 +66,13 @@ def daily_limit(engine: str) -> int:
     return 0
 
 
-def _connect():
-    import psycopg
-    from psycopg.rows import dict_row
-
-    url = _pg_url()
-    if not url:
-        raise RuntimeError("未配置 OFFICE_PG_URL，无法持久化搜索日计数")
-    # 短超时，避免 Postgres 不可达时拖死 mcp-server 启动
-    return psycopg.connect(url, row_factory=dict_row, connect_timeout=3)
-
-
 def ensure_schema() -> None:
     """建表（幂等）。不可达时抛错，由调用方决定是否阻塞启动。"""
     global _ensured
     with _lock:
         if _ensured:
             return
-        with _connect() as conn:
+        with get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
@@ -105,7 +92,7 @@ def ensure_schema() -> None:
 def get_count(engine: str, day: str | None = None) -> int:
     ensure_schema()
     d = day or today_str()
-    with _connect() as conn:
+    with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT count FROM external_search_daily WHERE engine = %s AND day = %s::date",
@@ -183,7 +170,7 @@ def try_consume(engine: str) -> dict[str, Any]:
     ensure_schema()
     d = today_str()
     with _lock:
-        with _connect() as conn:
+        with get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
 from urllib.parse import quote_plus
 
 
@@ -31,6 +32,25 @@ class DatabaseConfig:
         else:
             userinfo = quote_plus(self.user)
         return f"postgresql://{userinfo}@{self.host}:{self.port}/{self.admin_dbname}"
+
+
+def store_mode() -> str:
+    """postgres | sqlite。桌面 MCP 默认 SQLite，服务端保持 PostgreSQL 兼容。"""
+    raw = (os.environ.get("FINANCE_STORE") or "").strip().lower()
+    if raw in {"postgres", "postgresql"}:
+        return "postgres"
+    if raw == "sqlite":
+        return "sqlite"
+    return "sqlite" if (os.environ.get("MCP_DESKTOP") or "").strip() == "1" else "postgres"
+
+
+def sqlite_path() -> Path:
+    raw = (os.environ.get("FINANCE_SQLITE_PATH") or "").strip()
+    if not raw:
+        raw = str(Path.home() / ".youjulab" / "finresearch.sqlite")
+    path = Path(raw).expanduser()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 def load_config() -> DatabaseConfig:

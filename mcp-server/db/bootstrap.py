@@ -10,12 +10,15 @@ import sys
 
 import psycopg
 
-from db.config import load_config
+from db.config import load_config, sqlite_path, store_mode
 from db.connection import get_connection
 from db.schema import ALL_DDL
 
 
 def ensure_database() -> None:
+    if store_mode() == "sqlite":
+        sqlite_path()
+        return
     cfg = load_config()
     with psycopg.connect(cfg.admin_dsn, autocommit=True) as conn:
         with conn.cursor() as cur:
@@ -27,6 +30,10 @@ def ensure_database() -> None:
 
 
 def init_schema() -> None:
+    if store_mode() == "sqlite":
+        from db.sqlite_schema import ALL_DDL
+    else:
+        from db.schema import ALL_DDL
     with get_connection() as conn:
         with conn.cursor() as cur:
             for ddl in ALL_DDL:
@@ -38,11 +45,14 @@ def main() -> int:
     try:
         ensure_database()
         init_schema()
-    except psycopg.Error as exc:
+    except (psycopg.Error, RuntimeError) as exc:
         print(f"database init failed: {exc}", file=sys.stderr)
         return 1
-    cfg = load_config()
-    print(f"ready: {cfg.dsn}")
+    if store_mode() == "sqlite":
+        print(f"ready: sqlite://{sqlite_path()}")
+    else:
+        cfg = load_config()
+        print(f"ready: {cfg.dsn}")
     return 0
 
 

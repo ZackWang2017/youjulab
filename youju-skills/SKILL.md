@@ -15,12 +15,12 @@ description: Read and write youjulab spreadsheets, documents, mind maps, and nat
 
 | 能力 | MCP | REST |
 | --- | --- | --- |
-| 表格 | `http://127.0.0.1:8000/mcp/sheets` | `POST http://127.0.0.1:8000/api/spreadsheets/{create,read,write,merge,unmerge,background,border,font}` |
-| 文档 | `http://127.0.0.1:8000/mcp/documents` | `POST http://127.0.0.1:8000/api/documents/{create,read,write,format}` |
-| PDF 大纲 | `http://127.0.0.1:8000/mcp/documents` | 仅 MCP：`generate_pdf_outline` |
-| 导图 | `http://127.0.0.1:8000/mcp/mindmaps` | `POST http://127.0.0.1:8000/api/mindmaps/{create,read,write,add-node,update-node,delete-node,move-node}` |
+| 表格 | `__MCP_BASE_URL__/mcp/sheets` | `POST __MCP_BASE_URL__/api/spreadsheets/{create,read,write,merge,unmerge,background,border,font}` |
+| 文档 | `__MCP_BASE_URL__/mcp/documents` | `POST __MCP_BASE_URL__/api/documents/{create,read,write,format}` |
+| PDF 大纲 | `__MCP_BASE_URL__/mcp/documents` | 仅 MCP：`generate_pdf_outline` |
+| 导图 | `__MCP_BASE_URL__/mcp/mindmaps` | `POST __MCP_BASE_URL__/api/mindmaps/{create,read,write,add-node,update-node,delete-node,move-node}` |
 
-stdio 拉起的财务入口不含这些工具。财务地址 `http://127.0.0.1:8000/mcp` 不要混用。
+stdio 拉起的财务入口不含这些工具。财务地址 `__MCP_BASE_URL__/mcp` 不要混用。
 
 输入一律用名称，不要用内部 ID。
 
@@ -212,7 +212,7 @@ stdio 拉起的财务入口不含这些工具。财务地址 `http://127.0.0.1:8
 只能发 HTTP 时，把上面的函数名对应到 REST：create → `/create`，read → `/read`，write → `/write`，merge → `/merge`，unmerge → `/unmerge`，background → `/background`，border → `/border`，font → `/font`。
 
 ```
-POST http://127.0.0.1:8000/api/spreadsheets/write
+POST __MCP_BASE_URL__/api/spreadsheets/write
 Authorization: Bearer __ACCESS_TOKEN__
 Content-Type: application/json
 
@@ -315,7 +315,7 @@ set_cell_font(project_name="年度预算", table_name="销售表", sheet_name="Q
 ```
 
 ```
-POST http://127.0.0.1:8000/api/documents/write
+POST __MCP_BASE_URL__/api/documents/write
 Authorization: Bearer __ACCESS_TOKEN__
 Content-Type: application/json
 

@@ -109,6 +109,16 @@ def _row(row: dict | None) -> dict | None:
     return dict(row) if row is not None else None
 
 
+def _date(value: Any) -> date | None:
+    if value is None or isinstance(value, date):
+        return value
+    return date.fromisoformat(str(value)[:10])
+
+
+def _placeholders(count: int) -> str:
+    return ", ".join("%s" for _ in range(count))
+
+
 # ---------------------------------------------------------------------------
 # 组合
 # ---------------------------------------------------------------------------
@@ -304,14 +314,17 @@ def held_tickers_everywhere() -> list[dict]:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT ticker_code, market_code, MIN(opened_at)::date AS first_date
+                SELECT ticker_code, market_code, DATE(MIN(opened_at)) AS first_date
                 FROM portfolio_holdings
                 WHERE market_code <> 'CASH'
                 GROUP BY ticker_code, market_code
                 ORDER BY ticker_code
                 """
             )
-            return [dict(r) for r in cur.fetchall()]
+            rows = [dict(r) for r in cur.fetchall()]
+            for row in rows:
+                row["first_date"] = _date(row.get("first_date"))
+            return rows
 
 
 # ---------------------------------------------------------------------------
@@ -345,7 +358,7 @@ def last_close_date(ticker_code: str) -> date | None:
                 (ticker_code,),
             )
             row = cur.fetchone()
-            return row["d"] if row else None
+            return _date(row["d"]) if row else None
 
 
 def close_prices_between(tickers: list[str], start: date, end: date) -> dict[str, list[tuple[date, Decimal]]]:
@@ -354,25 +367,29 @@ def close_prices_between(tickers: list[str], start: date, end: date) -> dict[str
     if not tickers:
         return {}
     out: dict[str, list[tuple[date, Decimal]]] = {t: [] for t in tickers}
+    placeholders = _placeholders(len(tickers))
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                """
+                f"""
                 SELECT ticker_code, trade_date, close FROM security_close_prices
-                WHERE ticker_code = ANY(%s::text[]) AND trade_date BETWEEN %s AND %s
+                WHERE ticker_code IN ({placeholders}) AND trade_date BETWEEN %s AND %s
                 ORDER BY ticker_code, trade_date
                 """,
-                (tickers, start, end),
+                (*tickers, start, end),
             )
             for r in cur.fetchall():
                 out[r["ticker_code"]].append((r["trade_date"], Decimal(r["close"])))
             cur.execute(
-                """
-                SELECT DISTINCT ON (ticker_code) ticker_code, trade_date, close FROM security_close_prices
-                WHERE ticker_code = ANY(%s::text[]) AND trade_date < %s
-                ORDER BY ticker_code, trade_date DESC
+                f"""
+                SELECT p.ticker_code, p.trade_date, p.close FROM security_close_prices p
+                WHERE p.ticker_code IN ({placeholders}) AND p.trade_date < %s
+                  AND p.trade_date = (
+                    SELECT MAX(previous.trade_date) FROM security_close_prices previous
+                    WHERE previous.ticker_code = p.ticker_code AND previous.trade_date < %s
+                  )
                 """,
-                (tickers, start),
+                (*tickers, start, start),
             )
             for r in cur.fetchall():
                 out[r["ticker_code"]].insert(0, (r["trade_date"], Decimal(r["close"])))
@@ -384,16 +401,19 @@ def year_start_closes(tickers: list[str], year: int) -> dict[str, Decimal]:
     ensure_schema()
     if not tickers:
         return {}
+    placeholders = _placeholders(len(tickers))
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                """
-                SELECT DISTINCT ON (ticker_code) ticker_code, close
-                FROM security_close_prices
-                WHERE ticker_code = ANY(%s::text[]) AND trade_date < %s
-                ORDER BY ticker_code, trade_date DESC
+                f"""
+                SELECT p.ticker_code, p.close FROM security_close_prices p
+                WHERE p.ticker_code IN ({placeholders}) AND p.trade_date < %s
+                  AND p.trade_date = (
+                    SELECT MAX(previous.trade_date) FROM security_close_prices previous
+                    WHERE previous.ticker_code = p.ticker_code AND previous.trade_date < %s
+                  )
                 """,
-                (tickers, date(year, 1, 1)),
+                (*tickers, date(year, 1, 1), date(year, 1, 1)),
             )
             return {r["ticker_code"]: Decimal(r["close"]) for r in cur.fetchall()}
 
@@ -482,4 +502,3 @@ def nav_series(portfolio_id: int) -> list[dict]:
                 (portfolio_id,),
             )
             return [dict(r) for r in cur.fetchall()]
-

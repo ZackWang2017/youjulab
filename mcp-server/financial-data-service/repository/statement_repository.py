@@ -39,34 +39,37 @@ def list_latest_statement_coverage(tickers: list[str] | None = None) -> list[dic
     params: list[Any] = []
     ticker_filter = ""
     if tickers:
-        ticker_filter = "WHERE ticker_code = ANY(%s)"
-        params.append(tickers)
+        marks = ", ".join("%s" for _ in tickers)
+        ticker_filter = f"WHERE ticker_code IN ({marks})"
+        params.extend(tickers)
     sql = f"""
-        SELECT DISTINCT ON (ticker_code)
-               ticker_code,
-               market_code,
-               fiscal_year,
-               report_period,
-               categories
-        FROM (
-            SELECT ticker_code,
-                   MAX(market_code::text) AS market_code,
-                   fiscal_year,
-                   report_period::text AS report_period,
-                   ARRAY_AGG(DISTINCT item_category::text) AS categories
-            FROM financial_statements
-            {ticker_filter}
-            GROUP BY ticker_code, fiscal_year, report_period
-        ) grouped
-        ORDER BY ticker_code,
-                 fiscal_year DESC,
+        SELECT ticker_code, market_code, fiscal_year, report_period, item_category
+        FROM financial_statements
+        {ticker_filter}
+        ORDER BY ticker_code, fiscal_year DESC,
                  CASE report_period
-                     WHEN '1季报' THEN 1
-                     WHEN '2季报' THEN 2
-                     WHEN '3季报' THEN 3
-                     WHEN '4季报' THEN 4
-                     WHEN '年报' THEN 5
-                     ELSE 0
-                 END DESC
+                     WHEN '1季报' THEN 1 WHEN '2季报' THEN 2 WHEN '3季报' THEN 3
+                     WHEN '4季报' THEN 4 WHEN '年报' THEN 5 ELSE 0 END DESC
     """
-    return fetch_statement_rows(sql, params)
+    rank = {"1季报": 1, "2季报": 2, "3季报": 3, "4季报": 4, "年报": 5}
+    latest: dict[str, dict[str, Any]] = {}
+    for row in fetch_statement_rows(sql, params):
+        key = row["ticker_code"]
+        period_key = (int(row["fiscal_year"]), rank.get(str(row["report_period"]), 0))
+        found = latest.get(key)
+        if found is None or period_key > found["_period_key"]:
+            latest[key] = {
+                "ticker_code": key,
+                "market_code": row["market_code"],
+                "fiscal_year": row["fiscal_year"],
+                "report_period": row["report_period"],
+                "categories": {row["item_category"]},
+                "_period_key": period_key,
+            }
+        elif period_key == found["_period_key"]:
+            found["categories"].add(row["item_category"])
+    return [
+        {key: value for key, value in row.items() if key != "_period_key" and key != "categories"}
+        | {"categories": sorted(row["categories"])}
+        for row in latest.values()
+    ]

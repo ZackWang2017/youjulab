@@ -7,7 +7,6 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 import account_service as service
-import captcha_service
 from account_jwt import current_sub, verify_bearer
 from account_service import AccountError
 
@@ -51,10 +50,6 @@ def register_routes(app, cors: dict) -> None:
         return {"ok": True}
 
     @_handler
-    async def captcha(_request: Request):
-        return captcha_service.issue()
-
-    @_handler
     async def register(request: Request):
         return service.register(await _body(request))
 
@@ -86,7 +81,6 @@ def register_routes(app, cors: dict) -> None:
         return service.issue_agent_token(str(sub))
 
     app.add_route("/api/account/health", health, methods=["GET", "OPTIONS"])
-    app.add_route("/api/account/captcha", captcha, methods=["GET", "OPTIONS"])
     app.add_route("/api/account/register", register, methods=["POST", "OPTIONS"])
     app.add_route("/api/account/login", login, methods=["POST", "OPTIONS"])
     app.add_route("/api/account/me", me, methods=["GET", "OPTIONS"])

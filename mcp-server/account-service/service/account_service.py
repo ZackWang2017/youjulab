@@ -7,7 +7,6 @@ import secrets
 from uuid import uuid4
 
 import account_repository as repo
-import captcha_service
 from account_jwt import issue
 
 _EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -38,11 +37,6 @@ def public_account(row: dict) -> dict:
     return {"id": row["id"], "email": row["email"]}
 
 
-def _check_captcha(body: dict) -> None:
-    if not captcha_service.check(str(body.get("captcha_id") or ""), str(body.get("captcha_code") or "")):
-        raise AccountError("验证码不正确或已过期。", 400)
-
-
 def register(body: dict) -> dict:
     email = str(body.get("email") or "").strip().lower()
     password = str(body.get("password") or "")
@@ -50,7 +44,6 @@ def register(body: dict) -> dict:
         raise AccountError("邮箱格式不正确。")
     if len(password) < 6:
         raise AccountError("密码至少 6 位。")
-    _check_captcha(body)
     repo.ensure_schema()
     if repo.get_by_email(email):
         raise AccountError("该邮箱已注册。", 409)
@@ -62,7 +55,6 @@ def register(body: dict) -> dict:
 def login(body: dict) -> dict:
     email = str(body.get("email") or "").strip().lower()
     password = str(body.get("password") or "")
-    _check_captcha(body)
     repo.ensure_schema()
     row = repo.get_by_email(email)
     if not row or not verify_password(password, row["password_hash"]):

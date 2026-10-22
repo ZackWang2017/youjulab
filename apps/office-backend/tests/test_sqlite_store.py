@@ -15,7 +15,6 @@ os.environ["OFFICE_VECTOR_SQLITE_PATH"] = str(Path(_TMP) / "vectors.sqlite")
 os.environ["OFFICE_MONGO_URL"] = "memory://unused"
 
 
-from guest_user import ensure_guest_user  # noqa: E402
 from office_pdf_vector import ensure_index, search_chunks  # noqa: E402
 from store import create_store  # noqa: E402
 
@@ -33,35 +32,16 @@ class SqliteStoreTests(unittest.TestCase):
         self.assertEqual(loaded["name"], "Doc")
         self.assertEqual(loaded["content"]["content"][0]["type"], "paragraph")
 
-    def test_guest_user(self):
-        store = create_store()
-        guest = ensure_guest_user(store)
-        self.assertTrue(guest["email"].endswith("@local.youjulab"))
-        again = ensure_guest_user(store)
-        self.assertEqual(guest["id"], again["id"])
-
-    def test_reassign_owner_moves_guest_assets(self):
-        store = create_store()
-        guest = ensure_guest_user(store)
-        guest_id = guest["id"]
-        bound = store.create_user("reassign@example.com", "password1")
-        project = store.create_project(guest_id, "访客稿")
-        store.create_asset(
-            guest_id, project["id"], "document", "草稿",
-            {"type": "doc", "content": []},
-        )
-        moved = store.reassign_owner(guest_id, bound["id"])
-        self.assertGreater(moved, 0)
-        self.assertEqual(store.projects(guest_id), [])
-        owned = store.projects(bound["id"])
-        self.assertTrue(any(p["name"] == "访客稿" for p in owned))
-        assets = store.assets(bound["id"], project["id"], "document")
-        self.assertEqual(len(assets), 1)
-        self.assertEqual(assets[0]["name"], "草稿")
-
-
 class BindAccountTests(unittest.TestCase):
-    def test_bind_creates_user_and_claims_guest(self):
+    def test_workspace_requires_authenticated_user(self):
+        from fastapi.testclient import TestClient
+
+        from server import create_app  # noqa: E402
+
+        response = TestClient(create_app(create_store())).get("/auth/me")
+        self.assertEqual(response.status_code, 401)
+
+    def test_bind_creates_user(self):
         from unittest.mock import patch
 
         from fastapi.testclient import TestClient
@@ -69,16 +49,6 @@ class BindAccountTests(unittest.TestCase):
         from server import create_app, prune_default_projects  # noqa: E402
 
         store = create_store()
-        guest = ensure_guest_user(store)
-        # 显式再挂一份访客资产，避免与其它用例共享库状态互相影响
-        project = store.create_project(guest["id"], "待认领")
-        store.create_asset(
-            guest["id"], project["id"], "document", "待认领文档",
-            {"type": "doc", "content": []},
-        )
-        # 改一下 revision，避免被当成空壳默认项丢掉
-        store.update_asset(guest["id"], store.assets(guest["id"], project["id"], "document")[0]["id"], content={"type": "doc", "content": [{"type": "paragraph"}]})
-
         client = TestClient(create_app(store))
         with patch(
             "server.fetch_remote_account",
@@ -91,10 +61,7 @@ class BindAccountTests(unittest.TestCase):
         self.assertTrue(data["token"])
         self.assertEqual(data["user"]["email"], "bound@example.com")
         owned = store.projects(data["user"]["id"])
-        self.assertTrue(any(p["name"] == "待认领" for p in owned))
-        # 访客应仍有一个默认项目，供下次离线使用
-        guest_again = ensure_guest_user(store)
-        self.assertTrue(store.projects(guest_again["id"]))
+        self.assertTrue(owned)
 
     def test_prune_default_projects(self):
         from server import prune_default_projects  # noqa: E402

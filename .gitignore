@@ -30,9 +30,14 @@ credentials.json
 
 # Electron desktop / Python sidecar build
 apps/office-desktop/release/
+apps/office-desktop/build/
 apps/office-desktop/sidecar/dist/
 apps/office-desktop/sidecar/build/
 apps/office-desktop/sidecar/.smoke*
+apps/office-desktop/mcp-sidecar/dist/
+apps/office-desktop/mcp-sidecar/build/
+apps/office-desktop/mcp-sidecar/.smoke*
+apps/office-desktop/mcp-sidecar/__pycache__/
 
 # mcp 自动部署日志
 deploy/deploy-mcp.log

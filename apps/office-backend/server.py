@@ -338,16 +338,9 @@ def get_store(request: Request) -> Store:
 
 
 async def user_from(request: Request, store: Store = Depends(get_store)) -> dict:
-    from guest_user import ensure_guest_user
-
     set_remote_token(request.headers.get("x-remote-token"))
     header = request.headers.get("authorization") or ""
     if not header.lower().startswith("bearer "):
-        # 桌面 SqliteStore：未登录也能读写本地文档。测试注入的 MemoryStore 仍要求登录。
-        if type(store).__name__ == "SqliteStore":
-            account = ensure_guest_user(store)
-            set_current_model(settings_for_user(store, account["id"]))
-            return account
         raise HTTPException(401, "请先登录。")
     token = header.split(" ", 1)[1].strip()
     user_token = (request.headers.get("x-user-access-token") or "").strip()
@@ -490,6 +483,7 @@ def refresh_last_assets(
 
 DEFAULT_PROJECT_NAMES = frozenset({"未命名项目", "本地项目"})
 DEFAULT_PROJECT_NAME = "未命名项目"
+LEGACY_GUEST_EMAIL = "guest@local.youjulab"
 
 
 def _project_looks_unused(store: Store, owner_id: str, project: dict) -> bool:
@@ -654,18 +648,16 @@ def ensure_local_user_for_email(store: Store, email: str) -> tuple[dict, bool]:
 
 
 def bind_local_account(store: Store, remote_jwt: str) -> dict:
-    from guest_user import GUEST_EMAIL, ensure_guest_user
-
     remote = fetch_remote_account(remote_jwt)
     user, created = ensure_local_user_for_email(store, remote["email"])
     claimed = 0
-    guest = store.user_by_email(GUEST_EMAIL)
+    # 仅迁移历史离线版本留下的访客资产；新版本不会再创建该账号。
+    guest = store.user_by_email(LEGACY_GUEST_EMAIL)
     if guest and guest["id"] != user["id"]:
-        # 先丢掉访客空壳默认项/空笔记本，再认领有内容的资产，避免越绑越多
+        # 先丢掉访客空壳默认项/空笔记本，再认领有内容的资产。
         discard_unused_guest_defaults(store, guest["id"])
         discard_unused_guest_tools(store, guest["id"], user["id"])
         claimed = store.reassign_owner(guest["id"], user["id"])
-        ensure_guest_user(store)
     prune_default_projects(store, user["id"])
     prune_duplicate_user_tools(store, user["id"])
     user = store.ensure_access_token(user)
@@ -908,15 +900,19 @@ def create_app(store: Store | None = None) -> FastAPI:
     def get_user_model_config(user: dict = Depends(user_from), store: Store = Depends(get_store)):
         saved = public_model_config(store.get_user_model_config(user["id"]))
         mode = llm_config_set()
+        # 直接按用户解析，不依赖 ContextVar（同步路由跑在线程池时更稳）。
+        settings = settings_for_user(store, user["id"])
+        set_current_model(settings)
+        active = bool(settings.base_url and settings.name and (settings.source == "platform" or settings.api_key))
         return {
             "ok": True,
             **saved,
             "mode": mode,
             "source": "platform" if mode == 0 else "user",
             "can_save": mode in (1, 3),
-            "active_configured": model_configured(),
-            "active_model": model_name() or "未配置",
-            "active_error": model_configuration_error() if not model_configured() else "",
+            "active_configured": active,
+            "active_model": settings.name or "未配置",
+            "active_error": model_configuration_error() if not active else "",
         }
 
     @app.put("/auth/model-config")
@@ -1381,14 +1377,16 @@ def create_app(store: Store | None = None) -> FastAPI:
         )
 
     @app.get("/assistant/status")
-    def assistant_status(_user: dict = Depends(user_from)):
-        name = model_name()
+    def assistant_status(user: dict = Depends(user_from), store: Store = Depends(get_store)):
+        settings = settings_for_user(store, user["id"])
+        set_current_model(settings)
+        configured = bool(settings.base_url and settings.name and (settings.source == "platform" or settings.api_key))
         return {
             "ok": True,
-            "configured": model_configured(),
-            "has_api_key": bool(model_api_key()),
-            "model_name": name or "未配置",
-            "error": model_configuration_error() if not model_configured() else "",
+            "configured": configured,
+            "has_api_key": bool(settings.api_key),
+            "model_name": settings.name or "未配置",
+            "error": model_configuration_error() if not configured else "",
         }
 
     def _sheet_asset(asset_id: str, user: dict, store: Store) -> tuple[dict, str]:

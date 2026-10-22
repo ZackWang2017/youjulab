@@ -42,8 +42,9 @@ warnings.filterwarnings(
 
 from mcp.server.fastmcp import FastMCP
 
-# 允许直接从项目根运行本文件（python3 mcp-server/server.py）
-HERE = Path(__file__).resolve().parent
+# 允许直接从项目根运行本文件（python3 mcp-server/server.py）。桌面 sidecar
+# 会把随包源码目录放入 MCP_SOURCE_ROOT，以便规则文件和模板仍可按原路径读取。
+HERE = Path(os.environ.get("MCP_SOURCE_ROOT") or Path(__file__).resolve().parent).resolve()
 sys.path.insert(0, str(HERE))
 for _layer in (
     "external-tools/repository",
@@ -125,6 +126,11 @@ def _run_http() -> None:
     from starlette.middleware.base import BaseHTTPMiddleware
     from starlette.responses import JSONResponse
 
+    from db.bootstrap import init_schema
+    from db.config import store_mode
+    if store_mode() == "sqlite":
+        init_schema()
+
     app = mcp.streamable_http_app()
     from office_agent_endpoint import register_routes
     from spreadsheet_endpoint import mount_sheet_mcp, register_routes as register_sheet_routes
@@ -159,7 +165,6 @@ def _run_http() -> None:
         "/health",
         "/version.json",
         "/api/account/health",
-        "/api/account/captcha",
         "/api/account/register",
         "/api/account/login",
     }
@@ -181,7 +186,7 @@ def _run_http() -> None:
 
     async def guard(request, call_next):
         path = request.url.path
-        # 预检不能进业务路由，否则公开的 login/register 会按空 body 校验验证码并返回 400。
+        # 预检不进入业务路由，公开的登录接口直接返回跨域响应。
         if request.method == "OPTIONS":
             return JSONResponse({}, headers=_CORS)
         if path in _PUBLIC:
@@ -257,7 +262,7 @@ def _run_http() -> None:
     print(f"weread shelf: GET http://{host}:{port}/api/local-tools/weread-shelf", file=sys.stderr)
     print(f"weread login: POST/GET http://{host}:{port}/api/local-tools/weread-login", file=sys.stderr)
     print(f"feed: POST http://{host}:{port}/api/local-tools/feed", file=sys.stderr)
-    print(f"account: http://{host}:{port}/api/account/{{health,captcha,register,login}}", file=sys.stderr)
+    print(f"account: http://{host}:{port}/api/account/{{health,register,login}}", file=sys.stderr)
     print(f"embeddings: POST http://{host}:{port}/api/embeddings", file=sys.stderr)
     print(f"portfolio: GET/POST http://{host}:{port}/api/portfolio/portfolios (Authorization: Bearer JWT)", file=sys.stderr)
     print(f"scheduler: GET http://{host}:{port}/api/scheduler/tasks, POST /api/scheduler/tasks/{{name}}/run", file=sys.stderr)

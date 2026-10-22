@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 from db.connection import get_connection
+from db.config import store_mode
 
 _DDL = """
 CREATE TABLE IF NOT EXISTS accounts (
     id            TEXT PRIMARY KEY,
     email         TEXT NOT NULL UNIQUE,
     password_hash TEXT NOT NULL,
+    os_username   TEXT,
     created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 """
@@ -17,6 +19,12 @@ def ensure_schema() -> None:
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(_DDL)
+            if store_mode() != "sqlite":
+                return
+            cur.execute("PRAGMA table_info(accounts)")
+            columns = {row[1] for row in cur.fetchall()}
+            if "os_username" not in columns:
+                cur.execute("ALTER TABLE accounts ADD COLUMN os_username TEXT")
 
 
 def get_by_email(email: str) -> dict | None:
