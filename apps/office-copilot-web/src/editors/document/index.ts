@@ -7,8 +7,6 @@ import { Table, TableCell, TableHeader, TableRow } from '@tiptap/extension-table
 import { download, type EditorAdapter } from '../../context/types';
 import { circleBullet, listStack, nestedListTab, nestUnderNumber } from '../rich-text-lists';
 import { formattedInsertHtml } from './markdown';
-import { openDigestJobDialog, type DigestJob } from './digest-job-dialog';
-import { bindSkillMenu, type DocumentSkill, type SkillType } from './skill-menu';
 
 const FALLBACK = { type: 'doc', content: [{ type: 'paragraph' }] };
 
@@ -92,29 +90,10 @@ const indentedParagraph = Paragraph.extend({
   },
 });
 
-export type DocumentSkillHooks = {
-  types: () => Promise<SkillType[]>;
-  list: (documentId: string) => Promise<DocumentSkill[]>;
-  save: (documentId: string, skill: { id?: string; name: string; type: string; params: Record<string, string> }) => Promise<DocumentSkill>;
-  remove: (documentId: string, skillId: string) => Promise<void>;
-  run: (documentId: string, skillId: string, onEvent: (event: Record<string, any>) => void) => Promise<void>;
-  reloadDocument: (documentId: string) => Promise<void>;
-  searchSecurities: (query: string) => Promise<{ items: { ticker_code: string; name: string }[] }>;
-};
-
-export type DocumentDigestHooks = {
-  getJob: (documentId: string) => Promise<DigestJob>;
-  saveJob: (documentId: string, job: DigestJob) => Promise<DigestJob>;
-  runJob: (documentId: string, onEvent: (event: Record<string, any>) => void) => Promise<void>;
-  reloadDocument: (documentId: string) => Promise<void>;
-};
-
 export function mountDocument(
   container: HTMLElement,
   changed: () => void,
   onDirty: (content: unknown) => void,
-  digest?: DocumentDigestHooks,
-  skills?: DocumentSkillHooks,
 ): EditorAdapter {
   let revision = 0;
   let assetId = '';
@@ -460,54 +439,6 @@ export function mountDocument(
       if (format === 'rule') chain.setHorizontalRule().run();
     };
   });
-  const skillBtn = container.parentElement!.querySelector<HTMLButtonElement>('[data-my-skills]');
-  if (skillBtn && skills) {
-    bindSkillMenu(skillBtn, {
-      types: () => skills.types(),
-      list: () => {
-        if (!assetId) throw new Error('请先打开一篇文档。');
-        return skills.list(assetId);
-      },
-      save: body => {
-        if (!assetId) throw new Error('请先打开一篇文档。');
-        return skills.save(assetId, body);
-      },
-      remove: id => {
-        if (!assetId) throw new Error('请先打开一篇文档。');
-        return skills.remove(assetId, id);
-      },
-      run: (id, onEvent) => {
-        if (!assetId) throw new Error('请先打开一篇文档。');
-        return skills.run(assetId, id, onEvent);
-      },
-      reloadDocument: async (nextId?: string) => {
-        const target = nextId || assetId;
-        if (!target) return;
-        await skills.reloadDocument(target);
-      },
-      searchSecurities: query => skills.searchSecurities(query),
-    });
-  }
-  const digestBtn = container.parentElement!.querySelector<HTMLButtonElement>('[data-digest-job]');
-  if (digestBtn && digest) {
-    digestBtn.addEventListener('mousedown', e => e.preventDefault());
-    digestBtn.onclick = () => {
-      if (!assetId) {
-        window.dispatchEvent(new CustomEvent('office-error', { detail: '请先打开一篇文档。' }));
-        return;
-      }
-      void openDigestJobDialog({
-        load: () => digest.getJob(assetId),
-        save: job => digest.saveJob(assetId, job),
-        run: onEvent => digest.runJob(assetId, onEvent),
-        reloadDocument: async (nextId?: string) => {
-          await digest.reloadDocument(nextId || assetId);
-        },
-      }).catch(e => {
-        window.dispatchEvent(new CustomEvent('office-error', { detail: e instanceof Error ? e.message : String(e) }));
-      });
-    };
-  }
   return {
     load(asset) {
       loading = true;

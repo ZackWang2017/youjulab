@@ -1,11 +1,15 @@
-import { AnnotationMode, getDocument, GlobalWorkerOptions, type PDFDocumentProxy, type PDFDocumentLoadingTask } from 'pdfjs-dist';
-import { EventBus, PDFLinkService, PDFViewer, ScrollMode } from 'pdfjs-dist/web/pdf_viewer.mjs';
+// Electron 33（Chromium ~130）尚无 Uint8Array.prototype.toHex/toBase64；须用 legacy 构建（含 polyfill）。
+import {
+  AnnotationMode, getDocument, GlobalWorkerOptions,
+  type PDFDocumentProxy, type PDFDocumentLoadingTask,
+} from 'pdfjs-dist/legacy/build/pdf.mjs';
+import { EventBus, PDFLinkService, PDFViewer, ScrollMode } from 'pdfjs-dist/legacy/web/pdf_viewer.mjs';
 import { Editor } from '@tiptap/core';
 import Link from '@tiptap/extension-link';
 import StarterKit from '@tiptap/starter-kit';
 import { createIcons, icons } from 'lucide';
-import worker from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
-import 'pdfjs-dist/web/pdf_viewer.css';
+import worker from 'pdfjs-dist/legacy/build/pdf.worker.min.mjs?url';
+import 'pdfjs-dist/legacy/web/pdf_viewer.css';
 import './style.css';
 import type { Context, EditorAdapter } from '../../context/types';
 import { persist, saved } from '../../context/types';
@@ -191,6 +195,19 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
   let loadToken = 0;
   let openedFingerprint = '';
   let assetRevision = 0;
+  /** 同类 PDF 切换时保留已解析文档，回来直接挂回查看器，避免重新 getDocument。 */
+  type ParkedPdf = {
+    id: string;
+    revision: number;
+    name: string;
+    bytes: ArrayBuffer;
+    pdf: PDFDocumentProxy;
+    task: PDFDocumentLoadingTask;
+    fingerprint: string;
+    usedAt: number;
+  };
+  const parkedPdfs = new Map<string, ParkedPdf>();
+  const PARKED_PDF_LIMIT = 5;
   let notebookContent: unknown = EMPTY_NOTEBOOK;
   let notebookEditor: Editor | null = null;
   let notebookLoading = false;
@@ -232,7 +249,8 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
     '<div class="pdf-download-track"><div class="pdf-download-bar" data-pdf-download-bar></div></div>',
     '</div>',
   ].join('');
-  mainRoot.append(downloadOverlay);
+  // 挂在 #pdf 内，只盖住 PDF 工作区；切到其它页时随 [hidden] 一起消失
+  container.append(downloadOverlay);
   const downloadTitle = downloadOverlay.querySelector<HTMLElement>('.pdf-download-title')!;
   const downloadMeta = downloadOverlay.querySelector<HTMLElement>('[data-pdf-download-meta]')!;
   const downloadBar = downloadOverlay.querySelector<HTMLElement>('[data-pdf-download-bar]')!;
@@ -1371,8 +1389,7 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
       return;
     }
     downloadOverlay.hidden = false;
-    const fromCache = progress.source === 'cache';
-    downloadTitle.textContent = fromCache ? '正在从本地打开' : '正在下载 PDF';
+    downloadTitle.textContent = '正在打开 PDF';
     if (label) downloadTitle.textContent = label;
     const total = progress.total;
     const ratio = total && total > 0 ? Math.min(1, progress.loaded / total) : null;
@@ -1386,9 +1403,7 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
       downloadOverlay.classList.remove('is-indeterminate');
       downloadBar.style.transform = '';
       downloadBar.style.width = `${Math.round(ratio * 100)}%`;
-      downloadMeta.textContent = fromCache
-        ? `本地缓存 ${formatBytes(progress.loaded)}`
-        : `${formatBytes(progress.loaded)} / ${formatBytes(total!)}（${Math.round(ratio * 100)}%）`;
+      downloadMeta.textContent = `${formatBytes(progress.loaded)} / ${formatBytes(total!)}（${Math.round(ratio * 100)}%）`;
     }
     controls();
   }
@@ -1400,6 +1415,77 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
   function bufferReady(fp: string) {
     return openedFingerprint === fp && !!pdf && documentId.length > 0 && main.ready && (pdf.numPages || 0) > 0;
   }
+
+  function isParkedTask(task: PDFDocumentLoadingTask | undefined) {
+    if (!task) return false;
+    for (const item of parkedPdfs.values()) {
+      if (item.task === task) return true;
+    }
+    return false;
+  }
+
+  function parkCurrentPdf() {
+    if (!documentId || !pdf || !loadingTask || !fileBytes) return;
+    parkedPdfs.set(documentId, {
+      id: documentId,
+      revision: assetRevision,
+      name: filename,
+      bytes: cloneBuffer(fileBytes),
+      pdf,
+      task: loadingTask,
+      fingerprint: openedFingerprint || fingerprint(documentId, fileBytes),
+      usedAt: Date.now(),
+    });
+    pdf = undefined;
+    loadingTask = undefined;
+    fileBytes = null;
+    openedFingerprint = '';
+    main.ready = false;
+  }
+
+  async function evictParkedPdfs(keepId?: string) {
+    while (parkedPdfs.size > PARKED_PDF_LIMIT) {
+      let oldest: ParkedPdf | null = null;
+      for (const item of parkedPdfs.values()) {
+        if (item.id === keepId || item.id === documentId) continue;
+        if (!oldest || item.usedAt < oldest.usedAt) oldest = item;
+      }
+      if (!oldest) break;
+      parkedPdfs.delete(oldest.id);
+      try { await oldest.task.destroy(); } catch { /* 已释放 */ }
+    }
+  }
+
+  async function activateParkedPdf(session: ParkedPdf, token: number) {
+    if (token !== loadToken) return;
+    session.usedAt = Date.now();
+    parkedPdfs.set(session.id, session);
+    busy = true;
+    opening = true;
+    openingToken = token;
+    input.disabled = true;
+    liveAnnots = [];
+    clearSelection();
+    selected = null;
+    documentId = session.id;
+    filename = session.name;
+    assetRevision = session.revision;
+    fileBytes = cloneBuffer(session.bytes);
+    pdf = session.pdf;
+    loadingTask = session.task;
+    openedFingerprint = session.fingerprint;
+    main.ready = false;
+    empty.remove();
+    viewEpoch += 1;
+    setDownloadProgress(null);
+    main.linkService.setDocument(session.pdf);
+    main.viewer.setDocument(session.pdf);
+    busy = false;
+    input.disabled = false;
+    controls();
+    changed();
+  }
+
   async function openBuffer(id: string, name: string, data: ArrayBuffer, token: number) {
     if (token !== loadToken) return;
     const fp = fingerprint(id, data);
@@ -1440,7 +1526,13 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
       viewEpoch += 1;
       main.linkService.setDocument(loaded);
       main.viewer.setDocument(loaded);
-      await previous?.destroy();
+      // 上一个文档若已挂入 parked，勿 destroy；否则才释放。
+      if (previous && !isParkedTask(previous)) await previous.destroy();
+      parkedPdfs.set(id, {
+        id, revision: assetRevision, name, bytes: cloneBuffer(data),
+        pdf: loaded, task, fingerprint: openedFingerprint, usedAt: Date.now(),
+      });
+      await evictParkedPdfs(id);
       finishOpen(true);
     } catch (e) {
       if (token !== loadToken) {
@@ -1457,7 +1549,7 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
       }
       fileBytes = null;
       openedFingerprint = '';
-      if (task !== loadingTask) await task?.destroy();
+      if (task && task !== loadingTask && !isParkedTask(task)) await task.destroy();
       error('PDF 打开失败：' + String(e));
       finishOpen(false);
     } finally {
@@ -1468,13 +1560,14 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
     }
   }
   async function showEmpty(id = '', name = '') {
+    parkCurrentPdf();
     main.ready = false; pdf = undefined; fileBytes = null; filename = name; documentId = id; selected = null; liveAnnots = [];
     openedFingerprint = '';
     setDownloadProgress(null);
     const previous = loadingTask; loadingTask = undefined;
     try { main.viewer.setDocument(null as never); } catch { /* viewer 无文档 */ }
     if (!empty.isConnected) main.scroller.prepend(empty);
-    await previous?.destroy();
+    if (previous && !isParkedTask(previous)) await previous.destroy();
     controls(); changed();
   }
   input.onchange = async () => {
@@ -1575,9 +1668,32 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
         await showEmpty();
         return;
       }
-      // 每次显式 load 都允许重新挂载，避免「已打开」指纹挡住未渲染成功的白屏。
-      openedFingerprint = '';
-      main.ready = false;
+      const fileName = asset.filename || `${asset.name}.pdf`;
+      const sameReady = documentId === asset.id
+        && assetRevision === asset.revision
+        && !!pdf
+        && main.ready
+        && (pdf.numPages || 0) > 0;
+      if (sameReady) {
+        filename = asset.name;
+        loadNotebook(asset.content, asset.revision);
+        restoreAssetUi(asset.id);
+        return;
+      }
+      const parked = parkedPdfs.get(asset.id);
+      if (parked && parked.revision === asset.revision) {
+        if (documentId && documentId !== asset.id) parkCurrentPdf();
+        loadNotebook(asset.content, asset.revision);
+        restoreAssetUi(asset.id);
+        await whenVisible();
+        if (token !== loadToken) return;
+        await activateParkedPdf(parked, token);
+        return;
+      }
+      if (documentId && documentId !== asset.id) {
+        parkCurrentPdf();
+        try { main.viewer.setDocument(null as never); } catch { /* viewer 无文档 */ }
+      }
       documentId = asset.id;
       filename = asset.name;
       assetRevision = asset.revision;
@@ -1585,8 +1701,6 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
       restoreAssetUi(asset.id);
       busy = true;
       setDownloadProgress({ loaded: 0, total: asset.size || null, source: 'network' }, '正在准备 PDF');
-      let openedLocal = false;
-      const fileName = asset.filename || `${asset.name}.pdf`;
       try {
         await whenVisible();
         if (token !== loadToken) return;
@@ -1595,47 +1709,25 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
           expectedSize: asset.size,
           onProgress: progress => {
             if (token !== loadToken) return;
-            if (openedLocal && progress.source === 'network') {
-              setDownloadProgress(progress, '正在更新到最新版本');
-              return;
-            }
             setDownloadProgress(progress);
-          },
-          onLocal: (bytes, localRevision) => {
-            if (token !== loadToken) return;
-            openedLocal = true;
-            if (localRevision !== asset.revision) {
-              setDownloadProgress({
-                loaded: bytes.byteLength,
-                total: asset.size || bytes.byteLength,
-                source: 'cache',
-              }, '本地版本较旧，正在更新');
-            }
-            void openBuffer(asset.id, fileName, bytes, token);
           },
         });
         if (token !== loadToken) return;
         if (!data) {
-          if (!openedLocal) await showEmpty(asset.id, asset.name);
-          else setDownloadProgress(null);
+          await showEmpty(asset.id, asset.name);
           return;
         }
         setDownloadProgress({
           loaded: data.byteLength,
           total: data.byteLength,
-          source: 'network',
+          source: 'cache',
         }, '正在解析 PDF');
         await openBuffer(asset.id, fileName, data, token);
       } catch (e) {
         if (token !== loadToken) return;
-        if (!openedLocal) {
-          setDownloadProgress(null);
-          error(e instanceof Error ? e.message : String(e));
-          await showEmpty(asset.id, asset.name);
-          return;
-        }
         setDownloadProgress(null);
         error(e instanceof Error ? e.message : String(e));
+        await showEmpty(asset.id, asset.name);
       } finally {
         if (token === loadToken) setDownloadProgress(null);
       }

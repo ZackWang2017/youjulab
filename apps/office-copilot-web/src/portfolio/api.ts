@@ -1,4 +1,4 @@
-import { office } from '../office-client/client';
+import { remoteJson } from '../remote/client';
 
 /** 证券搜索结果；security_type 为「基金」表示 ETF。 */
 export interface SecurityHit {
@@ -69,6 +69,12 @@ export interface HoldingsSummary {
   total_cost_cny: string;
   total_profit_cny: string;
   overall_return_rate: string | null;
+  /** 组合市值相对上一收盘的增加额（人民币） */
+  total_change_cny: string | null;
+  /** 组合市值日涨跌幅，小数 */
+  total_change_pct: string | null;
+  /** 组合市值年涨跌幅，小数 */
+  total_year_change_pct: string | null;
   total_target_allocation_pct: string;
   total_current_allocation_pct: string;
   holdings_count: number;
@@ -207,27 +213,27 @@ export interface TransactionBody {
   source_ticker?: string;
 }
 
-const base = '/portfolio/portfolios';
-const overview = '/portfolio/overview';
+const base = '/api/portfolio/portfolios';
+const overview = '/api/portfolio/overview';
 /** 普通组合走 /portfolios/{id}/...，全部持仓统计走 /overview/... */
 const scope = (id: number, tail: string) => (isAllPortfolios(id) ? `${overview}/${tail}` : `${base}/${id}/${tail}`);
 
 export const portfolioApi = {
-  list: () => office.json<{ portfolios: Portfolio[] }>(base).then(r => r.portfolios),
-  create: (name: string) => office.json<Portfolio>(base, { method: 'POST', body: JSON.stringify({ name }) }),
-  rename: (id: number, name: string) => office.json<Portfolio>(`${base}/${id}`, { method: 'PUT', body: JSON.stringify({ name }) }),
-  remove: (id: number) => office.json<{ ok: boolean }>(`${base}/${id}`, { method: 'DELETE' }),
-  holdings: (id: number, refresh = true) => office.json<HoldingsOverview>(`${scope(id, 'holdings')}?refresh=${refresh ? 1 : 0}`),
-  buy: (id: number, body: BuyBody) => office.json<Holding>(`${base}/${id}/holdings`, { method: 'POST', body: JSON.stringify(body) }),
+  list: () => remoteJson<{ portfolios: Portfolio[] }>(base).then(r => r.portfolios),
+  create: (name: string) => remoteJson<Portfolio>(base, { method: 'POST', body: JSON.stringify({ name }) }),
+  rename: (id: number, name: string) => remoteJson<Portfolio>(`${base}/${id}`, { method: 'PUT', body: JSON.stringify({ name }) }),
+  remove: (id: number) => remoteJson<{ ok: boolean }>(`${base}/${id}`, { method: 'DELETE' }),
+  holdings: (id: number, refresh = true) => remoteJson<HoldingsOverview>(`${scope(id, 'holdings')}?refresh=${refresh ? 1 : 0}`),
+  buy: (id: number, body: BuyBody) => remoteJson<Holding>(`${base}/${id}/holdings`, { method: 'POST', body: JSON.stringify(body) }),
   transact: (id: number, holdingId: number, body: TransactionBody) =>
-    office.json<Holding>(`${base}/${id}/holdings/${holdingId}/transactions`, { method: 'POST', body: JSON.stringify(body) }),
+    remoteJson<Holding>(`${base}/${id}/holdings/${holdingId}/transactions`, { method: 'POST', body: JSON.stringify(body) }),
   transactions: (id: number, holdingId?: number) =>
-    office.json<{ transactions: Transaction[] }>(
+    remoteJson<{ transactions: Transaction[] }>(
       holdingId ? `${base}/${id}/holdings/${holdingId}/transactions` : `${base}/${id}/transactions`,
     ).then(r => r.transactions),
-  stats: (id: number) => office.json<PortfolioStats>(scope(id, 'stats')),
-  refreshStats: (id: number) => office.json<PortfolioStats>(scope(id, 'stats/refresh'), { method: 'POST' }),
-  tasks: () => office.json<{ tasks: ScheduledTask[]; history: Array<Record<string, string | null>> }>('/portfolio/scheduler/tasks'),
-  runTask: (name: string) => office.json<Record<string, unknown>>(`/portfolio/scheduler/tasks/${encodeURIComponent(name)}/run`, { method: 'POST' }),
-  searchSecurities: (q: string) => office.json<{ items: SecurityHit[] }>(`/securities/search?q=${encodeURIComponent(q)}`).then(r => r.items),
+  stats: (id: number) => remoteJson<PortfolioStats>(scope(id, 'stats')),
+  refreshStats: (id: number) => remoteJson<PortfolioStats>(scope(id, 'stats/refresh'), { method: 'POST' }),
+  tasks: () => remoteJson<{ tasks: ScheduledTask[]; history: Array<Record<string, string | null>> }>('/api/scheduler/tasks'),
+  runTask: (name: string) => remoteJson<Record<string, unknown>>(`/api/scheduler/tasks/${encodeURIComponent(name)}/run`, { method: 'POST' }),
+  searchSecurities: (q: string) => remoteJson<{ data?: { items?: SecurityHit[] } }>(`/api/financial/securities/search?q=${encodeURIComponent(q)}`).then(r => r.data?.items || []),
 };

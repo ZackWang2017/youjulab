@@ -16,8 +16,10 @@ sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE / "portfolio-service" / "repository"))
 sys.path.insert(0, str(HERE / "portfolio-service" / "service"))
 sys.path.insert(0, str(HERE / "portfolio-service" / "endpoints"))
+sys.path.insert(0, str(HERE / "account-service" / "service"))
 sys.path.insert(0, str(HERE / "financial-data-service" / "repository"))
 
+import account_jwt  # noqa: E402
 import market_quote_repository as market  # noqa: E402
 import portfolio_endpoint  # noqa: E402
 import portfolio_service as service  # noqa: E402
@@ -530,15 +532,15 @@ class EndpointTests(unittest.IsolatedAsyncioTestCase):
         async with await self._client() as client:
             response = await client.get("/api/portfolio/portfolios")
         self.assertEqual(response.status_code, 401)
-        self.assertIn("用户", response.json()["error"])
+        self.assertIn("登录", response.json()["error"])
 
     async def test_list_and_create_delegate_to_service_with_owner(self):
         with patch.object(service, "list_portfolios", return_value=[{"id": 1, "name": "A"}]) as listed, \
              patch.object(service, "create_portfolio", return_value={"id": 2, "name": "B"}) as created:
             async with await self._client() as client:
-                response = await client.get("/api/portfolio/portfolios", headers={"X-Office-User-Id": "u1"})
+                response = await client.get("/api/portfolio/portfolios", headers={"Authorization": f"Bearer {account_jwt.issue('u1', 'u1@example.com')}"})
                 self.assertEqual(response.json(), {"portfolios": [{"id": 1, "name": "A"}]})
-                response = await client.post("/api/portfolio/portfolios", headers={"X-Office-User-Id": "u1"}, json={"name": "B"})
+                response = await client.post("/api/portfolio/portfolios", headers={"Authorization": f"Bearer {account_jwt.issue('u1', 'u1@example.com')}"}, json={"name": "B"})
                 self.assertEqual(response.json()["id"], 2)
         listed.assert_called_once_with("u1")
         created.assert_called_once_with("u1", "B")
@@ -546,20 +548,20 @@ class EndpointTests(unittest.IsolatedAsyncioTestCase):
     async def test_service_errors_map_to_status(self):
         with patch.object(service, "rename_portfolio", side_effect=service.PortfolioError("组合不存在。", 404)):
             async with await self._client() as client:
-                response = await client.put("/api/portfolio/portfolios/9", headers={"X-Office-User-Id": "u1"}, json={"name": "x"})
+                response = await client.put("/api/portfolio/portfolios/9", headers={"Authorization": f"Bearer {account_jwt.issue('u1', 'u1@example.com')}"}, json={"name": "x"})
         self.assertEqual(response.status_code, 404)
         self.assertEqual(response.json(), {"error": "组合不存在。"})
         async with await self._client() as client:
-            response = await client.get("/api/portfolio/portfolios/abc/holdings", headers={"X-Office-User-Id": "u1"})
+            response = await client.get("/api/portfolio/portfolios/abc/holdings", headers={"Authorization": f"Bearer {account_jwt.issue('u1', 'u1@example.com')}"})
         self.assertEqual(response.status_code, 400)
 
     async def test_overview_routes_aggregate_for_owner(self):
         with patch.object(service, "all_holdings_overview", return_value={"portfolio": {"id": 0, "aggregate": True}}) as holdings, \
              patch.object(service, "all_stats", return_value={"nav": {}}) as stats:
             async with await self._client() as client:
-                response = await client.get("/api/portfolio/overview/holdings?refresh=0", headers={"X-Office-User-Id": "u1"})
+                response = await client.get("/api/portfolio/overview/holdings?refresh=0", headers={"Authorization": f"Bearer {account_jwt.issue('u1', 'u1@example.com')}"})
                 self.assertEqual(response.json()["portfolio"]["aggregate"], True)
-                response = await client.get("/api/portfolio/overview/stats", headers={"X-Office-User-Id": "u1"})
+                response = await client.get("/api/portfolio/overview/stats", headers={"Authorization": f"Bearer {account_jwt.issue('u1', 'u1@example.com')}"})
                 self.assertEqual(response.status_code, 200)
         holdings.assert_called_once_with("u1", refresh_live=False)
         stats.assert_called_once_with("u1")

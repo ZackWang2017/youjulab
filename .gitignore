@@ -27,3 +27,12 @@ private/
 credentials.json
 **/weread-session.json
 *.swp
+
+# Electron desktop / Python sidecar build
+apps/office-desktop/release/
+apps/office-desktop/sidecar/dist/
+apps/office-desktop/sidecar/build/
+apps/office-desktop/sidecar/.smoke*
+
+# mcp 自动部署日志
+deploy/deploy-mcp.log

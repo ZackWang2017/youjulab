@@ -1,6 +1,6 @@
-import { office } from '../office-client/client';
+import { clearPdfFileCache, office } from '../office-client/client';
+import { remoteToken } from '../remote/client';
 import type { Surface } from '../context/types';
-import { clearLocalStore, deleteLocalAsset, getLocalJson, putLocalJson, type LocalJson } from '../local-store';
 
 export type Kind = Surface;
 export interface User {
@@ -38,34 +38,31 @@ export interface Workspace {
 
 const KINDS: Kind[] = ['sheet', 'document', 'pdf', 'mindmap', 'research', 'diagram', 'project_plan', 'calendar'];
 const serverRevision = new Map<string, number>();
+/** 已拉取过正文的资产，切换文件时优先直接打开，避免每次重新请求。 */
+const assetCache = new Map<string, Asset>();
 let queued: { id: string; content: unknown } | null = null;
 let saveTimer: ReturnType<typeof setTimeout> | undefined;
 let saving: Promise<void> = Promise.resolve();
 let saveFailed = false;
-const localWrites = new Map<string, Promise<void>>();
 
-function rememberLocal(
-  id: string,
-  content: unknown,
-  revision: number,
-  pending: boolean,
-  extra?: Pick<LocalJson, 'kind' | 'name' | 'project_id'>,
-) {
-  const prev = localWrites.get(id) ?? Promise.resolve();
-  const next = prev.then(async () => {
-    const existing = await getLocalJson(id).catch(() => null);
-    await putLocalJson({
-      id,
-      content,
-      revision,
-      baseRevision: revision,
-      pending,
-      kind: extra?.kind ?? existing?.kind,
-      name: extra?.name ?? existing?.name,
-      project_id: extra?.project_id ?? existing?.project_id ?? null,
-    });
-  }).catch(() => {});
-  localWrites.set(id, next);
+function cacheAsset(asset: Asset) {
+  assetCache.set(asset.id, asset);
+  rememberRevision(asset.id, asset.revision);
+  return asset;
+}
+
+function assetHasBody(asset: Asset | null | undefined) {
+  if (!asset) return false;
+  // PDF 正文在文件流里；缓存命中需至少带过一次详情（含笔记 content 字段）。
+  if (asset.kind === 'pdf') return 'content' in asset;
+  const content = asset.content as Record<string, unknown> | undefined;
+  if (!content || typeof content !== 'object') return false;
+  return Boolean(
+    content.sheets || content.sheetOrder || content.nodeData || content.type === 'doc'
+    || content.format === 'drawio-v1' || content.format === 'mermaid-v1'
+    || content.format === 'invp-research-diagram-v1' || content.format === 'invp-project-plan-v1'
+    || content.format === 'invp-calendar-v1' || content.format === 'mind-elixir-v1',
+  );
 }
 
 export function rememberRevision(id: string, revision: number) {
@@ -87,12 +84,12 @@ export async function flushSave() {
         method: 'PUT',
         body: JSON.stringify({ content: job.content, revision: serverRevision.get(job.id) ?? 0 }),
       });
-      serverRevision.set(saved.id, saved.revision);
-      const newer = queued && queued.id === job.id ? queued : null;
-      rememberLocal(saved.id, newer ? newer.content : job.content, saved.revision, Boolean(newer), {
-        kind: saved.kind,
-        name: saved.name,
-        project_id: saved.project_id,
+      const prev = assetCache.get(saved.id);
+      cacheAsset({
+        ...(prev || saved),
+        ...saved,
+        content: job.content,
+        kind: saved.kind || prev?.kind || 'document',
       });
       saveFailed = false;
       if (saved.id !== job.id) {
@@ -118,7 +115,6 @@ export async function flushSave() {
 export function queueSave(id: string, content: unknown) {
   queued = { id, content };
   saveFailed = false;
-  rememberLocal(id, content, serverRevision.get(id) ?? 0, true);
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => { void flushSave(); }, 400);
 }
@@ -147,9 +143,11 @@ async function loadAssets(projectId: string) {
 
 async function loadUserTool(projectId: string, kind: 'calc' | 'notebook') {
   try {
-    const listed = (await office.json<{ assets: Asset[] }>(`/projects/${projectId}/assets?kind=${kind}`)).assets[0];
-    if (!listed) return null;
-    return getAsset(listed.id);
+    const listed = (await office.json<{ assets: Asset[] }>(`/projects/${projectId}/assets?kind=${kind}`)).assets;
+    if (!listed.length) return null;
+    // 同用户可能因绑定堆积多本空笔记本；优先打开 revision 最高的
+    const best = listed.reduce((a, b) => ((b.revision || 0) > (a.revision || 0) ? b : a));
+    return getAsset(best.id);
   } catch {
     return null;
   }
@@ -201,47 +199,13 @@ export async function bootstrap(): Promise<Workspace> {
   };
 }
 
-function assetFromLocal(id: string, local: LocalJson): Asset {
-  return {
-    id,
-    project_id: local.project_id ?? null,
-    kind: (local.kind || 'document') as Asset['kind'],
-    name: local.name || '未命名',
-    revision: local.pending ? local.baseRevision : local.revision,
-    updated_at: new Date(local.updatedAt).toISOString(),
-    content: local.content,
-  };
-}
-
-export async function getAsset(id: string) {
-  let local: LocalJson | null = null;
-  try { local = await getLocalJson(id); } catch { local = null; }
-  let meta: Asset;
-  try {
-    meta = await office.json<Asset>(`/assets/${id}?meta=1`);
-  } catch (e) {
-    if (local) return assetFromLocal(id, local);
-    throw e;
-  }
-  rememberRevision(meta.id, meta.revision);
-  if (local && local.pending && local.baseRevision === meta.revision) {
-    return { ...meta, content: local.content };
-  }
-  if (local && !local.pending && local.revision === meta.revision) {
-    return { ...meta, content: local.content };
+export async function getAsset(id: string, opts?: { force?: boolean }) {
+  if (!opts?.force) {
+    const cached = assetCache.get(id);
+    if (cached && assetHasBody(cached)) return cached;
   }
   const asset = await office.json<Asset>(`/assets/${id}`);
-  rememberRevision(asset.id, asset.revision);
-  rememberLocal(asset.id, asset.content, asset.revision, false, {
-    kind: asset.kind,
-    name: asset.name,
-    project_id: asset.project_id,
-  });
-  return asset;
-}
-
-export function forgetLocalAsset(id: string) {
-  void deleteLocalAsset(id).catch(() => {});
+  return cacheAsset(asset);
 }
 
 async function flushSaveSoft() {
@@ -254,11 +218,12 @@ async function flushSaveSoft() {
 export async function openAsset(id: string, trackRecent = true) {
   await flushSaveSoft();
   const suffix = trackRecent ? '' : '?track_recent=false';
+  const cached = assetCache.get(id);
   const [asset, user] = await Promise.all([
-    getAsset(id),
+    cached && assetHasBody(cached) ? Promise.resolve(cached) : getAsset(id, { force: true }),
     office.json<User>(`/assets/${id}/select${suffix}`, { method: 'POST' }),
   ]);
-  return { asset, user };
+  return { asset: cacheAsset(asset), user };
 }
 
 export async function selectProject(id: string) {
@@ -317,8 +282,7 @@ export async function createAsset(projectId: string, kind: Kind, name: string, v
   const asset = await office.json<Asset>(`/projects/${projectId}/assets`, {
     method: 'POST', body: JSON.stringify(body),
   });
-  rememberRevision(asset.id, asset.revision);
-  return asset;
+  return cacheAsset(asset);
 }
 
 export async function uploadPdf(projectId: string, file: File) {
@@ -352,11 +316,32 @@ export async function register(email: string, password: string) {
   return data.user;
 }
 
+const BOUND_REMOTE_KEY = 'youju-bound-remote';
+
+/** 远程账号登录后：按注册邮箱绑定本机 users，并把访客资产挂到该邮箱下。 */
+export async function bindLocalAccount(opts?: { force?: boolean }) {
+  const remote = remoteToken();
+  if (!remote) throw new Error('请先登录远程账号。');
+  // 同一次会话里同一远程令牌已绑过且本机仍有 JWT，跳过，避免反复打 mcp /api/account/me
+  if (!opts?.force && office.signedIn() && sessionStorage.getItem(BOUND_REMOTE_KEY) === remote) {
+    return null;
+  }
+  const data = await office.json<{ token: string; user: User; email?: string }>('/local/bind-account', {
+    method: 'POST',
+  });
+  office.setToken(data.token);
+  sessionStorage.setItem(BOUND_REMOTE_KEY, remote);
+  return data.user;
+}
+
 export function logout() {
   clearTimeout(saveTimer);
   queued = null;
   saveFailed = false;
   serverRevision.clear();
+  assetCache.clear();
+  clearPdfFileCache();
+  sessionStorage.removeItem(BOUND_REMOTE_KEY);
+  void office.json('/auth/logout', { method: 'POST' }).catch(() => {});
   office.setToken(null);
-  void clearLocalStore().catch(() => {});
 }

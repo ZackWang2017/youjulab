@@ -1,65 +1,21 @@
 # 有据 youjulab
 
-人和 AI 共用的文档工作台。工作区里可以写文档、表格、PDF、思维导图、日历和持仓；外部 Agent 通过同一套 MCP / HTTP 接口读写表格、文档和导图。
+人和 AI 共用的文档工作台。文档、表格、PDF 和向量索引在本机；注册登录、持仓、证券和 embedding 在 mcp-server。
 
 ## 组成
 
-| 服务 | 作用 | 默认地址 |
+| 进程 | 作用 | 默认地址 |
 | --- | --- | --- |
-| web | 浏览器工作区 | http://www.youjulab.com 与 https://www.youjulab.com |
-| office-backend | 登录、项目、文档状态、模型编排 | 容器内 8100，经 `/office` 反代 |
-| mcp-server | 财务数据、资讯、表格/文档/导图存储、持仓 | 容器内 8000，经 `/backend` 反代 |
-| postgres | `finresearch` 业务库，以及带 pgvector 的 `office_vectors` | 仅容器网络 |
-| mongo | 办公账号、项目和文档元数据 | 仅容器网络 |
+| office-copilot-web | 工作区界面 | http://127.0.0.1:5173 |
+| office-backend | 本机项目、文档、PDF、sqlite-vec | http://127.0.0.1:8100 |
+| mcp-server | 账号、持仓、证券、embedding、投研数据 | http://127.0.0.1:8000 |
+| office-desktop | Electron 壳，拉起本机界面和 office-backend | 见 [apps/office-desktop/README.md](apps/office-desktop/README.md) |
 
-PDF 向量检索使用 embedding 服务，默认连宿主机 `http://host.docker.internal:11434` 上的 Ollama（模型 `bge-m3`）。也可以用 Compose profile 在栈里启动 Ollama。
-
-## Docker Compose
-
-需要 Docker Engine 与 Docker Compose v2。
-
-```sh
-./deploy/up.sh
-```
-
-脚本会检查本机是否已有数据库镜像，没有则拉取 `pgvector/pgvector:pg16` 和 `mongo:7`，再构建应用镜像（安装 Python 与前端依赖）并启动。首次构建需要下载依赖，时间会比较长。
-
-启动后打开 https://www.youjulab.com ，注册邮箱账号即可使用。域名需解析到机器的 80/443。正式环境用 Let's Encrypt：
-
-```sh
-apt-get install -y certbot
-CERTBOT_EMAIL=你的邮箱@example.com ./deploy/certbot/issue.sh
-```
-
-`certbot.timer` 会自动续期；续期后 `deploy/certbot/deploy-hook.sh` 会把证书拷到 `deploy/certs/` 并 reload Nginx。根域名 `youjulab.com` 需在 DNS 配好 A 记录后，用 `CERTBOT_INCLUDE_APEX=1` 再签发。目录为空时容器会生成临时自签证书。
-
-常用参数：
-
-```sh
-./deploy/up.sh --pull                 # 重新拉取数据库镜像
-./deploy/up.sh --with-embedding       # 同时启动 Ollama
-```
-
-启用栈内 Ollama 后，首次做 PDF 向量检索前执行：
-
-```sh
-docker compose exec ollama ollama pull bge-m3
-```
-
-模型密钥、搜索密钥和访问令牌放在仓库根目录的 `.env`（可从 `.env.example` 复制）。Compose 会读取其中的密钥，并自行把数据库地址改写到容器网络，不必把 `127.0.0.1` 改成服务名。数据库口令默认 `youju` / `youju-dev-change-me`，可用 `POSTGRES_PASSWORD`、`MONGO_PASSWORD` 覆盖；口令请使用 URL 安全字符。改口令后要删除对应数据卷才会重新初始化。
-
-```sh
-docker compose logs -f
-docker compose ps
-docker compose down          # 停止并保留数据卷
-docker compose down -v       # 同时删除数据库和上传文件
-```
-
-网页端口用 `WEB_HTTP_PORT`（默认 80）和 `WEB_HTTPS_PORT`（默认 443）修改。
+远程地址和 embedding 都默认本机 `http://127.0.0.1:8000`。embedding 接口是该地址下的 `/api/embeddings`。部署到服务器时，在登录窗或设置里把远程地址改成服务器 URL，或改 `MCP_REMOTE_BASE_URL`。mcp-server 自己调用的向量模型默认本机 Ollama `http://127.0.0.1:11434`，换服务器或云厂商时只改 `EMBEDDING_BASE_URL`。
 
 ## 本机直接运行
 
-不使用容器时，在本机准备 MongoDB、带 pgvector 的 PostgreSQL，以及可选的 Ollama。复制 `.env.example` 为 `.env` 并填写连接与模型配置。
+复制 `.env.example` 为 `.env`。mcp-server 还需要 Postgres（`finresearch`）和它自己的环境变量，见 [mcp-server/.env.example](mcp-server/.env.example)。
 
 ```sh
 python3 -m venv .venv
@@ -74,6 +30,14 @@ npm ci
 npm run dev
 ```
 
-前端开发服务器是 http://127.0.0.1:5173 ，并把 `/office`、`/backend` 代理到本机 8100 和 8000。
+前端开发服务器是 http://127.0.0.1:5173 ，并把 `/office` 代理到本机 8100。登录、持仓和 embedding 直接请求远程地址（默认 http://127.0.0.1:8000 ）。
 
-财报补齐等维护命令见部署环境自己的运维说明；这些命令读取 `FINANCE_DATABASE_URL` 或 `FINANCE_DB_*`，在容器部署里可以对 `postgres` 服务执行。
+未登录可以点「离线进入」使用本地文档。持仓、证券搜索和 PDF 向量索引需要登录远程账号。远程不可达时，登录框只保留「离线进入」。
+
+## 服务器（mcp 精简栈）
+
+仅部署 Postgres、mcp-server、Ollama 与 nginx（HTTP / IP）。步骤见 [deploy/MCP-DEPLOY.md](deploy/MCP-DEPLOY.md)。旧办公全栈 Docker 镜像与 SPA nginx 模板已移除；证书相关脚本仍保留在 `deploy/certbot/`。
+
+## 桌面端
+
+开发说明见 [apps/office-desktop/README.md](apps/office-desktop/README.md)。桌面进程负责启动本地 office-backend、记住远程地址和 PDF 目录，并在启动时对照远程 `version.json` 提示更新。

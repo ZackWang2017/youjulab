@@ -20,13 +20,68 @@ def mongo_db() -> str:
     return os.environ.get("OFFICE_MONGO_DB", "office").strip() or "office"
 
 
-def file_root() -> Path:
+def office_store_mode() -> str:
+    """memory | sqlite。文档资产只留在本机 SQLite。"""
+    raw = (os.environ.get("OFFICE_STORE") or "").strip().lower()
+    if raw == "memory":
+        return "memory"
+    if raw in ("sqlite", "mongo"):
+        return "sqlite"
+    url = mongo_url()
+    if url.startswith("memory:"):
+        return "memory"
+    return "sqlite"
+
+
+def sqlite_path() -> Path:
+    raw = (os.environ.get("OFFICE_SQLITE_PATH") or "").strip()
+    if not raw:
+        url = mongo_url()
+        if url.startswith("sqlite:"):
+            raw = url[len("sqlite:"):].lstrip("/")
+            if raw.startswith("/") or (len(raw) > 1 and raw[1] == ":"):
+                path = Path(raw)
+            else:
+                path = ROOT / raw
+            path.parent.mkdir(parents=True, exist_ok=True)
+            return path
+        raw = str(ROOT / "data" / "office-local" / "office.sqlite")
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        path = ROOT / path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+_file_root_override: Path | None = None
+
+
+def default_file_root() -> Path:
     raw = os.environ.get("OFFICE_FILE_ROOT", str(ROOT / "data" / "office-files"))
     path = Path(raw).expanduser()
     if not path.is_absolute():
         path = ROOT / path
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def set_file_root_override(path: Path | None) -> Path:
+    global _file_root_override
+    if path is None:
+        _file_root_override = None
+        return default_file_root()
+    target = path.expanduser()
+    if not target.is_absolute():
+        target = ROOT / target
+    target.mkdir(parents=True, exist_ok=True)
+    _file_root_override = target
+    return target
+
+
+def file_root() -> Path:
+    if _file_root_override is not None:
+        return _file_root_override
+    return default_file_root()
 
 
 def resolve_asset_file_path(stored: str | None, asset_id: str | None = None) -> Path | None:
@@ -67,13 +122,9 @@ def api_port() -> int:
     return int(os.environ.get("OFFICE_API_PORT", "8100"))
 
 
-def mcp_http_base() -> str:
-    """mcp-server 的 HTTP 根地址。文档技能经 /api/documents/write 写回文档。
-
-    Docker Compose 设置 FINANCE_MCP_BASE_URL（例如 http://mcp-server:8000）。
-    未设置时仍按本机 FINANCE_MCP_HOST / FINANCE_MCP_PORT 拼接。
-    """
-    explicit = (os.environ.get("FINANCE_MCP_BASE_URL") or "").strip().rstrip("/")
+def mcp_remote_base() -> str:
+    """远程 mcp 根地址。调试默认本机 8000；部署后改 MCP_REMOTE_BASE_URL 或在登录窗里改。"""
+    explicit = (os.environ.get("MCP_REMOTE_BASE_URL") or os.environ.get("FINANCE_MCP_BASE_URL") or "").strip().rstrip("/")
     if explicit:
         return explicit
     host = (os.environ.get("FINANCE_MCP_HOST") or "127.0.0.1").strip() or "127.0.0.1"
@@ -81,6 +132,10 @@ def mcp_http_base() -> str:
         host = "127.0.0.1"
     port = (os.environ.get("FINANCE_MCP_PORT") or "8000").strip() or "8000"
     return f"http://{host}:{port}"
+
+
+def mcp_http_base() -> str:
+    return mcp_remote_base()
 
 
 def mcp_access_token() -> str:
@@ -142,6 +197,30 @@ def pg_url() -> str:
     return (os.environ.get("OFFICE_PG_URL") or "").strip()
 
 
+def vector_backend() -> str:
+    """pg | sqlite。桌面 OFFICE_STORE=sqlite 时默认 sqlite。"""
+    raw = (os.environ.get("OFFICE_VECTOR_BACKEND") or "").strip().lower()
+    if raw in ("pg", "postgres", "pgvector"):
+        return "pg"
+    if raw in ("sqlite", "sqlite-vec", "sqlite_vec"):
+        return "sqlite"
+    if office_store_mode() == "sqlite":
+        return "sqlite"
+    return "pg" if pg_url() else "sqlite"
+
+
+def vector_sqlite_path() -> Path:
+    raw = (os.environ.get("OFFICE_VECTOR_SQLITE_PATH") or "").strip()
+    if raw:
+        path = Path(raw).expanduser()
+        if not path.is_absolute():
+            path = ROOT / path
+    else:
+        path = sqlite_path().with_name("office-vectors.sqlite")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 def embedding_provider() -> str:
     return (os.environ.get("OFFICE_EMBEDDING_PROVIDER") or "ollama").strip().lower() or "ollama"
 
@@ -160,6 +239,15 @@ def embedding_dim() -> int:
 
 def embedding_api_key() -> str:
     return (os.environ.get("OFFICE_EMBEDDING_API_KEY") or "").strip()
+
+
+def remote_office_base() -> str:
+    """桌面本地 backend 调用云端 office 的根地址（含 /office 前缀与否均可）。"""
+    return (os.environ.get("OFFICE_REMOTE_BASE_URL") or "").strip().rstrip("/")
+
+
+def remote_user_token() -> str:
+    return (os.environ.get("OFFICE_REMOTE_USER_TOKEN") or "").strip()
 
 
 def digest_tz() -> str:

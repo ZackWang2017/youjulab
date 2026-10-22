@@ -1,6 +1,5 @@
-"""持仓管理 REST：/api/portfolio/*。业务都在本服务，office-backend 只转发并带上用户 id。
+"""持仓管理 REST：/api/portfolio/*。用户身份来自账号 JWT 的 sub。
 
-鉴权沿用静态 MCP_ACCESS_TOKEN（server.py 的 guard），用户由 ``X-Office-User-Id`` 头标识。
 同时注册每日计划任务：工作日 17:00 快照汇率 → 补收盘价 → 重算净值，并暴露 /api/scheduler/*。
 """
 from __future__ import annotations
@@ -22,9 +21,14 @@ _scheduler: DailyTaskScheduler | None = None
 
 
 def _owner(request: Request) -> str:
-    owner = (request.headers.get("x-office-user-id") or "").strip()
+    from account_jwt import current_sub, verify_bearer
+
+    owner = current_sub()
     if not owner:
-        raise PortfolioError("缺少用户标识。", 401)
+        claims = verify_bearer(request.headers.get("authorization", ""))
+        owner = str(claims.get("sub") or "") if claims else ""
+    if not owner:
+        raise PortfolioError("请先登录。", 401)
     return owner
 
 

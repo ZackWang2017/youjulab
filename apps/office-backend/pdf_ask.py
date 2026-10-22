@@ -3,12 +3,14 @@ from __future__ import annotations
 
 import json
 import re
-import sys
 from collections.abc import AsyncIterator
 from typing import Any
 
-from config import ROOT
+import httpx
+
+from config import mcp_remote_base
 from model_runtime import model_configuration_error, model_configured, model_name
+from remote_auth import remote_token
 from assistant import iter_chat_events
 from office_pdf_vector import ensure_index, get_index_status, search_chunks
 
@@ -33,25 +35,25 @@ _EMPTY_SECTION = re.compile(
 )
 _DROP_IF_EMPTY = frozenset({"本文搜索", "百度搜索", "百度百科", "Google搜索", "模型搜索"})
 
-_MCP_REPOSITORY = ROOT / "mcp-server" / "external-tools" / "repository"
-_MCP_SERVICE = ROOT / "mcp-server" / "external-tools" / "service"
-_PAGE_REPOSITORY = ROOT / "mcp-server" / "local-tools" / "repository"
-_PAGE_SERVICE = ROOT / "mcp-server" / "local-tools" / "service"
-for _path in (_MCP_REPOSITORY, _MCP_SERVICE, _PAGE_REPOSITORY, _PAGE_SERVICE):
-    if str(_path) not in sys.path:
-        sys.path.insert(0, str(_path))
-
-
-def _web_search():
-    import search_service  # noqa: WPS433
-
-    return search_service
-
-
-def _page_reader():
-    import website_crawler_service  # noqa: WPS433
-
-    return website_crawler_service
+def _remote_json(path: str, payload: dict) -> dict:
+    token = remote_token()
+    if not token:
+        return {"error": "外部搜索需要登录远程服务。", "results": []}
+    try:
+        res = httpx.post(
+            f"{mcp_remote_base()}{path}",
+            json=payload,
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=60.0,
+        )
+    except httpx.HTTPError as exc:
+        return {"error": f"远程服务不可用：{exc}", "results": []}
+    if res.status_code == 401:
+        return {"error": "外部搜索需要登录远程服务。", "results": []}
+    if res.is_error:
+        return {"error": res.text[:300], "results": []}
+    data = res.json()
+    return data if isinstance(data, dict) else {"error": "远程返回异常。", "results": []}
 
 
 PDF_ASK_TOOLS = [
@@ -303,14 +305,11 @@ def _run_tool(
             query = str(args.get("query") or "").strip()
             num = int(args.get("num") or 5)
             topic = str(args.get("topic") or "").strip()
-            eng = _web_search()
-            if name == "baidu_web_search":
-                return _tool_result(eng.baidu_web_search(query, num=num, topic=topic))
-            if name == "baidu_baike_search":
-                return _tool_result(eng.baidu_baike_search(query, num=num))
             if name == "read_web_page":
-                return _tool_result(_page_reader().read_web_page(str(args.get("url") or "")))
-            return _tool_result(eng.google_web_search(query, num=num, topic=topic))
+                return _tool_result(_remote_json("/api/local-tools/read-page", {"url": str(args.get("url") or "")}))
+            return _tool_result(_remote_json("/api/external-tools/invoke", {
+                "name": name, "query": query, "num": num, "topic": topic,
+            }))
 
         doc = str(args.get("document_id") or document_id).strip() or document_id
         if doc != document_id:

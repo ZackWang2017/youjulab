@@ -10,12 +10,17 @@ import { mountResearchDiagram } from './editors/research';
 import { mountCalendar } from './editors/calendar';
 import { mountProjectPlan } from './editors/project-plan';
 import { office, AuthError } from './office-client/client';
+import {
+  loadCaptcha, remoteBase, remoteEmail, remoteHealthy, remoteLogin, remoteRegister,
+  remoteToken, setRemoteBase, setRemoteToken,
+  RemoteAuthError, RemoteDownError,
+} from './remote/client';
 import { renderPatch } from './patches/preview';
 import type { Context, EditorAdapter, Patch, Surface } from './context/types';
 import { persist, saved } from './context/types';
 import {
-  bootstrap, createAsset, createProject, flushSave, forgetLocalAsset, getAsset, hasUnsavedWork, login, logout, openAsset, queueSave,
-  loadRecentAssets, register, rememberRevision, renameAsset, renameProject, reorderRecentAssets, retrySave, selectProject, updateAsset, uploadPdf,
+  bindLocalAccount, bootstrap, createAsset, createProject, flushSave, getAsset, hasUnsavedWork, logout, openAsset, queueSave,
+  loadRecentAssets, rememberRevision, renameAsset, renameProject, reorderRecentAssets, retrySave, selectProject, updateAsset, uploadPdf,
   type Asset, type Kind, type Workspace,
 } from './workspace/session';
 import {
@@ -326,13 +331,31 @@ function refresh() {
   }
 }
 
+function paintFooterUser() {
+  const el = document.querySelector<HTMLElement>('#footer-user');
+  if (!el) return;
+  const email = remoteEmail();
+  if (remoteToken() && email) {
+    el.replaceChildren(document.createTextNode(email));
+    return;
+  }
+  el.replaceChildren();
+  el.append(document.createTextNode('本机<'));
+  const link = document.createElement('button');
+  link.type = 'button';
+  link.className = 'footer-login-link';
+  link.textContent = '未登录';
+  link.onclick = () => openRemoteLogin();
+  el.append(link, document.createTextNode('>'));
+}
+
 function footer() {
   if (appView === 'portfolio') {
     const name = portfolioNav.currentId === ALL_PORTFOLIOS_ID && portfolioNav.items.length
       ? ALL_PORTFOLIOS_NAME
       : portfolioNav.items.find(item => item.id === portfolioNav.currentId)?.name;
     $('#footer-surface').textContent = name ? `持仓 · ${name}` : '持仓管理';
-    $('#footer-user').textContent = workspace?.user.email || '本地工作区';
+    paintFooterUser();
     return;
   }
   const current = workspace?.selected[surface];
@@ -340,7 +363,7 @@ function footer() {
     ? current.name
     : current ? `${workspace!.project.name} · ${current.name}` : workspace?.project.name || '工作区';
   $('#footer-surface').textContent = label;
-  $('#footer-user').textContent = workspace?.user.email || '本地工作区';
+  paintFooterUser();
 }
 
 function formatSavedAt(at = new Date()) {
@@ -387,7 +410,7 @@ async function saveNow() {
       const box = document.querySelector<HTMLElement>('#error');
       if (box) box.hidden = true;
     } catch (e) {
-      if (e instanceof AuthError) { logout(); void boot(); return; }
+      if (e instanceof AuthError) { void boot({ forceAuth: true }); return; }
       fail(e);
     }
     return;
@@ -406,7 +429,7 @@ async function saveNow() {
     if (box) box.hidden = true;
     noteSaved();
   } catch (e) {
-    if (e instanceof AuthError) { logout(); void boot(); return; }
+    if (e instanceof AuthError) { void boot({ forceAuth: true }); return; }
     fail(e);
   }
 }
@@ -421,7 +444,7 @@ window.addEventListener('keydown', e => {
 
 function run(action: () => Promise<void>) {
   return action().catch(e => {
-    if (e instanceof AuthError) { logout(); void boot(); return; }
+    if (e instanceof AuthError) { void boot({ forceAuth: true }); return; }
     fail(e);
   });
 }
@@ -460,7 +483,8 @@ function paintNav() {
     onSelectProject: id => { void run(() => chooseProject(id)); },
     onNewProject: () => { void run(() => addProject()); },
     onRenameProject: id => { void run(() => editProject(id)); },
-    onLogout: () => { void flushSave().catch(() => {}).finally(() => { logout(); void boot(); }); },
+    onLogout: () => { void flushSave().catch(() => {}).finally(() => { setRemoteToken(null); logout(); void boot(); }); },
+    onLogin: () => { openRemoteLogin(); },
     onOpenCalc: () => {
       const calc = workspace?.calc;
       openCalcWindow(calc, calc ? content => queueSave(calc.id, content) : undefined);
@@ -475,7 +499,9 @@ function paintNav() {
             const response = await office.json<{ assets: Asset[] }>(
               `/projects/${workspace.project.id}/assets?kind=notebook`,
             );
-            let listed = response.assets[0];
+            let listed = response.assets.reduce<Asset | undefined>((best, item) => (
+              !best || (item.revision || 0) > (best.revision || 0) ? item : best
+            ), undefined);
             if (!listed) {
               listed = await office.json<Asset>(`/projects/${workspace.project.id}/assets`, {
                 method: 'POST',
@@ -525,14 +551,40 @@ function paintNav() {
   }, { ...portfolioNav, active: appView === 'portfolio' });
 }
 
+/** 在当前工作区上弹出登录窗。登录成功后会整页重载资产；afterLogin 在重载后再跑（如进入持仓）。 */
+function openRemoteLogin(afterLogin?: () => Promise<void>) {
+  const overlay = document.createElement('div');
+  overlay.className = 'dialog-overlay';
+  overlay.innerHTML = '<div id="remote-login-host"></div>';
+  overlay.addEventListener('click', event => { if (event.target === overlay) overlay.remove(); });
+  document.body.append(overlay);
+  renderAuth(overlay.querySelector('#remote-login-host')!);
+  createIcons({ icons });
+  bindAuth(afterLogin);
+}
+
 /** 进入持仓管理：隐藏资产编辑器，顶部导航切换为投资组合下拉与功能链接。 */
 async function enterPortfolio() {
+  closeAllMenus();
+  if (!(await remoteHealthy())) {
+    fail(new RemoteDownError('服务器不可用。'));
+    return;
+  }
+  let items;
+  try {
+    items = await portfolioApi.list();
+  } catch (e) {
+    if (e instanceof RemoteAuthError) {
+      openRemoteLogin(async () => { await enterPortfolio(); });
+      return;
+    }
+    throw e;
+  }
+  portfolioNav.items = items;
   appView = 'portfolio';
   persist('office-view', 'portfolio');
-  closeAllMenus();
   document.querySelectorAll<HTMLElement>('.surface').forEach(el => { el.hidden = el.id !== 'portfolio'; });
   if (!portfolioController) portfolioController = mountPortfolio($('#portfolio'), fail);
-  portfolioNav.items = await portfolioApi.list();
   const remembered = Number(saved('office-portfolio-id'));
   // 「全部持仓统计」只要还有组合就有效；否则回退到记住的 / 第一个组合
   const valid = (id: number | null) => id !== null && portfolioNav.items.length > 0
@@ -570,11 +622,15 @@ async function switchSurface(kind: Kind) {
   document.querySelectorAll<HTMLElement>('.surface').forEach(el => { el.hidden = el.id !== surfaceId; });
   paintNav(); footer();
   syncTaskModes();
+  // 等布局生效后再 resize，Univer 才能按真实尺寸重绘（配合 #sheet 隐藏时仍保留渲染）
+  requestAnimationFrame(() => {
+    window.dispatchEvent(new Event('resize'));
+    requestAnimationFrame(() => window.dispatchEvent(new Event('resize')));
+  });
   if ((kind === 'sheet' || kind === 'mindmap') && sessionController && workspace?.selected[kind]) {
     await sessionController.refreshList();
     await restoreLastSession(workspace.selected[kind]!.id, sessionController);
   }
-  window.dispatchEvent(new Event('resize'));
   refresh();
 }
 
@@ -590,11 +646,10 @@ async function loadEditor(kind: Kind) {
     }
     return;
   }
-  if (kind === 'pdf') office.prefetchFile(meta.id, meta.revision, meta.size);
   rememberRevision(meta.id, meta.revision);
   const hasBody = Boolean(meta.content && (
     meta.content.sheets || meta.content.sheetOrder || meta.content.nodeData || meta.content.type === 'doc' || meta.content.format === 'drawio-v1' || meta.content.format === 'mermaid-v1' || meta.content.format === 'invp-research-diagram-v1' || meta.content.format === 'invp-project-plan-v1'
-  ));
+  )) || (kind === 'pdf' && 'content' in meta);
   // Asset lists omit content; PDF notes live in content too, so always hydrate before loading.
   const asset = hasBody ? meta : await getAsset(meta.id);
   if (workspace) workspace.selected[kind] = asset;
@@ -603,15 +658,24 @@ async function loadEditor(kind: Kind) {
 
 async function chooseAsset(kind: Kind, id: string, trackRecent = true) {
   if (!workspace || !editors) return;
-  if (kind === 'pdf') {
-    const listed = workspace.assets.pdf.find(item => item.id === id);
-    office.prefetchFile(id, listed?.revision, listed?.size);
+  // 已是当前打开的文件：只切到对应工作区，不再重新拉取/装载。
+  if (workspace.selected[kind]?.id === id) {
+    if (trackRecent) {
+      void office.json(`/assets/${id}/select`, { method: 'POST' }).catch(() => {});
+    }
+    await switchSurface(kind);
+    return;
   }
   const { asset } = await openAsset(id, trackRecent);
   resetAssistantThread();
   workspace.selected[kind] = asset;
   workspace.assets[kind] = workspace.assets[kind].map(item => item.id === asset.id ? asset : item);
-  if (trackRecent) workspace.recentAssets = await loadRecentAssets(workspace.project.id);
+  // 最近列表后台刷新，不挡住打开
+  if (trackRecent) {
+    void loadRecentAssets(workspace.project.id).then(list => {
+      if (workspace) { workspace.recentAssets = list; paintNav(); }
+    }).catch(() => {});
+  }
   // PDF.js waits until its viewer is visible before opening a file.
   if (kind === 'pdf') {
     await switchSurface(kind);
@@ -666,7 +730,6 @@ async function deleteAsset(kind: Kind, id: string) {
   const ok = await askConfirm(`删除「${current.name}」？删除后无法恢复。`);
   if (!ok) return;
   await office.json(`/assets/${id}`, { method: 'DELETE' });
-  forgetLocalAsset(id);
   workspace.assets[kind] = workspace.assets[kind].filter(item => item.id !== id);
   if (workspace.selected[kind]?.id === id) {
     const next = workspace.assets[kind][0] || null;
@@ -686,6 +749,14 @@ async function chooseProject(id: string) {
   workspace = await selectProject(id);
   paintNav();
   await Promise.all(ALL_KINDS.map(loadEditor));
+  // 切到该项目最近打开的资产（含工作区类型），避免仍停留在上一项目的操作面
+  const recent = workspace.recentAssets[0];
+  if (recent?.id && recent.kind) {
+    await chooseAsset(recent.kind as Kind, recent.id, false);
+  } else {
+    const fallback = ALL_KINDS.find(kind => workspace?.selected[kind]);
+    if (fallback) await switchSurface(fallback);
+  }
   footer(); refresh();
 }
 
@@ -695,6 +766,13 @@ async function addProject() {
   workspace = await createProject(name);
   paintNav();
   await Promise.all(ALL_KINDS.map(loadEditor));
+  const recent = workspace.recentAssets[0];
+  if (recent?.id && recent.kind) {
+    await chooseAsset(recent.kind as Kind, recent.id, false);
+  } else {
+    const fallback = ALL_KINDS.find(kind => workspace?.selected[kind]);
+    if (fallback) await switchSurface(fallback);
+  }
   footer(); refresh();
 }
 
@@ -705,7 +783,6 @@ async function deletePdf(id: string) {
   const ok = await askConfirm(`删除「${current.name}」？删除后无法恢复。`);
   if (!ok) return false;
   await office.json(`/assets/${id}`, { method: 'DELETE' });
-  forgetLocalAsset(id);
   const folders = loadPdfFolders(workspace.project.id);
   placePdf(folders, id, null);
   savePdfFolders(workspace.project.id, folders);
@@ -899,37 +976,6 @@ function bindWorkspace() {
       $('#rich-editor'),
       refresh,
       content => { if (workspace?.selected.document) queueSave(workspace.selected.document.id, content); },
-      {
-        getJob: id => office.json(`/assets/${id}/digest-job`),
-        saveJob: (id, job) => office.json(`/assets/${id}/digest-job`, {
-          method: 'PUT',
-          body: JSON.stringify({
-            enabled: job.enabled,
-            hour: job.hour,
-            minute: job.minute,
-            output_order: job.output_order,
-            topics: job.topics,
-          }),
-        }),
-        runJob: (id, onEvent) => office.stream(`/assets/${id}/digest-job/run`, {}, onEvent),
-        reloadDocument: async id => {
-          await showWrittenDocument(id, '资讯已写入文档');
-        },
-      },
-      {
-        types: async () => (await office.json('/document-skill-types')).types,
-        searchSecurities: query => office.json(`/securities/search?q=${encodeURIComponent(query)}`),
-        list: async id => (await office.json(`/assets/${id}/skills`)).skills,
-        save: (id, skill) => office.json(skill.id ? `/assets/${id}/skills/${skill.id}` : `/assets/${id}/skills`, {
-          method: skill.id ? 'PUT' : 'POST',
-          body: JSON.stringify({ name: skill.name, type: skill.type, params: skill.params }),
-        }),
-        remove: async (id, skillId) => { await office.json(`/assets/${id}/skills/${skillId}`, { method: 'DELETE' }); },
-        run: (id, skillId, onEvent) => office.stream(`/assets/${id}/skills/${skillId}/run`, {}, onEvent),
-        reloadDocument: async id => {
-          await showWrittenDocument(id, '技能已写入文档');
-        },
-      },
     ),
     pdf: mountPdf($('#pdf'), refresh, {
       onPickFile: handlePdfUpload,
@@ -937,7 +983,6 @@ function bindWorkspace() {
         revision: opts?.revision ?? workspace?.selected.pdf?.revision,
         expectedSize: opts?.expectedSize ?? workspace?.selected.pdf?.size,
         onProgress: opts?.onProgress,
-        onLocal: opts?.onLocal,
       }),
       onAnnotate: async body => {
         const result = await savePdfAnnot(`/assets/${workspace!.selected.pdf!.id}/annotations`, { method: 'POST', body: JSON.stringify(body) });
@@ -1249,41 +1294,194 @@ function bindWorkspace() {
   }).catch(e => fail(e));
 }
 
-function bindAuth() {
+function bindAuth(afterLogin?: () => Promise<void>) {
   const form = $<HTMLFormElement>('#auth');
+  const error = form.querySelector<HTMLElement>('#auth-error')!;
+  const email = form.querySelector<HTMLInputElement>('#auth-email')!;
+  const password = form.querySelector<HTMLInputElement>('#auth-password')!;
+  const captchaInput = form.querySelector<HTMLInputElement>('#auth-captcha-code')!;
+  const captchaImg = form.querySelector<HTMLImageElement>('#auth-captcha')!;
+  const loginBtn = form.querySelector<HTMLButtonElement>('#auth-login')!;
+  const registerBtn = form.querySelector<HTMLButtonElement>('#auth-register')!;
+  const closeBtn = form.querySelector<HTMLButtonElement>('#auth-close')!;
+  let captchaId = '';
+  const showError = (message: string) => { error.hidden = false; error.textContent = message; };
+  const popup = form.closest('.dialog-overlay');
+  if (popup) {
+    closeBtn.hidden = false;
+    closeBtn.onclick = () => popup.remove();
+  }
+  const setOnline = (online: boolean) => {
+    for (const field of [email, password, captchaInput, loginBtn, registerBtn]) field.disabled = !online;
+    captchaImg.style.opacity = online ? '1' : '0.35';
+    captchaImg.style.pointerEvents = online ? 'auto' : 'none';
+  };
+  const refreshCaptcha = async () => {
+    const captcha = await loadCaptcha();
+    captchaId = captcha.captcha_id;
+    captchaImg.src = `data:${captcha.image_type};base64,${captcha.image_base64}`;
+    captchaInput.value = '';
+  };
+  const openLocalSettings = async () => {
+    const prefs = await office.json<{ pdf_dir: string; pdf_dir_default: string }>('/local/preferences').catch(() => ({
+      pdf_dir: '', pdf_dir_default: '',
+    }));
+    const desktop = await window.youju?.getConfig?.();
+    const overlay = document.createElement('div');
+    overlay.className = 'dialog-overlay';
+    const showDataMode = Boolean(window.youju?.isDesktop);
+    overlay.innerHTML = `<form class="name-dialog auth-local-dialog">
+      <h2>设置</h2>
+      <label class="field-label" for="local-remote">远程服务地址</label>
+      <input id="local-remote" spellcheck="false" placeholder="http://127.0.0.1:8000">
+      <label class="field-label" for="local-pdf">本地 PDF 目录</label>
+      <input id="local-pdf" spellcheck="false" placeholder="留空使用默认目录">
+      ${showDataMode ? `<label class="field-label" for="local-data-mode">本机数据位置</label>
+      <select id="local-data-mode">
+        <option value="repo">与开发共用（仓库 data/）</option>
+        <option value="userData">独立副本（Application Support）</option>
+      </select>
+      <p class="auth-local-note" data-data-path></p>` : ''}
+      <p class="auth-local-note">不改则使用默认值。部署到服务器后，把远程地址改成服务器 URL。embedding 走该地址下的 /api/embeddings。切换数据位置后请重启桌面应用。</p>
+      <div class="dialog-actions">
+        <button type="button" data-reset>恢复默认</button>
+        <button type="button" data-cancel>取消</button>
+        <button class="primary" type="submit">保存</button>
+      </div>
+    </form>`;
+    const remoteField = overlay.querySelector<HTMLInputElement>('#local-remote')!;
+    const pdfField = overlay.querySelector<HTMLInputElement>('#local-pdf')!;
+    const dataModeField = overlay.querySelector<HTMLSelectElement>('#local-data-mode');
+    const dataPathNote = overlay.querySelector<HTMLElement>('[data-data-path]');
+    remoteField.value = desktop?.remoteBaseUrl || remoteBase();
+    const customPdf = desktop?.pdfDir || (prefs.pdf_dir && prefs.pdf_dir !== prefs.pdf_dir_default ? prefs.pdf_dir : '');
+    pdfField.value = customPdf;
+    if (prefs.pdf_dir_default) pdfField.placeholder = prefs.pdf_dir_default;
+    if (dataModeField) {
+      dataModeField.value = desktop?.dataMode === 'userData' ? 'userData' : 'repo';
+      if (!desktop?.repoDataAvailable) {
+        const repoOpt = dataModeField.querySelector('option[value="repo"]');
+        if (repoOpt) repoOpt.setAttribute('disabled', 'true');
+        dataModeField.value = 'userData';
+      }
+    }
+    if (dataPathNote) {
+      dataPathNote.textContent = desktop?.sqlitePath
+        ? `当前库：${desktop.sqlitePath}`
+        : '保存后重启应用生效。';
+    }
+    const close = () => overlay.remove();
+    const save = async (reset: boolean) => {
+      const remote = reset ? '' : remoteField.value.trim();
+      const pdfDir = reset ? '' : pdfField.value.trim();
+      const dataMode = reset ? (desktop?.repoDataAvailable ? 'repo' : 'userData') : (dataModeField?.value as 'repo' | 'userData' | undefined);
+      setRemoteBase(remote);
+      await office.json('/local/preferences', { method: 'PUT', body: JSON.stringify({ pdf_dir: pdfDir }) }).catch(() => {});
+      await window.youju?.setConfig?.({ remoteBaseUrl: remoteBase(), pdfDir, dataMode });
+      close();
+      await probe();
+    };
+    overlay.querySelector('[data-cancel]')!.addEventListener('click', close);
+    overlay.querySelector('[data-reset]')!.addEventListener('click', () => { void save(true); });
+    overlay.addEventListener('click', event => { if (event.target === overlay) close(); });
+    overlay.querySelector('form')!.addEventListener('submit', event => { event.preventDefault(); void save(false); });
+    document.body.append(overlay);
+    remoteField.focus();
+  };
+  const probe = async () => {
+    const online = await remoteHealthy();
+    setOnline(online);
+    if (!online) {
+      showError('远程服务不可用，只能离线进入。');
+      return;
+    }
+    error.hidden = true;
+    try { await refreshCaptcha(); } catch (e) { showError(e instanceof Error ? e.message : String(e)); }
+  };
   const submit = async (mode: 'login' | 'register') => {
-    if (!form.reportValidity()) return;
-    $('#error').hidden = true;
-    const email = $<HTMLInputElement>('#auth-email').value.trim();
-    const password = $<HTMLInputElement>('#auth-password').value;
+    error.hidden = true;
+    const body = {
+      email: email.value.trim(),
+      password: password.value,
+      captcha_id: captchaId,
+      captcha_code: captchaInput.value.trim(),
+    };
+    if (!body.email || body.password.length < 6 || !body.captcha_code) {
+      showError('请填写邮箱、至少 6 位密码和验证码。');
+      captchaInput.focus();
+      return;
+    }
+    loginBtn.disabled = true;
+    registerBtn.disabled = true;
     try {
-      if (mode === 'register') await register(email, password);
-      else await login(email, password);
-      await boot();
-    } catch (e) { fail(e); }
+      if (mode === 'register') await remoteRegister(body);
+      else await remoteLogin(body);
+      sessionStorage.setItem('youju-offline', '1');
+      const popup = form.closest('.dialog-overlay');
+      if (popup) popup.remove();
+      // boot 内会 bindLocalAccount 一次；这里不再重复绑，避免连续打两次 /api/account/me
+      await boot({ offline: true });
+      if (afterLogin) await afterLogin();
+    } catch (e) {
+      showError(e instanceof Error ? e.message : String(e));
+      await refreshCaptcha().catch(() => {});
+      captchaInput.focus();
+    } finally {
+      const online = !email.disabled;
+      loginBtn.disabled = !online;
+      registerBtn.disabled = !online;
+    }
   };
   form.onsubmit = e => { e.preventDefault(); void submit('login'); };
-  $('#auth-register').onclick = () => { void submit('register'); };
+  registerBtn.onclick = () => { void submit('register'); };
+  captchaImg.onclick = () => {
+    if (captchaImg.style.pointerEvents === 'none') return;
+    void refreshCaptcha().catch(e => showError(e instanceof Error ? e.message : String(e)));
+  };
+  form.querySelector<HTMLButtonElement>('#auth-offline')!.onclick = () => {
+    if (popup) { popup.remove(); return; }
+    sessionStorage.setItem('youju-offline', '1');
+    void boot({ offline: true });
+  };
+  const settingsLink = form.parentElement?.querySelector<HTMLButtonElement>('#auth-local-settings');
+  if (settingsLink) settingsLink.onclick = () => { void openLocalSettings(); };
+  void (async () => {
+    const config = await window.youju?.getConfig?.();
+    if (config?.remoteBaseUrl) setRemoteBase(config.remoteBaseUrl);
+    if (config?.pdfDir) {
+      await office.json('/local/preferences', { method: 'PUT', body: JSON.stringify({ pdf_dir: config.pdfDir }) }).catch(() => {});
+    }
+    await probe();
+  })();
 }
 
-async function boot() {
+async function boot(options?: { forceAuth?: boolean; offline?: boolean }) {
   ready = false;
   editors = null;
   workspace = null;
   pending = null;
-  if (!office.signedIn()) {
+  const offline = options?.offline || sessionStorage.getItem('youju-offline') === '1';
+  if (options?.forceAuth || !offline) {
     renderAuth(root);
     createIcons({ icons });
     bindAuth();
     return;
   }
+  if (remoteToken()) {
+    try { await bindLocalAccount(); } catch { /* 远程暂不可用时继续用本机访客/已有令牌 */ }
+  }
   try {
     workspace = await bootstrap();
   } catch (e) {
     if (e instanceof AuthError) { logout(); renderAuth(root); createIcons({ icons }); bindAuth(); return; }
-    renderAuth(root);
-    createIcons({ icons });
-    bindAuth();
+    // 纯在线模式且服务不可用时仍回登录页
+    if (!office.signedIn()) {
+      renderAuth(root);
+      createIcons({ icons });
+      bindAuth();
+      fail(e);
+      return;
+    }
     fail(e);
     return;
   }

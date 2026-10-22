@@ -6,12 +6,26 @@ import re
 from pathlib import Path
 from typing import Any
 
+from config import vector_backend
 from office_pdf_vector import _conn, pg_configured
 
 HERE = Path(__file__).resolve().parent
 GLOSSARY_PATH = HERE / "data" / "finance_glossary.json"
 _WORD = re.compile(r"[a-z0-9]+(?:'[a-z0-9]+)?")
 _SCHEMA_READY = False
+
+
+def _sqlite_mode() -> bool:
+    return vector_backend() == "sqlite"
+
+
+def _sqlite_conn():
+    from office_pdf_vector_sqlite import glossary_conn
+    return glossary_conn()
+
+
+def _terms_ready() -> bool:
+    return _sqlite_mode() or pg_configured()
 
 
 def en_key(text: str) -> str:
@@ -43,7 +57,26 @@ def load_builtin() -> list[dict[str, Any]]:
 
 def ensure_term_schema() -> None:
     global _SCHEMA_READY
-    if _SCHEMA_READY or not pg_configured():
+    if _SCHEMA_READY:
+        return
+    if _sqlite_mode():
+        from office_pdf_vector_sqlite import ensure_schema as ensure_vec_schema
+        ensure_vec_schema()
+        conn = _sqlite_conn()
+        for term in load_builtin():
+            conn.execute(
+                """
+                INSERT INTO finance_terms (en_key, en, zh, forbidden, keep_en)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(en_key) DO UPDATE SET
+                    en=excluded.en, zh=excluded.zh, forbidden=excluded.forbidden, keep_en=excluded.keep_en
+                """,
+                (term["en_key"], term["en"], term["zh"], ",".join(term["forbidden"]), 1 if term["keep"] else 0),
+            )
+        conn.commit()
+        _SCHEMA_READY = True
+        return
+    if not pg_configured():
         return
     with _conn() as conn:
         with conn.cursor() as cur:
@@ -92,9 +125,18 @@ def _split_forbidden(raw: str) -> list[str]:
 
 
 def list_project_terms(project_id: str) -> list[dict[str, Any]]:
-    if not pg_configured():
-        raise ValueError("请先配置 OFFICE_PG_URL。")
+    if not _terms_ready():
+        raise ValueError("请先配置 OFFICE_PG_URL 或使用本地 sqlite 向量库。")
     ensure_term_schema()
+    if _sqlite_mode():
+        rows = _sqlite_conn().execute(
+            "SELECT en, zh, forbidden FROM project_terms WHERE project_id = ? ORDER BY en_key",
+            (project_id,),
+        ).fetchall()
+        return [
+            {"en": row["en"], "zh": row["zh"], "forbidden": _split_forbidden(row["forbidden"])}
+            for row in rows
+        ]
     with _conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -112,8 +154,8 @@ def list_project_terms(project_id: str) -> list[dict[str, Any]]:
 
 
 def upsert_project_term(project_id: str, en: str, zh: str, forbidden: list[str] | None = None) -> dict[str, Any]:
-    if not pg_configured():
-        raise ValueError("请先配置 OFFICE_PG_URL。")
+    if not _terms_ready():
+        raise ValueError("请先配置 OFFICE_PG_URL 或使用本地 sqlite 向量库。")
     key = en_key(en)
     target = (zh or "").strip()
     if not key or not target:
@@ -122,6 +164,19 @@ def upsert_project_term(project_id: str, en: str, zh: str, forbidden: list[str] 
         raise ValueError("术语过长。")
     banned = [item.strip() for item in (forbidden or []) if item and item.strip()]
     ensure_term_schema()
+    if _sqlite_mode():
+        conn = _sqlite_conn()
+        conn.execute(
+            """
+            INSERT INTO project_terms (project_id, en_key, en, zh, forbidden)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(project_id, en_key) DO UPDATE SET
+                en=excluded.en, zh=excluded.zh, forbidden=excluded.forbidden
+            """,
+            (project_id, key, en.strip(), target, ",".join(banned)),
+        )
+        conn.commit()
+        return {"en": en.strip(), "zh": target, "forbidden": banned}
     with _conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -138,9 +193,17 @@ def upsert_project_term(project_id: str, en: str, zh: str, forbidden: list[str] 
 
 
 def delete_project_term(project_id: str, en: str) -> None:
-    if not pg_configured():
-        raise ValueError("请先配置 OFFICE_PG_URL。")
+    if not _terms_ready():
+        raise ValueError("请先配置 OFFICE_PG_URL 或使用本地 sqlite 向量库。")
     ensure_term_schema()
+    if _sqlite_mode():
+        conn = _sqlite_conn()
+        conn.execute(
+            "DELETE FROM project_terms WHERE project_id = ? AND en_key = ?",
+            (project_id, en_key(en)),
+        )
+        conn.commit()
+        return
     with _conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -151,12 +214,28 @@ def delete_project_term(project_id: str, en: str) -> None:
 
 
 def project_term_rows(project_id: str) -> list[dict[str, Any]]:
-    if not project_id or not pg_configured():
+    if not project_id or not _terms_ready():
         return []
     try:
         ensure_term_schema()
     except Exception:
         return []
+    if _sqlite_mode():
+        rows = _sqlite_conn().execute(
+            "SELECT en, en_key, zh, forbidden FROM project_terms WHERE project_id = ?",
+            (project_id,),
+        ).fetchall()
+        return [
+            {
+                "en": row["en"],
+                "en_key": row["en_key"],
+                "zh": row["zh"],
+                "forbidden": _split_forbidden(row["forbidden"]),
+                "keep": False,
+                "source": "project",
+            }
+            for row in rows
+        ]
     with _conn() as conn:
         with conn.cursor() as cur:
             cur.execute(

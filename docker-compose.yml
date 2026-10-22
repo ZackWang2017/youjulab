@@ -1,7 +1,7 @@
 name: youjulab
 
-# 数据库口令只放在 Compose 插值里，避免把本机 .env 的 127.0.0.1 地址带进容器。
-# 口令请使用 URL 安全字符。修改口令后需要删除对应数据卷再初始化。
+# 服务器精简栈：Postgres + mcp-server + Ollama + nginx（HTTP / IP）。
+# 证书相关脚本见 deploy/certbot/（当前默认仅 HTTP）。
 
 services:
   postgres:
@@ -21,23 +21,11 @@ services:
       start_period: 10s
     restart: unless-stopped
 
-  mongo:
-    image: mongo:7
-    environment:
-      MONGO_INITDB_ROOT_USERNAME: ${MONGO_USER:-youju}
-      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD:-youju-dev-change-me}
+  ollama:
+    image: ollama/ollama:latest
     volumes:
-      - mongo_data:/data/db
-    healthcheck:
-      test:
-        [
-          "CMD-SHELL",
-          "mongosh --quiet -u \"$$MONGO_INITDB_ROOT_USERNAME\" -p \"$$MONGO_INITDB_ROOT_PASSWORD\" --authenticationDatabase admin --eval 'db.adminCommand({ ping: 1 })'",
-        ]
-      interval: 5s
-      timeout: 5s
-      retries: 20
-      start_period: 15s
+      - ollama_data:/root/.ollama
+    # 不对外暴露；拉模型：docker compose exec ollama ollama pull bge-m3
     restart: unless-stopped
 
   mcp-server:
@@ -61,11 +49,18 @@ services:
       OFFICE_PG_URL: postgresql://${POSTGRES_USER:-youju}:${POSTGRES_PASSWORD:-youju-dev-change-me}@postgres:5432/office_vectors
       FINANCE_PDF_ROOT: /app/data
       MCP_ACCESS_TOKEN: ${MCP_ACCESS_TOKEN:-invpdevstatic32tokenpleasechange}
+      ACCOUNT_JWT_SECRET: ${ACCOUNT_JWT_SECRET:-account-dev-secret-please-change}
+      EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-http://ollama:11434}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-bge-m3}
+      EMBEDDING_DIM: ${EMBEDDING_DIM:-1024}
+      APP_VERSION: ${APP_VERSION:-0.1.0}
     volumes:
       - mcp_data:/app/data
     depends_on:
       postgres:
         condition: service_healthy
+      ollama:
+        condition: service_started
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
       interval: 10s
@@ -74,77 +69,26 @@ services:
       start_period: 25s
     restart: unless-stopped
 
-  office-backend:
+  nginx:
     build:
       context: .
-      dockerfile: deploy/Dockerfile.office
-    env_file:
-      - path: .env
-        required: false
-    environment:
-      OFFICE_API_HOST: 0.0.0.0
-      OFFICE_API_PORT: "8100"
-      OFFICE_MONGO_URL: mongodb://${MONGO_USER:-youju}:${MONGO_PASSWORD:-youju-dev-change-me}@mongo:27017/${OFFICE_MONGO_DB:-office}?authSource=admin
-      OFFICE_MONGO_DB: ${OFFICE_MONGO_DB:-office}
-      OFFICE_PG_URL: postgresql://${POSTGRES_USER:-youju}:${POSTGRES_PASSWORD:-youju-dev-change-me}@postgres:5432/office_vectors
-      OFFICE_FILE_ROOT: /data/office-files
-      FINANCE_MCP_BASE_URL: http://mcp-server:8000
-      OFFICE_EMBEDDING_BASE_URL: ${DOCKER_EMBEDDING_BASE_URL:-http://host.docker.internal:11434}
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    volumes:
-      - office_files:/data/office-files
-    depends_on:
-      mongo:
-        condition: service_healthy
-      postgres:
-        condition: service_healthy
-      mcp-server:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8100/health')"]
-      interval: 10s
-      timeout: 5s
-      retries: 18
-      start_period: 20s
-    restart: unless-stopped
-
-  web:
-    build:
-      context: .
-      dockerfile: deploy/Dockerfile.web
-    environment:
-      MCP_ACCESS_TOKEN: ${MCP_ACCESS_TOKEN:-invpdevstatic32tokenpleasechange}
+      dockerfile: deploy/Dockerfile.nginx
     ports:
       - "${WEB_HTTP_PORT:-80}:80"
-      - "${WEB_HTTPS_PORT:-443}:443"
     volumes:
-      - ${SSL_CERT_DIR:-./deploy/certs}:/etc/nginx/certs
-      - ./deploy/certbot-www:/var/www/certbot:ro
-      - ./deploy/nginx/default.conf.template:/etc/nginx/templates/default.conf.template:ro
+      - ./deploy/nginx/mcp.conf.template:/etc/nginx/templates/default.conf.template:ro
     depends_on:
-      office-backend:
-        condition: service_healthy
       mcp-server:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/office/health"]
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/health"]
       interval: 10s
       timeout: 5s
       retries: 18
       start_period: 10s
     restart: unless-stopped
 
-  ollama:
-    profiles: ["embedding"]
-    image: ollama/ollama:latest
-    volumes:
-      - ollama_data:/root/.ollama
-    restart: unless-stopped
-
 volumes:
   postgres_data:
-  mongo_data:
-  office_files:
   mcp_data:
   ollama_data:

@@ -619,6 +619,11 @@ def _render_overview(portfolio: dict, rows: list[dict], *, refresh_live: bool) -
     rendered: list[dict] = []
     total_value_cny = ZERO
     total_cost_cny = ZERO
+    # 组合级涨跌：由各标的市值与涨跌幅反推「上一收盘 / 年初」市值后加总
+    day_change_cny = ZERO
+    year_change_cny = ZERO
+    had_day_change = False
+    had_year_change = False
     for h in rows:
         currency = h["currency"]
         shares = Decimal(h["shares"])
@@ -660,6 +665,12 @@ def _render_overview(portfolio: dict, rows: list[dict], *, refresh_live: bool) -
         cost_cny = cost * rate
         if market_value_cny is not None:
             total_value_cny += market_value_cny
+            if change_pct is not None and change_pct > -ONE:
+                day_change_cny += market_value_cny * change_pct / (ONE + change_pct)
+                had_day_change = True
+            if year_change_pct is not None and year_change_pct > -ONE:
+                year_change_cny += market_value_cny * year_change_pct / (ONE + year_change_pct)
+                had_year_change = True
         total_cost_cny += cost_cny
         rendered.append(
             {
@@ -709,11 +720,18 @@ def _render_overview(portfolio: dict, rows: list[dict], *, refresh_live: bool) -
         key=lambda i: _CASH_ORDER.index(i["currency"]) if i["currency"] in _CASH_ORDER else 9,
     )
     total_profit = total_value_cny - total_cost_cny
+    day_base = total_value_cny - day_change_cny
+    year_base = total_value_cny - year_change_cny
     summary = {
         "total_market_value_cny": _q(total_value_cny),
         "total_cost_cny": _q(total_cost_cny),
         "total_profit_cny": _q(total_profit),
         "overall_return_rate": _q(total_profit / total_cost_cny) if total_cost_cny > 0 else None,
+        # 组合市值相对上一收盘的增加额与涨跌幅（含现金拖累）
+        "total_change_cny": _q(day_change_cny) if had_day_change else None,
+        "total_change_pct": _q(day_change_cny / day_base, Q6) if had_day_change and day_base > 0 else None,
+        # 组合市值相对年初（或上年末收盘）的涨跌幅
+        "total_year_change_pct": _q(year_change_cny / year_base, Q6) if had_year_change and year_base > 0 else None,
         "total_target_allocation_pct": _q(total_target, Q2),
         "total_current_allocation_pct": _q(total_current, Q2),
         "holdings_count": len(rendered),

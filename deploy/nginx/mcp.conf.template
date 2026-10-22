@@ -1,0 +1,33 @@
+# mcp 服务器反代：HTTP + IP（server_name _）。桌面 MCP_REMOTE_BASE_URL=http://SERVER_IP
+server {
+    listen 80 default_server;
+    server_name _;
+
+    client_max_body_size 40m;
+    # 容器重建后 IP 会变，启动时解析一次会打到旧地址。
+    resolver 127.0.0.11 valid=10s ipv6=off;
+
+    gzip on;
+    gzip_comp_level 5;
+    gzip_min_length 256;
+    gzip_vary on;
+    gzip_proxied any;
+    gzip_types application/json text/plain;
+
+    location / {
+        set $mcp_upstream mcp-server:8000;
+        proxy_pass http://$mcp_upstream;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        # 透传客户端 Authorization（用户 JWT），勿覆盖成静态 MCP_ACCESS_TOKEN。
+        proxy_set_header Authorization $http_authorization;
+        proxy_set_header Connection "";
+        proxy_buffering off;
+        proxy_request_buffering off;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+        client_body_buffer_size 4m;
+    }
+}

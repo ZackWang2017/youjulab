@@ -1,4 +1,4 @@
-"""办公 PDF 向量索引：pymupdf 仅在未就绪/文件变更时解析一次，写入 Postgres/pgvector。"""
+"""办公 PDF 向量索引：pymupdf 切块后写入 pgvector 或本机 sqlite-vec。"""
 from __future__ import annotations
 
 import hashlib
@@ -11,7 +11,7 @@ import pymupdf
 import psycopg
 from psycopg.rows import dict_row
 
-from config import embedding_dim, pg_url
+from config import embedding_dim, pg_url, vector_backend
 from office_pdf_embed import EmbedError, embed_texts
 
 CHUNK_SIZE = 1000
@@ -27,7 +27,13 @@ EmbedFn = Callable[[list[str]], list[list[float]]]
 
 
 def pg_configured() -> bool:
+    if vector_backend() == "sqlite":
+        return True
     return bool(pg_url())
+
+
+def _use_sqlite() -> bool:
+    return vector_backend() == "sqlite"
 
 
 def _conn():
@@ -38,6 +44,10 @@ def _conn():
 
 
 def ensure_schema() -> None:
+    if _use_sqlite():
+        from office_pdf_vector_sqlite import ensure_schema as ensure_sqlite_schema
+        ensure_sqlite_schema()
+        return
     global _SCHEMA_READY
     if _SCHEMA_READY:
         return
@@ -197,6 +207,9 @@ def extract_layout_blocks(path: Path) -> list[dict[str, Any]]:
 
 
 def get_index_status(document_id: str) -> dict[str, Any]:
+    if _use_sqlite():
+        from office_pdf_vector_sqlite import get_index_status as sqlite_status
+        return sqlite_status(document_id)
     ensure_schema()
     with _conn() as conn:
         with conn.cursor() as cur:
@@ -217,6 +230,10 @@ def get_index_status(document_id: str) -> dict[str, Any]:
 
 
 def delete_document_index(document_id: str) -> None:
+    if _use_sqlite():
+        from office_pdf_vector_sqlite import delete_document_index as sqlite_delete
+        sqlite_delete(document_id)
+        return
     if not pg_configured():
         return
     ensure_schema()
@@ -228,6 +245,9 @@ def delete_document_index(document_id: str) -> None:
 
 def ensure_layout_blocks(document_id: str, path: str | Path, version: int = 1) -> list[dict[str, Any]]:
     """Lazily persist layout metadata; this path never generates embeddings."""
+    if _use_sqlite():
+        from office_pdf_vector_sqlite import ensure_layout_blocks as sqlite_layout
+        return sqlite_layout(document_id, path, version)
     ensure_schema()
     status = get_index_status(document_id)
     if status.get("status") != "ready":
@@ -275,6 +295,9 @@ def ensure_index(
     force: bool = False,
 ) -> dict[str, Any]:
     """未就绪或文件变更时解析入库；已就绪且未变则直接返回。"""
+    if _use_sqlite():
+        from office_pdf_vector_sqlite import ensure_index as sqlite_ensure
+        return sqlite_ensure(document_id=document_id, user_id=user_id, path=path, embed=embed, force=force)
     ensure_schema()
     pdf_path = Path(path)
     if not pdf_path.is_file():
@@ -380,6 +403,9 @@ def search_chunks(
     top_k: int = DEFAULT_TOP_K,
     embed: EmbedFn | None = None,
 ) -> list[dict[str, Any]]:
+    if _use_sqlite():
+        from office_pdf_vector_sqlite import search_chunks as sqlite_search
+        return sqlite_search(document_id=document_id, query=query, top_k=top_k, embed=embed)
     ensure_schema()
     ask = (query or "").strip()
     if not ask:

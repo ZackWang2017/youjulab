@@ -129,7 +129,7 @@
   background: #2b7cff;
 }
 #pdf .pdf-pane.is-active {
-  box-shadow: inset 0 0 0 2px #168274;
+  box-shadow: inset 0 0 0 2px #2b7cff;
 }
 #pdf .pdf-pane[hidden],
 #pdf .pdf-split[hidden] { display: none !important; }
@@ -142,15 +142,16 @@
   touch-action: pan-x pan-y;
   outline: none;
 }
+/* 仅盖住 #pdf 工作区并在其中居中，不挡表格/文档等其它页 */
 #pdf .pdf-download {
   position: absolute;
   inset: 0;
-  z-index: 12;
+  z-index: 20;
   display: flex;
   align-items: center;
   justify-content: center;
   padding: 24px;
-  background: rgba(248, 250, 249, 0.88);
+  background: rgba(248, 250, 249, 0.72);
   backdrop-filter: blur(2px);
 }
 #pdf .pdf-download[hidden] { display: none !important; }
@@ -160,7 +161,7 @@
   border: 1px solid #d5e0dc;
   border-radius: 10px;
   background: #fff;
-  box-shadow: 0 12px 32px rgba(24, 40, 36, 0.1);
+  box-shadow: 0 12px 32px rgba(24, 40, 36, 0.12);
 }
 #pdf .pdf-download-title {
   margin: 0 0 6px;

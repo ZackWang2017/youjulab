@@ -61,6 +61,11 @@ for _layer in (
     "portfolio-service/repository",
     "portfolio-service/service",
     "portfolio-service/endpoints",
+    "account-service/repository",
+    "account-service/service",
+    "account-service/endpoints",
+    "embedding-service/service",
+    "embedding-service/endpoints",
 ):
     sys.path.insert(0, str(HERE / _layer))
 
@@ -83,6 +88,7 @@ import preset_news_endpoint  # noqa: E402
 import feed_endpoint  # noqa: E402
 import portfolio_endpoint  # noqa: E402
 from access_token import bearer_matches, bearer_token, is_user_office_path, reset_incoming_access_token, set_incoming_access_token  # noqa: E402
+from account_jwt import reset_claims, set_claims, verify  # noqa: E402
 from dotenv import load_dotenv  # noqa: E402
 
 load_dotenv(HERE.parent / ".env")
@@ -128,7 +134,7 @@ def _run_http() -> None:
 
     _CORS = {
         "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+        "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
         "Access-Control-Allow-Headers": "Content-Type, Authorization",
     }
     register_sheet_routes(app, _CORS)
@@ -143,18 +149,58 @@ def _run_http() -> None:
     async def health(_request):
         return JSONResponse({"ok": True})
 
+    async def version(_request):
+        return JSONResponse({"version": os.environ.get("APP_VERSION", "0.1.0")})
+
     app.add_route("/health", health, methods=["GET"])
+    app.add_route("/version.json", version, methods=["GET"])
+
+    _PUBLIC = {
+        "/health",
+        "/version.json",
+        "/api/account/health",
+        "/api/account/captcha",
+        "/api/account/register",
+        "/api/account/login",
+    }
+    _JWT_PREFIXES = (
+        "/api/portfolio",
+        "/api/embeddings",
+        "/api/scheduler",
+        "/api/account/me",
+        "/api/account/password",
+        "/api/account/access-token",
+        "/api/financial/securities",
+        "/api/local-tools/weread",
+        "/api/external-tools/invoke",
+        "/api/local-tools/read-page",
+    )
+
+    def _needs_jwt(path: str) -> bool:
+        return any(path == prefix or path.startswith(prefix + "/") or path.startswith(prefix) for prefix in _JWT_PREFIXES)
 
     async def guard(request, call_next):
-        if request.url.path == "/health":
+        path = request.url.path
+        # 预检不能进业务路由，否则公开的 login/register 会按空 body 校验验证码并返回 400。
+        if request.method == "OPTIONS":
+            return JSONResponse({}, headers=_CORS)
+        if path in _PUBLIC:
             response = await call_next(request)
             response.headers.update(_CORS)
             return response
-        # CORS 预检
-        if request.method == "OPTIONS":
-            return JSONResponse({}, headers=_CORS)
         header = request.headers.get("authorization", "")
         token = bearer_token(header)
+        if _needs_jwt(path):
+            claims = verify(token)
+            if not claims:
+                return JSONResponse({"error": "unauthorized"}, status_code=401, headers=_CORS)
+            saved = set_claims(claims)
+            try:
+                response = await call_next(request)
+            finally:
+                reset_claims(saved)
+            response.headers.update(_CORS)
+            return response
         if is_user_office_path(request.url.path):
             if not token:
                 return JSONResponse({"error": "unauthorized"}, status_code=401, headers=_CORS)
@@ -185,6 +231,12 @@ def _run_http() -> None:
     feed_endpoint.register_routes(app, _CORS)
     portfolio_endpoint.register_routes(app, _CORS)
     portfolio_endpoint.mount_scheduler(app)
+    import account_endpoint  # noqa: E402
+    import embedding_endpoint  # noqa: E402
+    account_endpoint.register_routes(app, _CORS)
+    embedding_endpoint.register_routes(app, _CORS)
+    external_tools.register_http(app, _CORS)
+    website_crawler_endpoint.register_http(app, _CORS)
 
     host = os.environ.get("FINANCE_MCP_HOST", "0.0.0.0")
     port = int(os.environ.get("FINANCE_MCP_PORT", "8000"))
@@ -205,7 +257,9 @@ def _run_http() -> None:
     print(f"weread shelf: GET http://{host}:{port}/api/local-tools/weread-shelf", file=sys.stderr)
     print(f"weread login: POST/GET http://{host}:{port}/api/local-tools/weread-login", file=sys.stderr)
     print(f"feed: POST http://{host}:{port}/api/local-tools/feed", file=sys.stderr)
-    print(f"portfolio: GET/POST http://{host}:{port}/api/portfolio/portfolios (header X-Office-User-Id)", file=sys.stderr)
+    print(f"account: http://{host}:{port}/api/account/{{health,captcha,register,login}}", file=sys.stderr)
+    print(f"embeddings: POST http://{host}:{port}/api/embeddings", file=sys.stderr)
+    print(f"portfolio: GET/POST http://{host}:{port}/api/portfolio/portfolios (Authorization: Bearer JWT)", file=sys.stderr)
     print(f"scheduler: GET http://{host}:{port}/api/scheduler/tasks, POST /api/scheduler/tasks/{{name}}/run", file=sys.stderr)
     uvicorn.run(app, host=host, port=port, log_level="info")
 

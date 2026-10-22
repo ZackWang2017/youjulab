@@ -1,4 +1,4 @@
-import { getLocalPdf, putLocalPdf } from '../local-store';
+import { remoteToken } from '../remote/client';
 
 const TOKEN_KEY = 'office-token';
 
@@ -25,7 +25,7 @@ export class AuthError extends Error {
 export type PdfFileProgress = {
   loaded: number;
   total: number | null;
-  source: 'cache' | 'network';
+  source: 'network' | 'cache';
 };
 
 export type PdfFileOptions = {
@@ -33,22 +33,10 @@ export type PdfFileOptions = {
   /** 列表里的 size，Content-Length 缺失时用作进度总量。 */
   expectedSize?: number | null;
   onProgress?: (progress: PdfFileProgress) => void;
-  /** 本地有副本时立即回调（可能版本偏旧），便于先打开再后台校验。 */
-  onLocal?: (bytes: ArrayBuffer, revision: number) => void | Promise<void>;
 };
 
 function token() {
   return localStorage.getItem(TOKEN_KEY);
-}
-
-function notifyProgress(waiters: Iterable<PdfFileOptions>, progress: PdfFileProgress) {
-  for (const waiter of waiters) waiter.onProgress?.(progress);
-}
-
-async function notifyLocal(waiters: Iterable<PdfFileOptions>, bytes: ArrayBuffer, revision: number) {
-  for (const waiter of waiters) {
-    try { await waiter.onLocal?.(bytes, revision); } catch { /* 打开失败由调用方处理 */ }
-  }
 }
 
 async function readBody(
@@ -94,33 +82,57 @@ type PdfInflight = {
 };
 
 const pdfInflight = new Map<string, PdfInflight>();
+/** 已下载的 PDF 字节，按 id:revision 复用，切换回来时直接打开。 */
+const pdfBytesCache = new Map<string, ArrayBuffer>();
+const PDF_CACHE_LIMIT = 8;
+
+function pdfCacheKey(id: string, revision?: number) {
+  return `${id}:${revision ?? 0}`;
+}
+
+function clonePdfBuffer(data: ArrayBuffer) {
+  return data.slice(0);
+}
+
+function rememberPdfBytes(id: string, revision: number | undefined, data: ArrayBuffer) {
+  const key = pdfCacheKey(id, revision);
+  if (!pdfBytesCache.has(key) && pdfBytesCache.size >= PDF_CACHE_LIMIT) {
+    const oldest = pdfBytesCache.keys().next().value;
+    if (oldest) pdfBytesCache.delete(oldest);
+  }
+  pdfBytesCache.set(key, clonePdfBuffer(data));
+}
+
+function cachedPdfBytes(id: string, revision?: number) {
+  const hit = pdfBytesCache.get(pdfCacheKey(id, revision));
+  return hit ? clonePdfBuffer(hit) : null;
+}
+
+export function clearPdfFileCache(id?: string) {
+  if (!id) {
+    pdfBytesCache.clear();
+    return;
+  }
+  for (const key of [...pdfBytesCache.keys()]) {
+    if (key.startsWith(`${id}:`)) pdfBytesCache.delete(key);
+  }
+}
 
 async function fetchPdfFile(id: string, waiters: Set<PdfFileOptions>): Promise<ArrayBuffer | null> {
-  const preferredRevision = [...waiters].map(item => item.revision).find(item => item !== undefined);
   const expectedSize = [...waiters].map(item => item.expectedSize).find(item => item != null && item > 0);
-
-  let local: Awaited<ReturnType<typeof getLocalPdf>> = null;
-  try { local = await getLocalPdf(id, expectedSize); } catch { local = null; }
-
-  if (local) {
-    notifyProgress(waiters, {
-      loaded: local.bytes.byteLength,
-      total: local.bytes.byteLength,
-      source: 'cache',
-    });
-    // 不 await：避免 onLocal 里打开 PDF 卡住整次下载；调用方仍会用返回值再打开一次。
-    void notifyLocal(waiters, local.bytes, local.revision);
-    if (preferredRevision === undefined || local.revision === preferredRevision) {
-      return local.bytes.slice(0);
+  const revision = [...waiters].map(item => item.revision).find(item => item != null);
+  const cached = cachedPdfBytes(id, revision);
+  if (cached) {
+    for (const waiter of waiters) {
+      waiter.onProgress?.({ loaded: cached.byteLength, total: cached.byteLength, source: 'cache' });
     }
+    return cached;
   }
-
   let response: Response;
   try {
     response = await office.request(`/assets/${id}/file`, { cache: 'no-store' });
   } catch (e) {
     if (e instanceof AuthError) throw e;
-    if (local) return local.bytes;
     throw new Error('无法连接工作区服务，请检查 office-backend 是否启动。');
   }
   if (response.status === 404) return null;
@@ -129,16 +141,17 @@ async function fetchPdfFile(id: string, waiters: Set<PdfFileOptions>): Promise<A
     try { data = await response.json(); } catch { /* ignore */ }
     throw new Error(data.error || `HTTP ${response.status}`);
   }
-
   const bytes = await readBody(response, expectedSize, (loaded, total) => {
-    notifyProgress(waiters, { loaded, total, source: 'network' });
+    for (const waiter of waiters) waiter.onProgress?.({ loaded, total, source: 'network' });
   });
-  const headerRev = Number(response.headers.get('X-Asset-Revision'));
-  const storedRev = Number.isFinite(headerRev) ? headerRev : preferredRevision;
-  if (storedRev !== undefined) {
-    try { await putLocalPdf(id, storedRev, bytes.slice(0)); } catch { /* 配额不足时仍返回本次内容 */ }
-  }
-  return bytes;
+  rememberPdfBytes(id, revision, bytes);
+  return clonePdfBuffer(bytes);
+}
+
+function officeApiBase() {
+  const desktop = typeof window !== 'undefined' ? window.youju?.officeApiBase : '';
+  if (desktop) return desktop.replace(/\/$/, '');
+  return '/office';
 }
 
 export const office = {
@@ -152,7 +165,9 @@ export const office = {
     const headers = new Headers(init.headers);
     const current = token();
     if (current) headers.set('Authorization', `Bearer ${current}`);
-    const response = await fetch(`/office${path}`, { ...init, headers });
+    const remote = remoteToken();
+    if (remote) headers.set('X-Remote-Token', remote);
+    const response = await fetch(`${officeApiBase()}${path}`, { ...init, headers });
     if (response.status === 401) {
       this.setToken(null);
       throw new AuthError();
@@ -220,36 +235,16 @@ export const office = {
     }
     entry.waiters.add(opts);
     try {
-      const local = await getLocalPdf(id, opts.expectedSize);
-      if (local) {
-        opts.onProgress?.({
-          loaded: local.bytes.byteLength,
-          total: local.bytes.byteLength,
-          source: 'cache',
-        });
-        void opts.onLocal?.(local.bytes.slice(0), local.revision);
-      }
-    } catch { /* ignore */ }
-    try {
       return await entry.promise;
     } finally {
       entry.waiters.delete(opts);
     }
   },
-  /** 后台预热 PDF 本地缓存，不阻塞 UI。 */
-  prefetchFile(id: string, revision?: number, expectedSize?: number | null) {
-    void this.file(id, { revision, expectedSize }).catch(() => {});
-  },
   async upload<T extends { id?: string; revision?: number } = { id: string; revision: number }>(id: string, file: File) {
-    const bytes = await file.arrayBuffer();
     const body = new FormData();
-    body.append('file', new Blob([bytes], { type: file.type || 'application/pdf' }), file.name);
-    const saved = await this.json<T>(`/assets/${id}/file`, { method: 'PUT', body });
-    const savedId = saved.id || id;
-    if (typeof saved.revision === 'number') {
-      try { await putLocalPdf(savedId, saved.revision, bytes); } catch { /* ignore */ }
-    }
-    return saved;
+    body.append('file', file);
+    clearPdfFileCache(id);
+    return this.json<T>(`/assets/${id}/file`, { method: 'PUT', body });
   },
   async stream(path: string, body: unknown, onEvent: (event: Record<string, any>) => void) {
     const headers = new Headers({ 'Content-Type': 'application/json' });

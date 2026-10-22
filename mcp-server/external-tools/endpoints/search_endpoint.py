@@ -45,6 +45,38 @@ def register_tools(mcp) -> None:
         return search_service.quota_status()
 
 
+def register_http(app, cors: dict) -> None:
+    """供 office-backend 用用户 JWT 调用搜索，避免办公进程直接 import 本服务。"""
+    import json
+
+    from starlette.requests import Request
+    from starlette.responses import JSONResponse
+
+    async def invoke(request: Request):
+        try:
+            body = json.loads(await request.body() or b"{}")
+        except ValueError:
+            return JSONResponse({"error": "请求体不是合法 JSON。"}, status_code=400, headers=cors)
+        name = str(body.get("name") or "")
+        query = str(body.get("query") or "")
+        num = int(body.get("num") or 5)
+        topic = str(body.get("topic") or "")
+        try:
+            if name == "baidu_web_search":
+                payload = search_service.baidu_web_search(query, num=num, topic=topic)
+            elif name == "baidu_baike_search":
+                payload = search_service.baidu_baike_search(query, num=num)
+            elif name == "google_web_search":
+                payload = search_service.google_web_search(query, num=num, topic=topic)
+            else:
+                return JSONResponse({"error": "未知搜索工具。"}, status_code=400, headers=cors)
+        except Exception as exc:  # noqa: BLE001
+            return JSONResponse({"error": str(exc)}, status_code=502, headers=cors)
+        return JSONResponse(payload, headers=cors)
+
+    app.add_route("/api/external-tools/invoke", invoke, methods=["POST", "OPTIONS"])
+
+
 def mount_external_mcp(host_app, external_mcp) -> None:
     """把外部工具 MCP 挂到同一进程的 /mcp/external-tools。"""
     child_app = external_mcp.streamable_http_app()

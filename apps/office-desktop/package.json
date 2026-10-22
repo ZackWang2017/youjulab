@@ -1,0 +1,59 @@
+{
+  "name": "youjulab-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "youjulab Electron shell — local SqliteStore + remote embedding/portfolio",
+  "main": "main.mjs",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --dev",
+    "build:sidecar": "bash sidecar/build.sh",
+    "pack": "electron-builder --dir",
+    "pack:mac": "electron-builder --mac --dir",
+    "dist": "electron-builder --mac --win",
+    "dist:mac": "electron-builder --mac dmg",
+    "dist:mac:full": "npm run build:sidecar && npm run dist:mac"
+  },
+  "build": {
+    "appId": "com.youjulab.desktop",
+    "productName": "youjulab",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "main.mjs",
+      "preload.cjs",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../office-copilot-web/dist",
+        "to": "web"
+      },
+      {
+        "from": "sidecar/dist/youju-office-backend",
+        "to": "sidecar/youju-office-backend",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "mac": {
+      "target": [
+        "dmg",
+        "dir"
+      ],
+      "category": "public.app-category.productivity",
+      "identity": null
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ]
+    }
+  },
+  "devDependencies": {
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8"
+  }
+}

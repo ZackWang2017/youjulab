@@ -270,6 +270,34 @@ class OfficeApiTests(unittest.TestCase):
         self.assertEqual(me["last_assets"]["sheet"], extra["id"])
         self.assertEqual(len(assets) + 1, 2)
 
+    def test_select_project_restores_that_projects_last_assets(self):
+        data = self.auth("switch-project@example.com")
+        token = {"Authorization": f"Bearer {data['token']}"}
+        first = data["user"]["last_project_id"]
+        first_sheet = data["user"]["last_assets"]["sheet"]
+        # 写入一号项目的最近打开，便于之后按项目恢复
+        self.client.post(f"/assets/{first_sheet}/select", headers=token)
+        second = self.client.post("/projects", headers=token, json={"name": "二号项目"}).json()
+        self.client.post(f"/projects/{second['id']}/select", headers=token)
+        second_extra = self.client.post(
+            f"/projects/{second['id']}/assets", headers=token,
+            json={"kind": "sheet", "name": "二号专用表"},
+        ).json()
+        self.client.post(f"/assets/{second_extra['id']}/select", headers=token)
+        self.assertEqual(
+            self.client.get("/auth/me", headers=token).json()["last_assets"]["sheet"],
+            second_extra["id"],
+        )
+
+        # 回到一号项目：应恢复一号项目最近打开的表格，而不是继续停在二号项目的表
+        restored = self.client.post(f"/projects/{first}/select", headers=token).json()
+        self.assertEqual(restored["last_project_id"], first)
+        self.assertEqual(restored["last_assets"]["sheet"], first_sheet)
+
+        # 再进二号项目：应恢复二号项目上次打开的「二号专用表」
+        again = self.client.post(f"/projects/{second['id']}/select", headers=token).json()
+        self.assertEqual(again["last_assets"]["sheet"], second_extra["id"])
+
     def test_recent_assets_follow_opening_order_and_include_project_name(self):
         data = self.auth("recent@example.com")
         token = {"Authorization": f"Bearer {data['token']}"}
@@ -1139,39 +1167,6 @@ class OfficeApiTests(unittest.TestCase):
             self.assertEqual(count, 0)
         finally:
             empty.close()
-
-    def test_portfolio_gateway_forwards_with_user_id(self):
-        import server as server_module
-
-        data = self.auth("holder@example.com")
-        headers = {"Authorization": f"Bearer {data['token']}"}
-        calls = []
-
-        async def fake_forward(method, path, *, user_id, query="", body=b""):
-            calls.append((method, path, user_id, query, body))
-            return 200, {"portfolios": [{"id": 1, "name": "A"}]}
-
-        with patch.object(server_module, "forward_portfolio", fake_forward):
-            listed = self.client.get("/portfolio/portfolios?x=1", headers=headers)
-            created = self.client.post("/portfolio/portfolios", headers=headers, json={"name": "A"})
-        self.assertEqual(listed.status_code, 200)
-        self.assertEqual(listed.json()["portfolios"][0]["name"], "A")
-        self.assertEqual(calls[0][:4], ("GET", "portfolios", data["user"]["id"], "x=1"))
-        self.assertEqual(calls[1][0], "POST")
-        self.assertEqual(json.loads(calls[1][4]), {"name": "A"})
-        self.assertEqual(created.status_code, 200)
-        self.assertEqual(self.client.get("/portfolio/portfolios").status_code, 401)
-
-    def test_portfolio_gateway_only_allows_portfolio_paths(self):
-        import portfolio_proxy
-        from fastapi import HTTPException
-
-        with self.assertRaises(HTTPException):
-            portfolio_proxy._target("documents/1")
-        self.assertTrue(portfolio_proxy._target("portfolios/3/stats").endswith("/api/portfolio/portfolios/3/stats"))
-        self.assertTrue(portfolio_proxy._target("overview/holdings").endswith("/api/portfolio/overview/holdings"))
-        self.assertTrue(portfolio_proxy._target("scheduler/tasks").endswith("/api/scheduler/tasks"))
-
 
 if __name__ == "__main__":
     unittest.main()

@@ -5,7 +5,7 @@ export const OFFICE_CSP = [
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data: blob:",
   "font-src 'self' data:",
-  "connect-src 'self' ws: wss: http://127.0.0.1:* http://localhost:*",
+  "connect-src 'self' ws: wss: http://127.0.0.1:* http://localhost:* https:",
   "worker-src 'self' blob:",
   "media-src 'self' blob:",
   "frame-src https://embed.diagrams.net https://app.diagrams.net",

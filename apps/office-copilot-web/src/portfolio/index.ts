@@ -115,8 +115,20 @@ export function mountPortfolio(section: HTMLElement, onError: (error: unknown) =
         : `${head}<div class="portfolio-state"><p>暂无持仓</p><button type="button" data-buy><i data-lucide="plus"></i>新增买入 / 存入现金</button></div>`;
     }
     const body = rows.map(h => holdingRow(h, all)).join('');
+    const dayChange = summary?.total_change_cny ?? null;
+    const dayPct = summary?.total_change_pct ?? null;
+    const yearPct = summary?.total_year_change_pct ?? null;
+    const dayCell = summary && dayPct !== null
+      ? `<td class="num ${signClass(dayPct)}">¥${formatMoney(dayChange, 2)}<div class="portfolio-sub">${formatPercent(dayPct, 2, true)}</div></td>`
+      : '<td class="num">—</td>';
+    const yearCell = summary && yearPct !== null
+      ? `<td class="num ${signClass(yearPct)}">${formatPercent(yearPct, 2, true)}</td>`
+      : '<td class="num">—</td>';
     const foot = summary ? `<tfoot><tr>
-      <td colspan="${all ? 8 : 7}">合计（折算人民币）<small class="portfolio-muted">成本 ¥${formatMoney(summary.total_cost_cny, 2)}</small></td>
+      <td colspan="${all ? 5 : 4}">合计（折算人民币）<small class="portfolio-muted">成本 ¥${formatMoney(summary.total_cost_cny, 2)}</small></td>
+      ${dayCell}
+      ${yearCell}
+      <td></td>
       <td class="num strong">¥${formatMoney(summary.total_market_value_cny, 2)}</td>
       <td class="num ${signClass(summary.total_profit_cny)}">¥${formatMoney(summary.total_profit_cny, 2)}</td>
       <td class="num ${signClass(summary.overall_return_rate)}">${formatPercent(summary.overall_return_rate)}</td>

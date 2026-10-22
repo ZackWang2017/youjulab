@@ -157,11 +157,14 @@
 .settings-close svg { width: 17px; height: 17px; }
 
 .settings-dialog-body { display: grid; grid-template-columns: 170px minmax(0, 1fr); flex: 1; min-height: 0; }
-.settings-categories { display: grid; align-content: start; gap: 4px; padding: 12px 8px; border-right: 1px solid #e4eaeb; background: #f8faf9; }
+.settings-categories { display: flex; flex-direction: column; gap: 4px; height: 100%; padding: 12px 8px; border-right: 1px solid #e4eaeb; background: #f8faf9; }
 .settings-categories button:not(#sheet button) { display: flex; width: 100%; min-height: 34px; justify-content: flex-start; gap: 8px; padding: 6px 9px; border: 1px solid transparent; border-radius: 5px; background: transparent; color: #596970; font-size: 13px; font-weight: 500; text-align: left; }
 .settings-categories button svg { width: 16px; height: 16px; color: #698078; }
 .settings-categories button.is-active:not(#sheet button) { border-color: #b9ddd7; background: #eaf6f2; color: #087f5b; font-weight: 700; }
 .settings-categories button.is-active svg { color: #087f5b; }
+.settings-categories button.settings-nav-account:not(#sheet button) { margin-top: auto; }
+.settings-categories button.settings-nav-logout:not(#sheet button) { color: #a23a3a; }
+.settings-categories button.settings-nav-account svg { color: currentColor; }
 .settings-content { min-width: 0; overflow: auto; }
 .settings-section { padding: 18px 20px 22px; }
 .settings-section-title { display: flex; align-items: flex-start; gap: 9px; margin-bottom: 14px; }
@@ -187,10 +190,13 @@
 .settings-inline-actions { display: flex; align-items: center; gap: 8px; grid-column: 1 / -1; margin-top: 2px; }
 .settings-inline-actions button:not(#sheet button) { flex: 0 0 auto; min-height: 30px; padding: 4px 9px; font-size: 12px; white-space: nowrap; }
 .settings-inline-actions p { flex: 1 1 140px; min-width: 0; color: #7c898e; font-size: 12px; line-height: 1.4; }
-.settings-inline-actions .settings-logout { color: #a23a3a; border-color: #e9c7c4; }
 .settings-inline-actions .settings-danger { color: #a23a3a; border-color: #e9c7c4; }
 
 .settings-field { display: grid; gap: 6px; }
+[data-settings-panel="local"] .settings-field { grid-template-columns: 108px minmax(0, 1fr); align-items: center; gap: 12px; margin-bottom: 10px; }
+[data-settings-panel="local"] .settings-field > span { font-size: 13px; color: #4e5961; }
+[data-settings-panel="local"] .settings-field input { width: 100%; min-width: 0; height: 32px; border: 1px solid #e4eaeb; border-radius: 4px; padding: 0 10px; background: #fff; color: #263238; font: inherit; font-size: 13px; box-shadow: none; }
+[data-settings-panel="local"] .settings-field input:focus { outline: none; border-color: #9ecfc6; }
 .settings-token-row { display: flex; gap: 7px; }
 .settings-token-row input { flex: 1; font-family: ui-monospace, SFMono-Regular, monospace; letter-spacing: .04em; }
 .settings-token-row button:not(#sheet button) { flex: 0 0 auto; min-height: 34px; padding: 5px 8px; gap: 4px; font-size: 12px; }
@@ -222,9 +228,10 @@
 @media (max-width: 620px) {
   .settings-dialog { width: min(100vw - 20px, 720px); height: min(680px, calc(100dvh - 20px)); }
   .settings-dialog-body { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); }
-  .settings-categories { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; padding: 8px; border-right: 0; border-bottom: 1px solid #e4eaeb; }
+  .settings-categories { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); height: auto; gap: 4px; padding: 8px; border-right: 0; border-bottom: 1px solid #e4eaeb; }
   .settings-categories button:not(#sheet button) { min-height: 32px; justify-content: center; padding: 5px; font-size: 12px; }
   .settings-categories button svg { display: none; }
+  .settings-categories button.settings-nav-account:not(#sheet button) { grid-column: 1 / -1; margin-top: 4px; }
   .settings-dialog-header,
   .settings-section { padding-left: 16px; padding-right: 16px; }
   .password-form,

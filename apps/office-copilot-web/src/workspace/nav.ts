@@ -5,6 +5,7 @@ import {
   placePdf, renamePdfFolder, savePdfFolders, type PdfFolder,
 } from './pdf-folders';
 import { office } from '../office-client/client';
+import { changeRemotePassword, DEFAULT_REMOTE_BASE, remoteBase, remoteToken, setRemoteBase } from '../remote/client';
 import type { Asset, Kind, Workspace } from './session';
 import { openCalcWindow } from './calc-window';
 
@@ -27,17 +28,25 @@ function kindIcon(kind: Kind) {
 export function renderAuth(root: HTMLElement) {
   root.innerHTML = `<div class="auth-page" id="auth-page">
     <form id="auth" class="auth-card">
+      <button type="button" class="auth-close" id="auth-close" title="关闭" aria-label="关闭" hidden><i data-lucide="x"></i></button>
       <h1>有据 - AI 价值投资实验室</h1>
-      <label class="field-label" for="auth-email">邮箱</label>
-      <input id="auth-email" name="email" type="email" autocomplete="username" required>
-      <label class="field-label" for="auth-password">密码</label>
-      <input id="auth-password" name="password" type="password" autocomplete="current-password" required minlength="6">
+      <label class="auth-field" for="auth-email"><span>邮箱</span><input id="auth-email" name="email" type="email" autocomplete="username"></label>
+      <label class="auth-field" for="auth-password"><span>密码</span><input id="auth-password" name="password" type="password" autocomplete="current-password" minlength="6"></label>
+      <div class="auth-field">
+        <label for="auth-captcha-code">验证码</label>
+        <div class="auth-captcha">
+          <input id="auth-captcha-code" name="captcha" autocomplete="off" inputmode="numeric" maxlength="8">
+          <img id="auth-captcha" alt="验证码，点击换一张" title="点击换一张" width="120" height="40">
+        </div>
+      </div>
+      <div id="auth-error" class="auth-error" role="alert" hidden></div>
       <div class="auth-actions">
         <button class="primary" id="auth-login" type="submit">登录</button>
         <button id="auth-register" type="button">注册</button>
+        <button id="auth-offline" type="button">离线进入</button>
       </div>
-      <div id="error" role="alert" hidden></div>
     </form>
+    <button type="button" id="auth-local-settings" class="auth-settings-link">设置</button>
   </div>`;
 }
 
@@ -49,7 +58,7 @@ export function renderChrome(root: HTMLElement) {
   </header>
   <main><div class="workspace">
     <section id="sheet" class="surface" aria-label="表格编辑器"></section>
-    <section id="document" class="surface" aria-label="文档编辑器" hidden><div class="format-bar"><button data-format="bold" title="加粗" aria-label="加粗"><i data-lucide="bold"></i></button><button data-format="italic" title="斜体" aria-label="斜体"><i data-lucide="italic"></i></button><button data-format="strike" title="删除线" aria-label="删除线"><i data-lucide="strikethrough"></i></button><button data-format="highlight" title="高亮" aria-label="高亮"><i data-lucide="highlighter"></i></button><button data-format="code" title="行内代码" aria-label="行内代码"><i data-lucide="code"></i></button><button data-format="h1" title="一级标题" aria-label="一级标题"><i data-lucide="heading-1"></i></button><button data-format="heading" title="二级标题" aria-label="二级标题"><i data-lucide="heading-2"></i></button><button data-format="h3" title="三级标题" aria-label="三级标题"><i data-lucide="heading-3"></i></button><button data-format="list" title="无序列表" aria-label="无序列表"><i data-lucide="list"></i></button><button data-format="ordered" title="有序列表" aria-label="有序列表"><i data-lucide="list-ordered"></i></button><button data-format="quote" title="引用" aria-label="引用"><i data-lucide="quote"></i></button><button data-format="codeblock" title="代码块" aria-label="代码块"><i data-lucide="square-code"></i></button><button data-format="rule" title="分隔线" aria-label="分隔线"><i data-lucide="minus"></i></button><span class="format-sep" aria-hidden="true"></span><button type="button" data-digest-job title="定时任务" aria-label="定时任务"><i data-lucide="clock"></i><span>定时任务</span></button><div class="skill-menu-wrap"><button type="button" data-my-skills title="我的技能" aria-label="我的技能" aria-haspopup="menu" aria-expanded="false"><span class="skill-tool-icon" aria-hidden="true"><svg viewBox="0 -1 738 717" fill="currentColor"><g transform="translate(0 715) scale(1 -1)"><path d="M729.08 113.84L504.32 342.24C493.72 352.84 476.62 352.84 466.01 342.24L449.64 327.19L410.87 366.43C410.87 366.43 472.91 434.57 475.96 433.18C542.11 403.68 588.97 416.94 642.78 469.3C690.17 516.69 700.18 585.09 675.53 638.84L582.73 547.71C573.39 538.36 558.21 538.36 548.93 547.71L509.36 587.21C500.02 596.55 500.02 611.74 509.36 621.08L598.04 709.16C547.07 725.34 486.76 711.42 443.74 668.4C373.48 601.06 384.29 552.94 408.61 499.32C409.61 497.07 346.38 429.53 346.38 429.53L342.2 429.53L139.06 634.14C139.06 634.14 147.94 660.91 132.69 676.22L99.82 707.64L37.58 645.4L70.45 613.99C70.45 613.99 95.44 598.74 113.47 607.49L311.71 406.86L315.69 399.9L56.14 163.41L22.27 129.48C-7.42 99.85 -7.42 51.8 22.27 22.17C51.9 -7.39 99.88 -7.39 129.58 22.17L163.44 56.17C163.44 56.17 315.83 253.09 382.44 332.5L418.23 296.44L398.61 273.97C388 263.5 388 246.33 398.61 235.73L621.97 10.31C632.51 -0.3 649.68 -0.3 660.22 10.31L729.08 75.59C739.69 86.13 739.69 103.37 729.08 113.84ZM110.02 78.71C100.74 69.36 85.63 69.36 76.28 78.71C66.94 87.99 66.94 103.1 76.28 112.51C85.63 121.86 100.74 121.86 110.02 112.51C119.37 103.1 119.37 87.92 110.02 78.71ZM652.26 44.11C647.75 39.67 640.47 39.67 636.02 44.11L435.86 254.29C431.41 258.73 431.41 266.08 435.86 270.52C440.36 274.96 447.65 274.96 452.09 270.52L652.33 60.35C656.77 55.91 656.77 48.55 652.26 44.11ZM693.82 85.6C689.38 81.16 682.09 81.16 677.58 85.6L477.41 295.84C472.91 300.35 472.91 307.57 477.41 312.08C481.86 316.52 489.14 316.52 493.59 312.08L693.82 101.91C698.32 97.4 698.32 85.6Z"/></g></svg></span><span>我的技能</span></button><div class="skill-menu" data-skill-menu hidden></div></div></div><div id="rich-editor"></div></section>
+    <section id="document" class="surface" aria-label="文档编辑器" hidden><div class="format-bar"><button data-format="bold" title="加粗" aria-label="加粗"><i data-lucide="bold"></i></button><button data-format="italic" title="斜体" aria-label="斜体"><i data-lucide="italic"></i></button><button data-format="strike" title="删除线" aria-label="删除线"><i data-lucide="strikethrough"></i></button><button data-format="highlight" title="高亮" aria-label="高亮"><i data-lucide="highlighter"></i></button><button data-format="code" title="行内代码" aria-label="行内代码"><i data-lucide="code"></i></button><button data-format="h1" title="一级标题" aria-label="一级标题"><i data-lucide="heading-1"></i></button><button data-format="heading" title="二级标题" aria-label="二级标题"><i data-lucide="heading-2"></i></button><button data-format="h3" title="三级标题" aria-label="三级标题"><i data-lucide="heading-3"></i></button><button data-format="list" title="无序列表" aria-label="无序列表"><i data-lucide="list"></i></button><button data-format="ordered" title="有序列表" aria-label="有序列表"><i data-lucide="list-ordered"></i></button><button data-format="quote" title="引用" aria-label="引用"><i data-lucide="quote"></i></button><button data-format="codeblock" title="代码块" aria-label="代码块"><i data-lucide="square-code"></i></button><button data-format="rule" title="分隔线" aria-label="分隔线"><i data-lucide="minus"></i></button></div><div id="rich-editor"></div></section>
     <section id="pdf" class="surface" aria-label="PDF 阅读器" hidden><div class="pdf-toolbar"><input type="file" accept="application/pdf,.pdf" hidden><div class="pdf-annotate" role="toolbar" aria-label="PDF 批注"><button type="button" data-annotate="highlight" title="先划选文字，再点击高亮" aria-label="高亮" disabled><i data-lucide="highlighter"></i><span>高亮</span></button><button type="button" data-annotate="text" title="先划选文字，再添加批注" aria-label="文字批注" disabled><i data-lucide="message-square-plus"></i><span>批注</span></button><button type="button" data-pdf-terms title="维护本项目的财报译法" aria-label="术语">术语</button><button type="button" data-pdf-shot title="在页面上拖拽截取区域" aria-label="截图" aria-pressed="false" disabled>截图</button></div><div class="pdf-shots" data-pdf-shots hidden></div><span data-page hidden>未打开文件</span><button type="button" class="pdf-notebook-toggle" data-pdf-notebook title="打开 PDF 笔记本" aria-label="打开 PDF 笔记本" aria-pressed="false" disabled><i data-lucide="notebook-pen"></i><span>笔记</span></button><button type="button" class="pdf-ask-ai" data-ask-ai title="先划选文字，再向 AI 提问" aria-label="问 AI" disabled><i data-lucide="sparkles"></i><span>问AI</span></button><span class="pdf-toolbar-spacer" aria-hidden="true"></span><div class="pdf-nav"><button data-prev title="上一页" aria-label="上一页"><i data-lucide="chevron-left"></i></button><input data-page-input type="number" min="1" step="1" value="1" aria-label="跳转到页码" title="输入页码后回车跳转"><span data-page-total>/ 0</span><button data-next title="下一页" aria-label="下一页"><i data-lucide="chevron-right"></i></button></div><div class="pdf-zoom"><button data-zoom-out title="缩小" aria-label="缩小" disabled><i data-lucide="zoom-out"></i></button><span data-zoom>100%</span><button data-zoom-in title="放大" aria-label="放大" disabled><i data-lucide="zoom-in"></i></button><button data-fit-width title="适应宽度" aria-label="适应宽度" disabled><i data-lucide="unfold-horizontal"></i></button></div><button type="button" data-split-view aria-pressed="false" title="左右对照同一份 PDF" disabled>复制浏览</button></div><div class="pdf-stage"><aside class="pdf-notebook-panel" data-pdf-notebook-panel hidden><div class="notebook-toolbar" role="toolbar" aria-label="PDF 笔记格式"><button type="button" data-pdf-note-command="bold" title="加粗" aria-label="加粗"><i data-lucide="bold"></i></button><button type="button" data-pdf-note-command="italic" title="斜体" aria-label="斜体"><i data-lucide="italic"></i></button><button type="button" data-pdf-note-command="heading" title="标题 H2" aria-label="标题 H2"><i data-lucide="heading-2"></i></button><button type="button" data-pdf-note-command="heading3" title="标题 H3" aria-label="标题 H3"><i data-lucide="heading-3"></i></button><button type="button" data-pdf-note-command="heading4" title="标题 H4" aria-label="标题 H4"><i data-lucide="heading-4"></i></button><button type="button" data-pdf-note-command="heading5" title="标题 H5" aria-label="标题 H5"><i data-lucide="heading-5"></i></button><button type="button" data-pdf-note-command="bullet" title="无序列表" aria-label="无序列表"><i data-lucide="list"></i></button><button type="button" data-pdf-note-command="ordered" title="有序列表" aria-label="有序列表"><i data-lucide="list-ordered"></i></button><button type="button" data-pdf-note-command="quote" title="引用" aria-label="引用"><i data-lucide="quote"></i></button><span aria-hidden="true"></span><button type="button" class="pdf-outline-toggle" data-pdf-outline title="生成文档大纲" aria-label="生成文档大纲" disabled><i data-lucide="list-tree"></i></button><button type="button" data-pdf-note-command="undo" title="撤销" aria-label="撤销"><i data-lucide="undo-2"></i></button><button type="button" data-pdf-note-command="redo" title="重做" aria-label="重做"><i data-lucide="redo-2"></i></button></div><div class="notebook-editor" data-pdf-notebook-editor></div></aside><div class="pdf-pane" data-pane="copy" hidden><div class="pdf-scroll" tabindex="0" data-scroll="copy"></div></div><div class="pdf-split" role="separator" aria-orientation="vertical" aria-label="调整对照窗格宽度" tabindex="0" hidden></div><div class="pdf-pane is-active" data-pane="main"><div class="pdf-scroll" tabindex="0" data-scroll="main"><div class="pdf-page"><div class="empty"><i data-lucide="file-search"></i><p>未打开 PDF</p></div></div></div></div></div></section>
     <section id="mindmap" class="surface" aria-label="思维导图" hidden></section>
     <section id="research" class="surface" aria-label="研究图" hidden></section>
@@ -230,7 +239,7 @@ export function alertSaveError(message: string) {
   });
 }
 
-export async function openSettingsDialog(email: string, onLogout: () => void) {
+export async function openSettingsDialog(email: string, onLogout: () => void, onLogin: () => void) {
   const overlay = document.createElement('div');
   overlay.className = 'dialog-overlay settings-overlay';
   overlay.innerHTML = `<div class="settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title">
@@ -240,19 +249,27 @@ export async function openSettingsDialog(email: string, onLogout: () => void) {
     </header>
     <div class="settings-dialog-body">
     <nav class="settings-categories" aria-label="设置分类" role="tablist">
-      <button type="button" class="is-active" data-settings-category="account" role="tab" aria-selected="true"><i data-lucide="user-round"></i><span>用户账号</span></button>
+      <button type="button" class="is-active" data-settings-category="local" role="tab" aria-selected="true"><i data-lucide="monitor"></i><span>本机</span></button>
+      <button type="button" data-settings-category="account" role="tab" aria-selected="false"><i data-lucide="user-round"></i><span>用户账号</span></button>
       <button type="button" data-settings-category="agent" role="tab" aria-selected="false"><i data-lucide="bot"></i><span>外部 Agent</span></button>
       <button type="button" data-settings-category="model" role="tab" aria-selected="false"><i data-lucide="brain-circuit"></i><span>大模型配置</span></button>
+      <button type="button" class="settings-nav-account" data-account-action><i data-lucide="log-out"></i><span>退出登录</span></button>
     </nav>
     <div class="settings-content">
-    <section class="settings-section" data-settings-panel="account" role="tabpanel" aria-labelledby="settings-account-title">
+    <section class="settings-section" data-settings-panel="local" role="tabpanel" aria-labelledby="settings-local-title">
+      <div class="settings-section-title"><i data-lucide="monitor"></i><div><h3 id="settings-local-title">本机</h3><p>不修改则使用默认值。调试默认远程地址是 http://127.0.0.1:8000，部署到服务器后改成服务器地址。embedding 固定走该地址下的 /api/embeddings。</p></div></div>
+      <label class="settings-field"><span>远程服务地址</span><input data-remote-base spellcheck="false" placeholder="http://127.0.0.1:8000"></label>
+      <label class="settings-field"><span>本地 PDF 目录</span><input data-pdf-dir spellcheck="false" placeholder="留空使用默认目录"></label>
+      <div class="settings-inline-actions"><button type="button" data-save-local>保存</button><button type="button" data-reset-local>恢复默认</button></div>
+    </section>
+    <section class="settings-section" data-settings-panel="account" role="tabpanel" aria-labelledby="settings-account-title" hidden>
       <div class="settings-section-title"><i data-lucide="user-round"></i><div><h3 id="settings-account-title">用户账号</h3><p>登录身份由邮箱唯一确定，用户名不可修改。</p></div></div>
       <div class="settings-email"><span>登录邮箱</span><strong></strong></div>
       <form class="password-form" data-password-form>
         <label><span>当前密码</span><input type="password" name="current_password" autocomplete="current-password" minlength="6" required></label>
         <label><span>新密码</span><input type="password" name="new_password" autocomplete="new-password" minlength="6" required></label>
         <label><span>确认新密码</span><input type="password" name="confirm_password" autocomplete="new-password" minlength="6" required></label>
-        <div class="settings-inline-actions"><button type="submit">修改密码</button><button type="button" class="settings-logout" data-logout>退出登录</button></div>
+        <div class="settings-inline-actions"><button type="submit">修改密码</button></div>
       </form>
     </section>
     <section class="settings-section" data-settings-panel="agent" role="tabpanel" aria-labelledby="settings-agent-title" hidden>
@@ -333,6 +350,29 @@ export async function openSettingsDialog(email: string, onLogout: () => void) {
     categoryPanels.forEach(panel => { panel.hidden = panel.dataset.settingsPanel !== category; });
   };
   categoryButtons.forEach(button => button.addEventListener('click', () => selectCategory(button.dataset.settingsCategory!)));
+  const remoteInput = overlay.querySelector<HTMLInputElement>('[data-remote-base]')!;
+  const pdfInput = overlay.querySelector<HTMLInputElement>('[data-pdf-dir]')!;
+  remoteInput.value = remoteBase();
+  void office.json<{ pdf_dir: string; pdf_dir_default: string }>('/local/preferences').then(prefs => {
+    pdfInput.placeholder = prefs.pdf_dir_default || '留空使用默认目录';
+    if (prefs.pdf_dir && prefs.pdf_dir !== prefs.pdf_dir_default) pdfInput.value = prefs.pdf_dir;
+  }).catch(() => {});
+  const saveLocal = async (reset: boolean) => {
+    const remote = reset ? DEFAULT_REMOTE_BASE : remoteInput.value.trim();
+    const pdfDir = reset ? '' : pdfInput.value.trim();
+    setRemoteBase(remote);
+    remoteInput.value = remoteBase();
+    if (reset) pdfInput.value = '';
+    try {
+      await office.json('/local/preferences', { method: 'PUT', body: JSON.stringify({ pdf_dir: pdfDir }) });
+      await window.youju?.setConfig?.({ remoteBaseUrl: remoteBase(), pdfDir });
+      showNote(reset ? '已恢复默认。' : '本机配置已保存。');
+    } catch (e) {
+      showNote(e instanceof Error ? e.message : String(e));
+    }
+  };
+  overlay.querySelector('[data-save-local]')!.addEventListener('click', () => { void saveLocal(false); });
+  overlay.querySelector('[data-reset-local]')!.addEventListener('click', () => { void saveLocal(true); });
   overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
   overlay.querySelector('[data-close]')!.addEventListener('click', close);
   overlay.querySelector('[data-copy]')!.addEventListener('click', async () => {
@@ -370,9 +410,10 @@ export async function openSettingsDialog(email: string, onLogout: () => void) {
     const confirmPassword = new FormData(form).get('confirm_password')?.toString() || '';
     if (newPassword !== confirmPassword) { showNote('两次输入的新密码不一致。'); return; }
     try {
-      await office.json('/auth/password', { method: 'PUT', body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }) });
+      if (!remoteToken()) { showNote('请先登录远程账号后再修改密码。'); return; }
+      await changeRemotePassword(currentPassword, newPassword);
       form.reset();
-      showNote('密码已更新。');
+      showNote('远程账号密码已更新。');
     } catch (e) {
       showNote(e instanceof Error ? e.message : String(e));
     }
@@ -405,9 +446,15 @@ export async function openSettingsDialog(email: string, onLogout: () => void) {
       showNote(e instanceof Error ? e.message : String(e));
     }
   });
-  overlay.querySelector<HTMLButtonElement>('[data-logout]')!.addEventListener('click', () => {
+  const accountAction = overlay.querySelector<HTMLButtonElement>('[data-account-action]')!;
+  const signedIn = Boolean(remoteToken());
+  accountAction.classList.toggle('settings-nav-logout', signedIn);
+  accountAction.querySelector('i')?.setAttribute('data-lucide', signedIn ? 'log-out' : 'log-in');
+  accountAction.querySelector('span')!.textContent = signedIn ? '退出登录' : '去登录';
+  accountAction.addEventListener('click', () => {
     close();
-    onLogout();
+    if (signedIn) onLogout();
+    else onLogin();
   });
   document.body.append(overlay);
   createIcons({ icons });
@@ -454,6 +501,7 @@ export interface NavHandlers {
   onNewProject: () => void;
   onRenameProject: (id: string) => void;
   onLogout: () => void;
+  onLogin: () => void;
   onOpenCalc: () => void;
   onOpenNotebook: () => void;
   onOpenPortfolio: () => void;
@@ -1121,7 +1169,7 @@ export function renderNav(workspace: Workspace, surface: Kind, handlers: NavHand
   settings.onclick = e => {
     e.stopPropagation();
     closeMenus();
-    void openSettingsDialog(workspace.user.email, handlers.onLogout);
+    void openSettingsDialog(workspace.user.email, handlers.onLogout, handlers.onLogin);
   };
 }
 

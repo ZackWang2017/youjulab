@@ -42,6 +42,76 @@ function rememberedSheetId(snapshot: Record<string, unknown>): string {
   return typeof id === 'string' ? id : '';
 }
 
+/** Univer FRange 要求 endColumn < columnCount；历史数据可能 cellData/合并区超出声明尺寸。 */
+function sheetDataExtent(sheet: Record<string, unknown>): { maxRow: number; maxCol: number } {
+  let maxRow = -1;
+  let maxCol = -1;
+  const bump = (row: unknown, col: unknown) => {
+    const r = Number(row);
+    const c = Number(col);
+    if (Number.isFinite(r)) maxRow = Math.max(maxRow, r);
+    if (Number.isFinite(c)) maxCol = Math.max(maxCol, c);
+  };
+  const cellData = sheet.cellData;
+  if (cellData && typeof cellData === 'object' && !Array.isArray(cellData)) {
+    for (const [rowKey, row] of Object.entries(cellData as Record<string, unknown>)) {
+      if (!row || typeof row !== 'object' || Array.isArray(row)) {
+        bump(rowKey, undefined);
+        continue;
+      }
+      for (const colKey of Object.keys(row as object)) bump(rowKey, colKey);
+    }
+  }
+  const merges = sheet.mergeData;
+  if (Array.isArray(merges)) {
+    for (const merge of merges) {
+      if (!merge || typeof merge !== 'object' || Array.isArray(merge)) continue;
+      const m = merge as { endRow?: unknown; endColumn?: unknown };
+      bump(m.endRow, m.endColumn);
+    }
+  }
+  const rowData = sheet.rowData;
+  if (rowData && typeof rowData === 'object' && !Array.isArray(rowData)) {
+    for (const rowKey of Object.keys(rowData as object)) bump(rowKey, undefined);
+  }
+  const columnData = sheet.columnData;
+  if (columnData && typeof columnData === 'object' && !Array.isArray(columnData)) {
+    for (const colKey of Object.keys(columnData as object)) bump(undefined, colKey);
+  }
+  return { maxRow, maxCol };
+}
+
+/** 扩大 rowCount/columnCount 以覆盖 cellData，避免「Range is out of bounds」。 */
+function ensureSnapshotDimensions(snapshot: Record<string, unknown>): {
+  snapshot: Record<string, unknown>;
+  expanded: boolean;
+} {
+  const sheets = snapshot.sheets;
+  if (!sheets || typeof sheets !== 'object' || Array.isArray(sheets)) {
+    return { snapshot, expanded: false };
+  }
+  let expanded = false;
+  const nextSheets: Record<string, unknown> = {};
+  for (const [id, raw] of Object.entries(sheets as Record<string, unknown>)) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+      nextSheets[id] = raw;
+      continue;
+    }
+    const sheet = { ...(raw as Record<string, unknown>) };
+    const { maxRow, maxCol } = sheetDataExtent(sheet);
+    const rowCount = Math.max(Number(sheet.rowCount) || 0, maxRow + 1);
+    const columnCount = Math.max(Number(sheet.columnCount) || 0, maxCol + 1);
+    if (rowCount !== sheet.rowCount || columnCount !== sheet.columnCount) {
+      sheet.rowCount = rowCount;
+      sheet.columnCount = columnCount;
+      expanded = true;
+    }
+    nextSheets[id] = sheet;
+  }
+  if (!expanded) return { snapshot, expanded: false };
+  return { snapshot: { ...snapshot, sheets: nextSheets }, expanded: true };
+}
+
 export function mountSheet(container: HTMLElement, changed: () => void, onDirty: (content: unknown) => void): EditorAdapter {
   let univer: ReturnType<typeof createUniver>['univer'] | undefined;
   let univerAPI: ReturnType<typeof createUniver>['univerAPI'] | undefined;
@@ -548,17 +618,34 @@ export function mountSheet(container: HTMLElement, changed: () => void, onDirty:
   boot({ name: '未命名表格' });
   return {
     async load(asset) {
+      // 同一表格已就绪：不 dispose/重建，避免切回工作区时白屏闪烁
+      if (
+        asset.id
+        && asset.id === assetId
+        && workbook
+        && container.dataset.ready === 'true'
+        && asset.revision === revision
+      ) {
+        window.dispatchEvent(new Event('resize'));
+        return;
+      }
       loading = true;
       clearStructureCache();
       assetId = asset.id;
       revision = asset.revision;
-      const snapshot = isSnapshot(asset.content)
+      let expanded = false;
+      let snapshot: Record<string, unknown> = isSnapshot(asset.content)
         ? asset.content
         : { id: asset.id, name: asset.name || '未命名表格' };
+      if (isSnapshot(asset.content)) {
+        const normalized = ensureSnapshotDimensions(snapshot);
+        snapshot = normalized.snapshot;
+        expanded = normalized.expanded;
+      }
       lastSheetId = isSnapshot(asset.content) ? rememberedSheetId(snapshot) : '';
       boot(snapshot);
       restoreActiveSheet();
-      if (workbook && !isSnapshot(asset.content)) onDirty(workbook.save());
+      if (workbook && (!isSnapshot(asset.content) || expanded)) onDirty(workbook.save());
       markReady();
     },
     context() {

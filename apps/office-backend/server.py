@@ -1,14 +1,21 @@
 """办公工作区 HTTP 服务：登录、项目、表格/文档/PDF/思维导图/日历资产。"""
 from __future__ import annotations
 
+import json
 import re
+import secrets
 import sys
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Literal
 from urllib.parse import urlparse
 
+import os
+
 from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, Field, ValidationError, field_validator
 from contextlib import asynccontextmanager
@@ -33,21 +40,25 @@ from assistant_sessions import public_session, public_session_list_item, session
 from pdf_ask import iter_pdf_ask_events  # noqa: E402
 from pdf_summary import iter_pdf_selection_summary_events  # noqa: E402
 from pdf_glossary import delete_project_term, list_project_terms, upsert_project_term  # noqa: E402
-from config import api_host, api_port, file_root, llm_config_set, mcp_token_matches, resolve_asset_file_path  # noqa: E402
+from config import (  # noqa: E402
+    mcp_remote_base,
+    api_host,
+    api_port,
+    default_file_root,
+    file_root,
+    llm_config_set,
+    mcp_token_matches,
+    resolve_asset_file_path,
+    set_file_root_override,
+)
 from model_credentials import CredentialEncryptionError, encrypt_api_key, public_model_config  # noqa: E402
 from model_runtime import model_api_key, model_configuration_error, model_configured, model_name, set_current_model, settings_for_user  # noqa: E402
 from pdf_annot import add_pdf_annotation, delete_pdf_annotation, update_pdf_annotation  # noqa: E402
 from office_pdf_vector import delete_document_index, ensure_index, get_index_status, pg_configured, search_chunks  # noqa: E402
 from announcement_intelligence import iter_outline_events  # noqa: E402
-from digest_job import default_job, iter_digest_run_events, public_job, validate_job_body  # noqa: E402
-from document_archive import archive_document, exceeds, would_exceed  # noqa: E402
-from document_skill_run import iter_skill_run_events  # noqa: E402
-from document_skills import list_skill_types, public_skill, validate_skill  # noqa: E402
-from securities_lookup import lookup_securities  # noqa: E402
-from portfolio_proxy import forward as forward_portfolio  # noqa: E402
-from weread_proxy import login_status as fetch_weread_login_status, start_login as create_weread_login  # noqa: E402
-from digest_scheduler import digest_scheduler_loop  # noqa: E402
+from document_archive import archive_document, exceeds  # noqa: E402
 from skills import list_skills, render_skill  # noqa: E402
+from remote_auth import remote_token, set_remote_token  # noqa: E402
 from store import (  # noqa: E402
     ACCESS_TOKEN_LENGTH,
     DEFAULT_DIAGRAM_NAME,
@@ -300,8 +311,10 @@ class ProjectTermBody(BaseModel):
 def schedule_pdf_index(document_id: str, user_id: str, path: str) -> None:
     if not pg_configured():
         return
+    token = remote_token()
 
     def run() -> None:
+        set_remote_token(token)
         try:
             status = ensure_index(document_id=document_id, user_id=user_id, path=path)
             # best-effort：把状态回写到资产元数据，便于 UI
@@ -325,8 +338,16 @@ def get_store(request: Request) -> Store:
 
 
 async def user_from(request: Request, store: Store = Depends(get_store)) -> dict:
+    from guest_user import ensure_guest_user
+
+    set_remote_token(request.headers.get("x-remote-token"))
     header = request.headers.get("authorization") or ""
     if not header.lower().startswith("bearer "):
+        # 桌面 SqliteStore：未登录也能读写本地文档。测试注入的 MemoryStore 仍要求登录。
+        if type(store).__name__ == "SqliteStore":
+            account = ensure_guest_user(store)
+            set_current_model(settings_for_user(store, account["id"]))
+            return account
         raise HTTPException(401, "请先登录。")
     token = header.split(" ", 1)[1].strip()
     user_token = (request.headers.get("x-user-access-token") or "").strip()
@@ -419,32 +440,146 @@ def seed_project(store: Store, user: dict, project: dict) -> dict:
                              }) or user
 
 
-def _pick_last(assets: list[dict], last_id: str | None) -> str | None:
-    if last_id and any(a["id"] == last_id for a in assets):
-        return last_id
+def _pick_last(assets: list[dict], *candidates: str | None) -> str | None:
+    ids = {a["id"] for a in assets}
+    for candidate in candidates:
+        if candidate and candidate in ids:
+            return candidate
     return assets[0]["id"] if assets else None
 
 
-def refresh_last_assets(store: Store, user_id: str, project_id: str, last: dict | None = None) -> dict:
-    sheets = store.assets(user_id, project_id, "sheet")
-    docs = store.assets(user_id, project_id, "document")
-    pdfs = store.assets(user_id, project_id, "pdf")
-    maps = store.assets(user_id, project_id, "mindmap")
-    research = store.assets(user_id, project_id, "research")
-    diagrams = store.assets(user_id, project_id, "diagram")
-    plans = store.assets(user_id, project_id, "project_plan")
-    cals = store.assets(user_id, project_id, "calendar")
-    prev = last or {}
-    return {
-        "sheet": _pick_last(sheets, prev.get("sheet")),
-        "document": _pick_last(docs, prev.get("document")),
-        "pdf": _pick_last(pdfs, prev.get("pdf")),
-        "mindmap": _pick_last(maps, prev.get("mindmap")),
-        "research": _pick_last(research, prev.get("research")),
-        "diagram": _pick_last(diagrams, prev.get("diagram")),
-        "project_plan": _pick_last(plans, prev.get("project_plan")),
-        "calendar": _pick_last(cals, prev.get("calendar")),
+def refresh_last_assets(
+    store: Store,
+    user_id: str,
+    project_id: str,
+    last: dict | None = None,
+    user_doc: dict | None = None,
+) -> dict:
+    """按目标项目恢复各类型上次打开的资产。
+
+    优先用该项目的最近打开记录（按类型取第一条仍可见的），再回退到传入的 last，最后才用列表首项。
+    避免全局 last_assets 在切项目时把上一项目的选中态带过去。
+    """
+    by_kind = {
+        "sheet": store.assets(user_id, project_id, "sheet"),
+        "document": store.assets(user_id, project_id, "document"),
+        "pdf": store.assets(user_id, project_id, "pdf"),
+        "mindmap": store.assets(user_id, project_id, "mindmap"),
+        "research": store.assets(user_id, project_id, "research"),
+        "diagram": store.assets(user_id, project_id, "diagram"),
+        "project_plan": store.assets(user_id, project_id, "project_plan"),
+        "calendar": store.assets(user_id, project_id, "calendar"),
     }
+    prev = last or {}
+    owner = user_doc if isinstance(user_doc, dict) else (store.user_by_id(user_id) or {})
+    id_to_kind = {
+        asset["id"]: kind
+        for kind, assets in by_kind.items()
+        for asset in assets
+    }
+    recent_by_kind: dict[str, str] = {}
+    for asset_id in recent_asset_ids(owner, project_id):
+        kind = id_to_kind.get(asset_id)
+        if kind and kind not in recent_by_kind:
+            recent_by_kind[kind] = asset_id
+    return {
+        kind: _pick_last(assets, recent_by_kind.get(kind), prev.get(kind))
+        for kind, assets in by_kind.items()
+    }
+
+
+DEFAULT_PROJECT_NAMES = frozenset({"未命名项目", "本地项目"})
+DEFAULT_PROJECT_NAME = "未命名项目"
+
+
+def _project_looks_unused(store: Store, owner_id: str, project: dict) -> bool:
+    """默认空壳：名称是默认项，且没有 PDF、也没有改过 revision 的资产。"""
+    if project.get("name") not in DEFAULT_PROJECT_NAMES:
+        return False
+    assets = store.assets(owner_id, project["id"])
+    if any(a.get("kind") == "pdf" for a in assets):
+        return False
+    if any(int(a.get("revision") or 0) > 0 for a in assets):
+        return False
+    return True
+
+
+def prune_default_projects(store: Store, user_id: str) -> int:
+    """去掉堆积的「未命名项目 / 本地项目」：有正式项目则全删；否则只留一个未命名。"""
+    projects = store.projects(user_id)
+    defaults = [p for p in projects if p.get("name") in DEFAULT_PROJECT_NAMES]
+    others = [p for p in projects if p.get("name") not in DEFAULT_PROJECT_NAMES]
+    removed = 0
+    keep_id: str | None = None
+    if others:
+        for project in defaults:
+            if store.delete_project(user_id, project["id"]) is not None:
+                removed += 1
+        keep_id = others[0]["id"]
+    elif defaults:
+        keep = defaults[0]
+        keep_id = keep["id"]
+        if keep.get("name") != DEFAULT_PROJECT_NAME:
+            store.update_project(user_id, keep["id"], name=DEFAULT_PROJECT_NAME)
+        for project in defaults[1:]:
+            if store.delete_project(user_id, project["id"]) is not None:
+                removed += 1
+    if keep_id:
+        current = store.user_by_id(user_id) or {}
+        last = current.get("last_project_id")
+        if last != keep_id and (not last or not store.project(user_id, last)):
+            store.update_user(user_id, last_project_id=keep_id)
+    return removed
+
+
+def discard_unused_guest_defaults(store: Store, guest_id: str) -> int:
+    """绑定前丢掉访客空壳默认项目，避免每次登录都搬进邮箱用户。"""
+    removed = 0
+    for project in list(store.projects(guest_id)):
+        if not _project_looks_unused(store, guest_id, project):
+            continue
+        if store.delete_project(guest_id, project["id"]) is not None:
+            removed += 1
+    return removed
+
+
+def _user_tool_score(asset: dict) -> tuple:
+    content = asset.get("content")
+    try:
+        size = len(json.dumps(content, ensure_ascii=False)) if content is not None else 0
+    except TypeError:
+        size = 0
+    return (int(asset.get("revision") or 0), size, str(asset.get("updated_at") or ""))
+
+
+def prune_duplicate_user_tools(store: Store, user_id: str) -> int:
+    """用户级工具（笔记本/计算器/日历）只保留内容最丰富的一份。"""
+    removed = 0
+    for kind in ("notebook", "calc", "calendar"):
+        items = store.assets(user_id, None, kind)
+        if len(items) <= 1:
+            continue
+        keep = max(items, key=_user_tool_score)
+        for asset in items:
+            if asset["id"] == keep["id"]:
+                continue
+            if store.delete_asset(user_id, asset["id"]) is not None:
+                removed += 1
+    return removed
+
+
+def discard_unused_guest_tools(store: Store, guest_id: str, user_id: str) -> int:
+    """绑定前：若邮箱用户已有笔记本等，丢掉访客空壳工具，避免覆盖/堆积。"""
+    removed = 0
+    for kind in ("notebook", "calc", "calendar"):
+        user_items = store.assets(user_id, None, kind)
+        user_best = max((_user_tool_score(a) for a in user_items), default=(0, 0, ""))
+        for asset in list(store.assets(guest_id, None, kind)):
+            if _user_tool_score(asset) > user_best:
+                continue
+            if store.delete_asset(guest_id, asset["id"]) is not None:
+                removed += 1
+    return removed
 
 
 def ensure_workspace(store: Store, user: dict) -> dict:
@@ -452,56 +587,157 @@ def ensure_workspace(store: Store, user: dict) -> dict:
     projects = store.projects(oid)
     if projects:
         return user
-    project = store.create_project(oid, "未命名项目")
+    project = store.create_project(oid, DEFAULT_PROJECT_NAME)
     return seed_project(store, user, project)
 
 
-class DigestSourceBody(BaseModel):
-    kind: Literal["rss", "url", "rsshub"] = "rss"
-    url: str = Field(default="", max_length=2000)
-    route: str = Field(default="", max_length=500)
-    label: str = Field(default="", max_length=120)
+class LocalPreferencesBody(BaseModel):
+    pdf_dir: str = ""
 
 
-class DigestTopicBody(BaseModel):
-    name: str = Field(min_length=1, max_length=80)
-    sources: list[DigestSourceBody] = Field(default_factory=list, max_length=20)
+_remote_me_cache: dict[str, tuple[float, dict]] = {}
+_REMOTE_ME_TTL_SEC = 60.0
 
 
-class DocumentSkillBody(BaseModel):
-    name: str = ""
-    type: str = ""
-    params: dict = Field(default_factory=dict)
+def fetch_remote_account(token: str) -> dict:
+    """用远程 JWT 调 mcp /api/account/me，确认邮箱后再挂到本机 users。"""
+    import time
+
+    token = (token or "").strip()
+    if not token:
+        raise HTTPException(401, "请先登录远程账号。")
+    cached = _remote_me_cache.get(token)
+    if cached and (time.monotonic() - cached[0]) < _REMOTE_ME_TTL_SEC:
+        return dict(cached[1])
+    url = f"{mcp_remote_base().rstrip('/')}/api/account/me"
+    req = urllib.request.Request(
+        url,
+        headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            payload = json.loads(resp.read().decode("utf-8") or "{}")
+    except urllib.error.HTTPError as exc:
+        detail = "远程账号无效或已过期。"
+        try:
+            body = json.loads(exc.read().decode("utf-8") or "{}")
+            if isinstance(body, dict) and body.get("error"):
+                detail = str(body["error"])
+        except Exception:
+            pass
+        raise HTTPException(401 if exc.code in (401, 403) else 502, detail) from None
+    except Exception as exc:
+        raise HTTPException(502, f"无法验证远程账号：{exc}") from None
+    if not isinstance(payload, dict):
+        raise HTTPException(502, "远程账号响应无效。")
+    email = str(payload.get("email") or "").strip().lower()
+    if not EMAIL.match(email):
+        raise HTTPException(502, "远程账号未返回有效邮箱。")
+    account = {"id": str(payload.get("id") or ""), "email": email}
+    _remote_me_cache[token] = (time.monotonic(), account)
+    if len(_remote_me_cache) > 64:
+        cutoff = time.monotonic() - _REMOTE_ME_TTL_SEC
+        for key in [k for k, (ts, _) in _remote_me_cache.items() if ts < cutoff]:
+            _remote_me_cache.pop(key, None)
+    return dict(account)
 
 
-class DigestJobBody(BaseModel):
-    enabled: bool = False
-    hour: int = Field(default=8, ge=0, le=23)
-    minute: int = Field(default=0, ge=0, le=59)
-    output_order: Literal["newest_first", "newest_last"] = "newest_first"
-    topics: list[DigestTopicBody] = Field(default_factory=list, max_length=12)
+def ensure_local_user_for_email(store: Store, email: str) -> tuple[dict, bool]:
+    """按注册邮箱确保本机 users 行存在；新建时密码仅占位，日常靠远程 JWT。"""
+    email = email.strip().lower()
+    found = store.user_by_email(email)
+    if found:
+        return found, False
+    user = store.create_user(email, secrets.token_urlsafe(24))
+    return user, True
+
+
+def bind_local_account(store: Store, remote_jwt: str) -> dict:
+    from guest_user import GUEST_EMAIL, ensure_guest_user
+
+    remote = fetch_remote_account(remote_jwt)
+    user, created = ensure_local_user_for_email(store, remote["email"])
+    claimed = 0
+    guest = store.user_by_email(GUEST_EMAIL)
+    if guest and guest["id"] != user["id"]:
+        # 先丢掉访客空壳默认项/空笔记本，再认领有内容的资产，避免越绑越多
+        discard_unused_guest_defaults(store, guest["id"])
+        discard_unused_guest_tools(store, guest["id"], user["id"])
+        claimed = store.reassign_owner(guest["id"], user["id"])
+        ensure_guest_user(store)
+    prune_default_projects(store, user["id"])
+    prune_duplicate_user_tools(store, user["id"])
+    user = store.ensure_access_token(user)
+    user = ensure_workspace(store, user)
+    store.ensure_user_tools(user["id"])
+    prune_duplicate_user_tools(store, user["id"])
+    user = store.user_by_id(user["id"]) or user
+    return {
+        "token": create_token(user["id"]),
+        "user": public_user(user),
+        "created": created,
+        "claimed": claimed,
+        "email": remote["email"],
+    }
 
 
 def create_app(store: Store | None = None) -> FastAPI:
     app_store = store or create_store()
-    stop = asyncio.Event()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         app.state.store = app_store
-        task = asyncio.create_task(digest_scheduler_loop(app_store, stop))
-        try:
-            yield
-        finally:
-            stop.set()
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
+        yield
 
     app = FastAPI(title="office-backend", lifespan=lifespan)
     app.state.store = app_store
+
+    # Electron 打包态用本机 HTTP 托管前端；同源访问远程 mcp，并避开 /assets API 路由抢静态资源。
+    desktop = os.environ.get("OFFICE_DESKTOP", "").strip() in {"1", "true", "yes"}
+    web_root: Path | None = None
+    raw_web = os.environ.get("OFFICE_WEB_DIST", "").strip()
+    if desktop and raw_web:
+        candidate = Path(raw_web).expanduser().resolve()
+        if candidate.is_dir() and (candidate / "index.html").is_file():
+            web_root = candidate
+    if desktop:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=["*"],
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
+
+    @app.middleware("http")
+    async def sqlite_write_batch(request: Request, call_next):
+        """同一请求内多次 mutation 合并成一次脏表刷盘，避免项目切换反复重写整库。"""
+        store = getattr(request.app.state, "store", None)
+        batch = getattr(store, "batch", None)
+        if callable(batch):
+            with batch():
+                return await call_next(request)
+        return await call_next(request)
+
+    if web_root is not None:
+        root = web_root
+
+        @app.middleware("http")
+        async def desktop_web_static(request: Request, call_next):
+            if request.method in ("GET", "HEAD"):
+                rel = request.url.path.lstrip("/")
+                target = root / ("index.html" if rel in ("", "index.html") else rel)
+                try:
+                    resolved = target.resolve()
+                except OSError:
+                    resolved = None
+                if (
+                    resolved is not None
+                    and resolved.is_file()
+                    and resolved.is_relative_to(root)
+                ):
+                    return FileResponse(resolved)
+            return await call_next(request)
 
     @app.exception_handler(HTTPException)
     async def http_error(_, exc: HTTPException):
@@ -514,6 +750,34 @@ def create_app(store: Store | None = None) -> FastAPI:
     @app.get("/health")
     def health():
         return {"ok": True}
+
+    @app.get("/local/preferences")
+    def get_local_preferences():
+        return {
+            "pdf_dir": str(file_root()),
+            "pdf_dir_default": str(default_file_root()),
+        }
+
+    @app.put("/local/preferences")
+    def put_local_preferences(body: LocalPreferencesBody):
+        raw = body.pdf_dir.strip()
+        if not raw:
+            path = set_file_root_override(None)
+        else:
+            path = set_file_root_override(Path(raw))
+        return {
+            "pdf_dir": str(path),
+            "pdf_dir_default": str(default_file_root()),
+        }
+
+    @app.post("/local/bind-account")
+    def local_bind_account(request: Request, store: Store = Depends(get_store)):
+        """远程注册/登录成功后：把本机 users 与注册邮箱关联，并认领访客资产。"""
+        token = (request.headers.get("x-remote-token") or "").strip()
+        if not token:
+            raise HTTPException(401, "请先登录远程账号。")
+        set_remote_token(token)
+        return bind_local_account(store, token)
 
     def mcp_service_user(request: Request, store: Store = Depends(get_store)) -> dict:
         header = request.headers.get("authorization") or ""
@@ -589,9 +853,14 @@ def create_app(store: Store | None = None) -> FastAPI:
         user = ensure_workspace(store, user)
         return {"token": create_token(user["id"]), "user": public_user(user)}
 
+    @app.post("/auth/logout")
+    def auth_logout(_user: dict = Depends(user_from)):
+        return {"ok": True}
+
     @app.post("/auth/login")
     def login(body: AuthBody, store: Store = Depends(get_store)):
-        user = store.user_by_email(body.email.strip())
+        email = body.email.strip()
+        user = store.user_by_email(email)
         if not user or not verify_password(body.password, user["password_hash"]):
             raise HTTPException(401, "邮箱或密码不正确。")
         user = store.ensure_access_token(user)
@@ -681,32 +950,6 @@ def create_app(store: Store | None = None) -> FastAPI:
         set_current_model(settings_for_user(store, user["id"]))
         return {"ok": True, "deleted": deleted}
 
-    @app.post("/integrations/weread/login")
-    async def start_weread_login(user: dict = Depends(user_from)):
-        try:
-            session = await asyncio.to_thread(create_weread_login)
-        except ValueError as exc:
-            raise HTTPException(503, str(exc)) from exc
-        session_id = str(session.get("session_id") or "")
-        if session_id:
-            owners = getattr(app.state, "weread_login_owners", {})
-            owners[session_id] = user["id"]
-            app.state.weread_login_owners = owners
-        return session
-
-    @app.get("/integrations/weread/login/{session_id}")
-    async def get_weread_login_status(session_id: str, user: dict = Depends(user_from)):
-        owners = getattr(app.state, "weread_login_owners", {})
-        if owners.get(session_id) != user["id"]:
-            raise HTTPException(404, "扫码会话不存在。")
-        try:
-            session = await asyncio.to_thread(fetch_weread_login_status, session_id)
-        except ValueError as exc:
-            raise HTTPException(503, str(exc)) from exc
-        if session.get("status") in {"authenticated", "failed", "expired"}:
-            owners.pop(session_id, None)
-        return session
-
     @app.post("/auth/access-token/rotate")
     def rotate_access_token(user: dict = Depends(user_from), store: Store = Depends(get_store)):
         user = store.rotate_access_token(user["id"])
@@ -733,6 +976,10 @@ def create_app(store: Store | None = None) -> FastAPI:
 
     @app.get("/projects")
     def list_projects(user: dict = Depends(user_from), store: Store = Depends(get_store)):
+        # 顺手清掉历史绑定堆积的空壳「未命名 / 本地项目」与重复笔记本
+        oid = workspace_user_id(user)
+        prune_default_projects(store, oid)
+        prune_duplicate_user_tools(store, oid)
         return {"projects": [public_project(p) for p in projects_of(store, user)]}
 
     @app.post("/projects")
@@ -778,7 +1025,9 @@ def create_app(store: Store | None = None) -> FastAPI:
             store.update_user(
                 user["id"],
                 last_project_id=nxt["id"],
-                last_assets=refresh_last_assets(store, user["id"], nxt["id"], current.get("last_assets")),
+                last_assets=refresh_last_assets(
+                    store, user["id"], nxt["id"], current.get("last_assets"), current,
+                ),
             )
         return {"ok": True}
 
@@ -797,11 +1046,12 @@ def create_app(store: Store | None = None) -> FastAPI:
         if not diagrams:
             store.create_asset(user["id"], project_id, "diagram", DEFAULT_DIAGRAM_NAME, default_diagram())
         store.ensure_user_tools(user["id"])
-        last = store.user_by_id(user["id"])["last_assets"]
+        user_doc = store.user_by_id(user["id"])
+        last = (user_doc or {}).get("last_assets")
         store.update_user(
             user["id"],
             last_project_id=project_id,
-            last_assets=refresh_last_assets(store, user["id"], project_id, last),
+            last_assets=refresh_last_assets(store, user["id"], project_id, last, user_doc),
         )
         return public_user(store.user_by_id(user["id"]))
 
@@ -993,12 +1243,6 @@ def create_app(store: Store | None = None) -> FastAPI:
         store.delete_asset(user["id"], asset_id)
         if asset["kind"] == "sheet":
             store.delete_sheet_charts(user["id"], asset_id)
-        if asset["kind"] == "document":
-            try:
-                store.delete_digest_job(owner_id(user), asset_id)
-                store.delete_document_skills(owner_id(user), asset_id)
-            except Exception:
-                pass
         if asset["kind"] == "pdf":
             try:
                 delete_document_index(asset_id)
@@ -1410,31 +1654,6 @@ def create_app(store: Store | None = None) -> FastAPI:
             "X-Accel-Buffering": "no",
         })
 
-    @app.get("/assets/{asset_id}/digest-job")
-    def get_digest_job(asset_id: str, user: dict = Depends(user_from), store: Store = Depends(get_store)):
-        asset = asset_of(store, user, asset_id)
-        if not asset or asset["kind"] != "document":
-            raise HTTPException(404, "文档不存在。")
-        oid = owner_id(user)
-        job = store.get_digest_job(oid, asset_id)
-        if not job:
-            return public_job(default_job(asset_id, oid))
-        return public_job(job)
-
-    @app.put("/assets/{asset_id}/digest-job")
-    def put_digest_job(asset_id: str, body: DigestJobBody, user: dict = Depends(user_from), store: Store = Depends(get_store)):
-        asset = asset_of(store, user, asset_id)
-        if not asset or asset["kind"] != "document":
-            raise HTTPException(404, "文档不存在。")
-        oid = owner_id(user)
-        try:
-            fields = validate_job_body(body.model_dump())
-        except ValueError as exc:
-            raise HTTPException(400, str(exc)) from exc
-        existing = store.get_digest_job(oid, asset_id) or default_job(asset_id, oid)
-        saved = store.upsert_digest_job(oid, asset_id, {**existing, **fields})
-        return public_job(saved)
-
     @app.get("/assets/{asset_id}/assistant-sessions")
     def list_assistant_sessions(asset_id: str, user: dict = Depends(user_from), store: Store = Depends(get_store)):
         asset = asset_of(store, user, asset_id)
@@ -1520,154 +1739,6 @@ def create_app(store: Store | None = None) -> FastAPI:
             raise HTTPException(404, "会话不存在。")
         store.delete_assistant_session(oid, session_id)
         return {"ok": True, "deleted": session_id}
-
-    @app.get("/document-skill-types")
-    def document_skill_types(_user: dict = Depends(user_from)):
-        return {"types": list_skill_types()}
-
-    @app.get("/securities/search")
-    def securities_search(q: str = "", _user: dict = Depends(user_from)):
-        try:
-            return {"items": lookup_securities(q)}
-        except ValueError as exc:
-            raise HTTPException(400, str(exc)) from exc
-
-    @app.api_route("/portfolio/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
-    async def portfolio_gateway(path: str, request: Request, user: dict = Depends(user_from)):
-        """持仓管理：组合/持仓/净值/计划任务都在 mcp-server，这里只带上用户 id 转发。"""
-        body = await request.body()
-        status, payload = await forward_portfolio(
-            request.method, path,
-            user_id=workspace_user_id(user),
-            query=request.url.query,
-            body=body,
-        )
-        return JSONResponse(payload, status_code=status)
-
-    @app.get("/assets/{asset_id}/skills")
-    def list_asset_skills(asset_id: str, user: dict = Depends(user_from), store: Store = Depends(get_store)):
-        asset = asset_of(store, user, asset_id)
-        if not asset or asset["kind"] != "document":
-            raise HTTPException(404, "文档不存在。")
-        rows = store.list_document_skills(owner_id(user), asset_id)
-        return {"skills": [public_skill(row) for row in rows]}
-
-    @app.post("/assets/{asset_id}/skills")
-    def create_asset_skill(asset_id: str, body: DocumentSkillBody, user: dict = Depends(user_from), store: Store = Depends(get_store)):
-        asset = asset_of(store, user, asset_id)
-        if not asset or asset["kind"] != "document":
-            raise HTTPException(404, "文档不存在。")
-        oid = owner_id(user)
-        if len(store.list_document_skills(oid, asset_id)) >= 20:
-            raise HTTPException(400, "每篇文档最多 20 个技能。")
-        try:
-            fields = validate_skill(body.name, body.type, body.params)
-        except ValueError as exc:
-            raise HTTPException(400, str(exc)) from exc
-        saved = store.upsert_document_skill(oid, asset_id, asset["project_id"], fields)
-        return public_skill(saved)
-
-    @app.put("/assets/{asset_id}/skills/{skill_id}")
-    def update_asset_skill(
-        asset_id: str, skill_id: str, body: DocumentSkillBody,
-        user: dict = Depends(user_from), store: Store = Depends(get_store),
-    ):
-        asset = asset_of(store, user, asset_id)
-        if not asset or asset["kind"] != "document":
-            raise HTTPException(404, "文档不存在。")
-        oid = owner_id(user)
-        existing = store.get_document_skill(oid, skill_id)
-        if not existing or existing.get("document_id") != asset_id:
-            raise HTTPException(404, "技能不存在。")
-        try:
-            fields = validate_skill(body.name, body.type, body.params)
-        except ValueError as exc:
-            raise HTTPException(400, str(exc)) from exc
-        saved = store.upsert_document_skill(oid, asset_id, asset["project_id"], {**existing, **fields, "id": skill_id})
-        return public_skill(saved)
-
-    @app.delete("/assets/{asset_id}/skills/{skill_id}")
-    def delete_asset_skill(asset_id: str, skill_id: str, user: dict = Depends(user_from), store: Store = Depends(get_store)):
-        asset = asset_of(store, user, asset_id)
-        if not asset or asset["kind"] != "document":
-            raise HTTPException(404, "文档不存在。")
-        oid = owner_id(user)
-        existing = store.get_document_skill(oid, skill_id)
-        if not existing or existing.get("document_id") != asset_id:
-            raise HTTPException(404, "技能不存在。")
-        store.delete_document_skill(oid, skill_id)
-        return {"ok": True, "deleted": skill_id}
-
-    @app.post("/assets/{asset_id}/skills/{skill_id}/run")
-    async def run_asset_skill(asset_id: str, skill_id: str, user: dict = Depends(user_from), store: Store = Depends(get_store)):
-        asset = asset_of(store, user, asset_id)
-        if not asset or asset["kind"] != "document":
-            raise HTTPException(404, "文档不存在。")
-        oid = owner_id(user)
-        skill = store.get_document_skill(oid, skill_id)
-        if not skill or skill.get("document_id") != asset_id:
-            raise HTTPException(404, "技能不存在。")
-        project = store.project(oid, asset["project_id"])
-        if not project:
-            raise HTTPException(404, "项目不存在。")
-        token_user = store.ensure_access_token(user)
-        live = {"id": asset_id, "name": asset["name"]}
-
-        def prepare_document(markdown: str):
-            current = store.asset(oid, live["id"])
-            if not current or not would_exceed(current.get("content"), markdown):
-                return live["name"], None, ""
-            archived = archive_document(store, oid, current)
-            live["id"] = archived["asset"]["id"]
-            live["name"] = archived["asset"]["name"]
-            return live["name"], live["id"], f"文档已超过上限，已归档为{archived['archived_name']}。"
-
-        async def events():
-            try:
-                async for event in iter_skill_run_events(
-                    skill,
-                    project_name=project["name"],
-                    document_name=asset["name"],
-                    user_token=token_user["access_token"],
-                    prepare_document=prepare_document,
-                ):
-                    if event.get("type") == "done":
-                        fingerprints = event.pop("seen_fingerprints", None)
-                        if isinstance(fingerprints, list):
-                            store.upsert_document_skill(oid, live["id"], asset["project_id"], {
-                                **skill,
-                                "id": skill_id,
-                                "seen_fingerprints": fingerprints,
-                            })
-                    yield sse_pack(event)
-            except Exception:
-                yield sse_pack({"type": "error", "error": "执行技能失败，请检查模型与资讯来源。"})
-
-        return StreamingResponse(events(), media_type="text/event-stream", headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
-        })
-
-    @app.post("/assets/{asset_id}/digest-job/run")
-    async def run_digest_now(asset_id: str, user: dict = Depends(user_from), store: Store = Depends(get_store)):
-        asset = asset_of(store, user, asset_id)
-        if not asset or asset["kind"] != "document":
-            raise HTTPException(404, "文档不存在。")
-        oid = owner_id(user)
-        job = store.get_digest_job(oid, asset_id)
-        if not job:
-            raise HTTPException(400, "请先保存定时任务配置。")
-        async def events():
-            try:
-                async for event in iter_digest_run_events(store, job):
-                    yield sse_pack(event)
-            except Exception:
-                yield sse_pack({"type": "error", "error": "执行资讯任务失败，请检查模型与来源配置。"})
-
-        return StreamingResponse(events(), media_type="text/event-stream", headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
-        })
 
     @app.post("/assistant/validate")
     def assistant_validate(body: ValidateBody, _user: dict = Depends(user_from)):

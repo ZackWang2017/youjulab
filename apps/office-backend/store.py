@@ -35,9 +35,12 @@ def recent_asset_ids(doc: dict, project_id: str, opened_id: str | None = None) -
     histories = doc.get("recent_assets_by_project")
     if isinstance(histories, dict) and project_id in histories:
         previous = histories[project_id] or []
+    elif isinstance(histories, dict) and histories:
+        # 已有分项目历史，但本项目尚无记录：不要用全局 last_assets 冒充
+        previous = []
     else:
-        # Keep pre-migration histories visible until this project is next updated.
-        previous = doc.get("recent_assets") or (doc.get("last_assets") or {}).values()
+        # 迁移前仅有全局 recent_assets
+        previous = doc.get("recent_assets") or []
     ids = [str(value) for value in previous if isinstance(value, str) and value]
     if opened_id:
         ids = [opened_id, *ids]
@@ -276,6 +279,7 @@ class Store:
     def create_sheet_chart(self, user_id: str, document_id: str, sheet_id: str, fields: dict) -> dict: raise NotImplementedError
     def update_sheet_chart(self, user_id: str, chart_id: str, fields: dict) -> dict | None: raise NotImplementedError
     def delete_sheet_charts(self, user_id: str, document_id: str) -> None: raise NotImplementedError
+    def reassign_owner(self, from_user_id: str, to_user_id: str) -> int: raise NotImplementedError
 
 
 class MemoryStore(Store):
@@ -470,6 +474,71 @@ class MemoryStore(Store):
 
     def delete_user_model_config(self, user_id: str) -> bool:
         return self._user_model_configs.pop(user_id, None) is not None
+
+    def reassign_owner(self, from_user_id: str, to_user_id: str) -> int:
+        """把访客/旧本地用户的项目与资产挂到注册邮箱对应用户上，便于按邮箱备份。"""
+        if not from_user_id or not to_user_id or from_user_id == to_user_id:
+            return 0
+        if from_user_id not in self._users or to_user_id not in self._users:
+            return 0
+        moved = 0
+        for project in self._projects.values():
+            if project.get("owner_id") == from_user_id:
+                project["owner_id"] = to_user_id
+                project["updated_at"] = now()
+                moved += 1
+        for asset in self._assets.values():
+            if asset.get("owner_id") == from_user_id:
+                asset["owner_id"] = to_user_id
+                asset["updated_at"] = now()
+                moved += 1
+        for key, job in list(self._digest_jobs.items()):
+            if job.get("user_id") != from_user_id:
+                continue
+            job["user_id"] = to_user_id
+            job["updated_at"] = now()
+            new_key = f"{to_user_id}:{job.get('document_id')}"
+            self._digest_jobs.pop(key, None)
+            self._digest_jobs[new_key] = job
+            moved += 1
+        for skill in self._document_skills.values():
+            if skill.get("user_id") == from_user_id:
+                skill["user_id"] = to_user_id
+                skill["updated_at"] = now()
+                moved += 1
+        for session in self._assistant_sessions.values():
+            if session.get("user_id") == from_user_id:
+                session["user_id"] = to_user_id
+                session["updated_at"] = now()
+                moved += 1
+        for key, cache in list(self._sheet_cache.items()):
+            if cache.get("user_id") != from_user_id:
+                continue
+            cache["user_id"] = to_user_id
+            cache["updated_at"] = now()
+            new_key = f"{to_user_id}:{cache.get('document_id')}:{cache.get('sheet_id')}"
+            self._sheet_cache.pop(key, None)
+            self._sheet_cache[new_key] = cache
+            moved += 1
+        for chart in self._sheet_charts.values():
+            if chart.get("user_id") == from_user_id:
+                chart["user_id"] = to_user_id
+                chart["updated_at"] = now()
+                moved += 1
+        if from_user_id in self._user_model_configs and to_user_id not in self._user_model_configs:
+            cfg = self._user_model_configs.pop(from_user_id)
+            cfg["user_id"] = to_user_id
+            self._user_model_configs[to_user_id] = cfg
+            moved += 1
+        source = self._users.get(from_user_id) or {}
+        target = self._users.get(to_user_id) or {}
+        if not target.get("last_project_id") and source.get("last_project_id"):
+            target["last_project_id"] = source.get("last_project_id")
+            target["last_assets"] = source.get("last_assets") or empty_last_assets()
+            target["recent_assets"] = source.get("recent_assets") or []
+            target["recent_assets_by_project"] = source.get("recent_assets_by_project") or {}
+            self._users[to_user_id] = target
+        return moved
 
     def get_digest_job(self, user_id: str, document_id: str) -> dict | None:
         found = getattr(self, "_digest_jobs", {}).get(f"{user_id}:{document_id}")
@@ -1004,7 +1073,10 @@ class MongoStore(Store):
 
 
 def create_store(url: str | None = None) -> Store:
-    url = url if url is not None else mongo_url()
-    if url.startswith("memory:"):
+    from config import office_store_mode, sqlite_path
+
+    mode = office_store_mode()
+    if mode == "memory" or (url or "").startswith("memory:"):
         return MemoryStore()
-    return MongoStore(url, mongo_db())
+    from sqlite_store import SqliteStore
+    return SqliteStore(sqlite_path())

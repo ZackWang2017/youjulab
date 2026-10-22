@@ -7,6 +7,8 @@ const cspHeaders = { 'Content-Security-Policy': OFFICE_CSP }; // 绘图页嵌入
 export default defineConfig(() => {
   const env = loadEnv('development', resolve(process.cwd(), '../..'), '');
   return {
+    // Electron loadFile 需要相对资源路径
+    base: './',
     server: {
       port: 5173,
       headers: cspHeaders,
@@ -14,7 +16,6 @@ export default defineConfig(() => {
         '/backend': {
           target: `http://127.0.0.1:${env.FINANCE_MCP_PORT || '8000'}`,
           rewrite: (path: string) => path.replace(/^\/backend/, ''),
-          headers: { Authorization: `Bearer ${env.MCP_ACCESS_TOKEN || env.FINANCE_MCP_TOKEN || 'invpdevstatic32tokenpleasechange'}` },
         },
         '/office': {
           target: `http://127.0.0.1:${env.OFFICE_API_PORT || '8100'}`,
