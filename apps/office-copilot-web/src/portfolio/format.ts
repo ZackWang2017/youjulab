@@ -54,6 +54,16 @@ export function formatDate(value: string | null | undefined): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
+/** 只显示时分，避免现价列被日期撑开。 */
+export function formatClock(value: string | null | undefined): string {
+  if (!value) return '';
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return '';
+  return new Intl.DateTimeFormat('zh-CN', {
+    hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'Asia/Shanghai',
+  }).format(d);
+}
+
 export function formatDateTime(value: string | null | undefined): string {
   if (!value) return '-';
   const d = new Date(value);

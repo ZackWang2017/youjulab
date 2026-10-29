@@ -1,9 +1,9 @@
 ---
 name: youjulab
-description: Read and write youjulab spreadsheets, documents, mind maps, and native PDF outlines through mcp-server. Use MCP when available, otherwise the REST routes on the same process.
+description: Read and write youjulab spreadsheets, documents, mind maps, project plans, and native PDF outlines through mcp-server. Use MCP when available, otherwise the REST routes on the same process.
 ---
 
-# youjulab 表格、文档与导图
+# youjulab 表格、文档、导图与项目计划
 
 用同一 mcp-server 进程读写办公表格、文档和思维导图。能连接 MCP 时用 MCP；只能发 HTTP 时用同路径的 REST。不要调用财务 `/mcp`（指标、报表、PDF 解析），也不要走 `/api/office` 选区 Agent。
 
@@ -19,6 +19,7 @@ description: Read and write youjulab spreadsheets, documents, mind maps, and nat
 | 文档 | `__MCP_BASE_URL__/mcp/documents` | `POST __MCP_BASE_URL__/api/documents/{create,read,write,format}` |
 | PDF 大纲 | `__MCP_BASE_URL__/mcp/documents` | 仅 MCP：`generate_pdf_outline` |
 | 导图 | `__MCP_BASE_URL__/mcp/mindmaps` | `POST __MCP_BASE_URL__/api/mindmaps/{create,read,write,add-node,update-node,delete-node,move-node}` |
+| 项目计划 | `__MCP_BASE_URL__/mcp/project-plans` | `POST __MCP_BASE_URL__/api/project-plans/{create,read,add-task,update-task,move-task,delete-task}` |
 
 stdio 拉起的财务入口不含这些工具。财务地址 `__MCP_BASE_URL__/mcp` 不要混用。
 
@@ -225,6 +226,46 @@ MCP 等价调用：
 write_spreadsheet(project_name="年度预算", table_name="销售表", sheet_name="Q1", start_cell="A1", values=[["月份","金额"],["1月",100]])
 merge_cells(project_name="年度预算", table_name="销售表", sheet_name="Q1", start_cell="A1", end_cell="B1")
 set_cell_font(project_name="年度预算", table_name="销售表", sheet_name="Q1", start_cell="A1", bold=true, font_size=14, align="center")
+```
+
+## 项目计划
+
+项目计划是项目级资产，参数为 `project_name` 和 `plan_name`。事项通过稳定的 `task_id` 定位；先调用 `read_project_plan` 获取当前事项、父子关系和日期，再做增量修改。不要根据事项名称猜测 ID，也不要整份覆盖计划。
+
+每个事项均有 `id`、`name`、`parentId`、`startDate`、`endDate`、`progress`、`note`、`order`。日期使用 `YYYY-MM-DD`，进度为 `0` 到 `100` 的整数。父事项含子事项时，开始日、截止日和进度由直接子事项自动汇总，外部 Agent 不应修改这三个字段。
+
+| 函数 | REST | 说明 |
+| --- | --- | --- |
+| create_project_plan | POST /api/project-plans/create | 创建项目（若缺）和空项目计划；同名计划已存在则失败。 |
+| read_project_plan | POST /api/project-plans/read | 读取扁平 `tasks` 与 revision；不自动创建。 |
+| add_project_plan_task | POST /api/project-plans/add-task | 新增根事项或子事项。省略日期时根事项默认为今天至明天，子事项继承父事项日期。 |
+| update_project_plan_task | POST /api/project-plans/update-task | 按 `task_id` 更新提供的名称、日期、进度或备注。父事项有子项时不能直接改日期和进度。 |
+| move_project_plan_task | POST /api/project-plans/move-task | 调整父级和同级顺序。`parent_id` 留空表示根级，`index=-1` 表示追加；拒绝循环父子关系。 |
+| delete_project_plan_task | POST /api/project-plans/delete-task | 删除事项及全部子事项，返回 `deleted_count`。 |
+
+需要整理计划时，优先按以下顺序操作：读取、逐项新增或更新、必要时移动、最后再次读取并确认。服务遇到 revision 冲突会自动重读重试一次，因此不要在一次操作中假定旧顺序仍有效。
+
+```text
+create_project_plan(project_name="腾讯控股", plan_name="2026 年投研计划")
+add_project_plan_task(project_name="腾讯控股", plan_name="2026 年投研计划", name="业绩跟踪", task_id="earnings")
+add_project_plan_task(project_name="腾讯控股", plan_name="2026 年投研计划", name="一季报", parent_id="earnings", start_date="2026-05-01", end_date="2026-05-15", progress=0, note="关注广告和金融科技")
+update_project_plan_task(project_name="腾讯控股", plan_name="2026 年投研计划", task_id="earnings", note="按季度复盘")
+move_project_plan_task(project_name="腾讯控股", plan_name="2026 年投研计划", task_id="earnings", parent_id="", index=0)
+```
+
+只能使用 HTTP 时，请按上表路径发送 JSON。例如：
+
+```json
+{
+  "project_name": "腾讯控股",
+  "plan_name": "2026 年投研计划",
+  "name": "一季报",
+  "parent_id": "earnings",
+  "start_date": "2026-05-01",
+  "end_date": "2026-05-15",
+  "progress": 0,
+  "note": "关注广告和金融科技"
+}
 ```
 
 ## 文档

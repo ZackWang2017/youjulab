@@ -191,6 +191,7 @@ function readConfig() {
       mcpAccessToken: normalizeServiceSecret(saved.mcpAccessToken),
       mcpJwtSecret: normalizeServiceSecret(saved.mcpJwtSecret),
       backupDir: String(saved.backupDir || ''),
+      backupEnabled: saved.backupEnabled !== false,
       backupIdentity: saved.backupIdentity && typeof saved.backupIdentity === 'object'
         ? { email: String(saved.backupIdentity.email || '').trim().toLowerCase(), accountId: String(saved.backupIdentity.accountId || '') }
         : (saved.backupCredential?.email ? { email: String(saved.backupCredential.email).trim().toLowerCase(), accountId: '' } : null),
@@ -210,6 +211,7 @@ function readConfig() {
       mcpAccessToken: newServiceSecret(),
       mcpJwtSecret: newServiceSecret(),
       backupDir: '',
+      backupEnabled: true,
       backupIdentity: null,
       lastBackupAt: '',
       modelCredentialsKey: '',
@@ -226,6 +228,7 @@ function publicConfig(config) {
     autoLogin: Boolean(config.autoLogin && config.autoLoginPassword && autoLoginAvailable()),
     autoLoginAvailable: autoLoginAvailable(),
     backupDir: backupDirectory(config),
+    backupEnabled: config.backupEnabled !== false,
     lastBackupAt: String(config.lastBackupAt || ''),
   };
 }
@@ -246,6 +249,7 @@ function writeConfig(config) {
     mcpAccessToken: normalizeServiceSecret(config?.mcpAccessToken ?? prev.mcpAccessToken),
     mcpJwtSecret: normalizeServiceSecret(config?.mcpJwtSecret ?? prev.mcpJwtSecret),
     backupDir: String(config?.backupDir ?? prev.backupDir ?? '').trim(),
+    backupEnabled: config?.backupEnabled !== false,
     backupIdentity: config?.backupIdentity ?? prev.backupIdentity ?? null,
     lastBackupAt: String(config?.lastBackupAt ?? prev.lastBackupAt ?? ''),
     modelCredentialsKey: String(config?.modelCredentialsKey ?? prev.modelCredentialsKey ?? '').trim(),
@@ -316,6 +320,24 @@ async function sqliteSnapshot(source, target) {
   return true;
 }
 
+function sqlQuote(value) {
+  return `'${String(value ?? '').replace(/'/g, "''")}'`;
+}
+
+async function currentAccountSnapshot(database, accountId) {
+  if (!accountId || !fs.existsSync(database)) return null;
+  const sql = `SELECT id, email, password_hash, os_username, created_at FROM accounts WHERE id = ${sqlQuote(accountId)} LIMIT 1;`;
+  const { stdout } = await execFileAsync('sqlite3', ['-json', database, sql]);
+  const rows = JSON.parse(stdout || '[]');
+  return rows[0] || null;
+}
+
+async function restoreCurrentAccount(database, account) {
+  if (!account?.id || !account?.email || !account?.password_hash) return;
+  const sql = `INSERT OR REPLACE INTO accounts (id, email, password_hash, os_username, created_at) VALUES (${sqlQuote(account.id)}, ${sqlQuote(account.email)}, ${sqlQuote(account.password_hash)}, ${sqlQuote(account.os_username)}, ${sqlQuote(account.created_at)});`;
+  await execFileAsync('sqlite3', [database, sql]);
+}
+
 async function archiveDirectory(source, target) {
   if (process.platform === 'win32') {
     await execFileAsync('powershell.exe', ['-NoProfile', '-Command', `Compress-Archive -Path '${source.replace(/'/g, "''")}\\*' -DestinationPath '${target.replace(/'/g, "''")}' -Force`]);
@@ -338,7 +360,7 @@ function clearDir(directory) {
   fs.mkdirSync(directory, { recursive: true });
 }
 
-async function createBackup(kind = 'scheduled') {
+async function createBackup(kind = 'scheduled', report = () => {}) {
   const config = readConfig();
   const identity = config.backupIdentity;
   if (!identity?.email) throw new Error('请先成功登录一次，再启用数据备份。');
@@ -350,13 +372,20 @@ async function createBackup(kind = 'scheduled') {
   fs.mkdirSync(destination, { recursive: true });
   clearDir(stage);
   try {
+    report({ phase: 'preparing', percent: 8, message: '正在准备备份…' });
     const dataDir = path.join(stage, 'data');
     fs.mkdirSync(dataDir, { recursive: true });
+    report({ phase: 'office', percent: 22, message: '正在备份办公数据…' });
     const files = {
       office: await sqliteSnapshot(data.sqlite, path.join(dataDir, 'office.sqlite')),
-      vectors: await sqliteSnapshot(data.vectors, path.join(dataDir, 'office-vectors.sqlite')),
-      finance: await sqliteSnapshot(data.finance, path.join(dataDir, 'finresearch.sqlite')),
+      vectors: false,
+      finance: false,
     };
+    report({ phase: 'vectors', percent: 42, message: '正在备份 PDF 索引…' });
+    files.vectors = await sqliteSnapshot(data.vectors, path.join(dataDir, 'office-vectors.sqlite'));
+    report({ phase: 'finance', percent: 60, message: '正在备份持仓数据…' });
+    files.finance = await sqliteSnapshot(data.finance, path.join(dataDir, 'finresearch.sqlite'));
+    report({ phase: 'files', percent: 76, message: '正在整理 PDF 文件…' });
     if (fs.existsSync(data.files)) fs.cpSync(data.files, path.join(dataDir, 'office-files'), { recursive: true, force: true });
     const manifest = {
       version: BACKUP_VERSION,
@@ -366,9 +395,15 @@ async function createBackup(kind = 'scheduled') {
       files,
     };
     fs.writeFileSync(path.join(stage, 'manifest.json'), JSON.stringify(manifest, null, 2));
+    report({ phase: 'archiving', percent: 90, message: '正在压缩备份文件…' });
     await archiveDirectory(stage, archive);
     writeConfig({ ...config, lastBackupAt: manifest.createdAt });
-    return { id: path.basename(archive), name: path.basename(archive), createdAt: manifest.createdAt, kind, path: archive };
+    const result = { id: path.basename(archive), name: path.basename(archive), createdAt: manifest.createdAt, kind, path: archive };
+    report({ phase: 'done', percent: 100, message: '备份完成。' });
+    return result;
+  } catch (error) {
+    report({ phase: 'error', percent: 0, message: error instanceof Error ? error.message : String(error) });
+    throw error;
   } finally {
     fs.rmSync(stage, { recursive: true, force: true });
   }
@@ -409,7 +444,7 @@ async function listBackups(email = '') {
 function scheduleBackups() {
   if (backupTimer) clearTimeout(backupTimer);
   const config = readConfig();
-  if (!config.backupIdentity?.email || !config.backupDir) return;
+  if (config.backupEnabled === false || !config.backupIdentity?.email || !config.backupDir) return;
   const now = new Date();
   const next = new Date(now);
   next.setSeconds(0, 0);
@@ -438,8 +473,10 @@ async function restoreBackup(value) {
     if (manifest?.account?.email !== email || (manifest?.account?.accountId && manifest.account.accountId !== accountId)) {
       throw new Error('当前账号与该备份不一致，无法恢复。');
     }
-    await createBackup('pre-restore');
     const data = resolveDataPaths(readConfig());
+    const currentAccount = await currentAccountSnapshot(data.finance, accountId);
+    if (!currentAccount) throw new Error('未找到当前已验证账号，无法安全恢复。');
+    await createBackup('pre-restore');
     stopServices();
     const source = path.join(stage, 'data');
     for (const name of ['office.sqlite', 'office-vectors.sqlite', 'finresearch.sqlite']) {
@@ -450,6 +487,8 @@ async function restoreBackup(value) {
       fs.copyFileSync(from, to);
       for (const suffix of ['-wal', '-shm']) fs.rmSync(`${to}${suffix}`, { force: true });
     }
+    // 持仓库包含账号表。保留当前账户记录，避免恢复旧备份后密码被回滚。
+    await restoreCurrentAccount(data.finance, currentAccount);
     fs.rmSync(data.files, { recursive: true, force: true });
     if (fs.existsSync(path.join(source, 'office-files'))) fs.cpSync(path.join(source, 'office-files'), data.files, { recursive: true, force: true });
     return { ok: true, restartRequired: true };
@@ -742,6 +781,7 @@ ipcMain.handle('youju:get-login-preference', () => loginPreference());
 ipcMain.handle('youju:save-login-preference', (_event, preference) => saveLoginPreference(preference));
 ipcMain.handle('youju:backup-status', async (_event, email) => ({
   directory: backupDirectory(),
+  enabled: readConfig().backupEnabled !== false,
   lastBackupAt: String(readConfig().lastBackupAt || ''),
   records: await listBackups(email),
 }));
@@ -752,9 +792,20 @@ ipcMain.handle('youju:set-backup-directory', (_event, directory) => {
   scheduleBackups();
   return next;
 });
-ipcMain.handle('youju:create-backup', async () => createBackup('manual'));
+ipcMain.handle('youju:set-backup-schedule-enabled', (_event, enabled) => {
+  const next = writeConfig({ ...readConfig(), backupEnabled: Boolean(enabled) });
+  scheduleBackups();
+  return next;
+});
+ipcMain.handle('youju:create-backup', async event => createBackup('manual', progress => {
+  if (!event.sender.isDestroyed()) event.sender.send('youju:backup-progress', progress);
+}));
 ipcMain.handle('youju:restore-backup', async (_event, value) => restoreBackup(value));
-ipcMain.handle('youju:quit-after-restore', () => app.quit());
+ipcMain.handle('youju:quit-after-restore', () => {
+  // 恢复会替换正在使用的 SQLite 文件；由新进程重新启动全部本地服务。
+  app.relaunch();
+  app.quit();
+});
 
 async function checkUpdate(remoteBase) {
   try {

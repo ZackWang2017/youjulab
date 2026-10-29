@@ -215,6 +215,8 @@ def _tencent_symbol(ticker_code: str) -> str:
         return "hk" + code.zfill(5)
     if market in {"sh", "sz", "bj"} and code:
         return market + code
+    if market == "us" and code:
+        return "us" + code.upper()
     return ""
 
 
@@ -262,6 +264,17 @@ def _jisilu_items(page: str) -> list[dict]:
     return items
 
 
+def news_symbol(source: str, ticker_code: str) -> str:
+    kind = (source or "").strip().lower()
+    if kind == "sina":
+        return _sina_symbol(ticker_code)
+    if kind == "xueqiu":
+        return _xueqiu_symbol(ticker_code)
+    if kind == "tencent":
+        return _tencent_symbol(ticker_code)
+    return (ticker_code or "").strip()
+
+
 def _xueqiu_symbol(ticker_code: str) -> str:
     code, market = _ticker(ticker_code)
     market = market.upper()
@@ -269,6 +282,8 @@ def _xueqiu_symbol(ticker_code: str) -> str:
         return code.zfill(5)
     if market in {"SH", "SZ", "BJ"} and code:
         return market + code
+    if market == "US" and code:
+        return code.upper()
     return ""
 
 

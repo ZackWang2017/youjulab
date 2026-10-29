@@ -1,14 +1,17 @@
 import { Editor, Mark } from '@tiptap/core';
 import { createIcons, icons } from 'lucide';
 import Link from '@tiptap/extension-link';
+import Heading from '@tiptap/extension-heading';
 import Paragraph from '@tiptap/extension-paragraph';
 import StarterKit from '@tiptap/starter-kit';
 import { Table, TableCell, TableHeader, TableRow } from '@tiptap/extension-table';
-import { download, type EditorAdapter } from '../../context/types';
+import { download, persist, saved, type EditorAdapter } from '../../context/types';
 import { circleBullet, listStack, nestedListTab, nestUnderNumber } from '../rich-text-lists';
 import { formattedInsertHtml } from './markdown';
 
 const FALLBACK = { type: 'doc', content: [{ type: 'paragraph' }] };
+const FONT_SIZE_STEPS = [10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32, 36];
+const readingPositionKey = (assetId: string) => `youjulab:document-reading-position:${assetId}`;
 
 const smallText = Mark.create({
   name: 'small',
@@ -90,6 +93,19 @@ const indentedParagraph = Paragraph.extend({
   },
 });
 
+const indentedHeading = Heading.extend({
+  addAttributes() {
+    return {
+      ...this.parent?.(),
+      textIndent: {
+        default: null,
+        parseHTML: element => (element as HTMLElement).style.textIndent || null,
+        renderHTML: attributes => attributes.textIndent ? { style: `text-indent:${attributes.textIndent}` } : {},
+      },
+    };
+  },
+});
+
 export function mountDocument(
   container: HTMLElement,
   changed: () => void,
@@ -100,15 +116,45 @@ export function mountDocument(
   let loading = false;
   let fontFamilyControl: HTMLSelectElement | null = null;
   let fontSizeControl: HTMLSelectElement | null = null;
+  let decreaseFontSizeButton: HTMLButtonElement | null = null;
+  let increaseFontSizeButton: HTMLButtonElement | null = null;
+  const readingSurface = container.parentElement!;
+  let restoreReadingPosition = false;
+  let readingPositionTimer: number | undefined;
+  const saveReadingPosition = (id = assetId) => {
+    if (!id || restoreReadingPosition) return;
+    persist(readingPositionKey(id), { top: readingSurface.scrollTop });
+  };
+  const queueReadingPositionSave = () => {
+    window.clearTimeout(readingPositionTimer);
+    readingPositionTimer = window.setTimeout(() => saveReadingPosition(), 180);
+  };
+  const restoreSavedReadingPosition = (id: string) => {
+    const savedPosition = saved(readingPositionKey(id)) as { top?: unknown } | null;
+    const top = Number(savedPosition?.top);
+    restoreReadingPosition = true;
+    readingSurface.scrollTop = 0;
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      if (assetId === id && Number.isFinite(top) && top > 0) {
+        readingSurface.scrollTop = Math.min(top, Math.max(0, readingSurface.scrollHeight - readingSurface.clientHeight));
+      }
+      restoreReadingPosition = false;
+    }));
+  };
+  readingSurface.addEventListener('scroll', queueReadingPositionSave, { passive: true });
   const syncTextStyleControls = () => {
     const attributes = editor.getAttributes('documentTextStyle') as { fontFamily?: string | null; fontSize?: string | null };
     if (fontFamilyControl) fontFamilyControl.value = attributes.fontFamily || '';
     if (fontSizeControl) fontSizeControl.value = attributes.fontSize || '';
+    const size = Number.parseFloat(attributes.fontSize || '14') || 14;
+    if (decreaseFontSizeButton) decreaseFontSizeButton.disabled = size <= FONT_SIZE_STEPS[0];
+    if (increaseFontSizeButton) increaseFontSizeButton.disabled = size >= FONT_SIZE_STEPS[FONT_SIZE_STEPS.length - 1];
   };
   const editor = new Editor({
     element: container, extensions: [
-      StarterKit.configure({ bulletList: false, paragraph: false }),
+      StarterKit.configure({ bulletList: false, paragraph: false, heading: false }),
       indentedParagraph,
+      indentedHeading,
       Link.configure({ openOnClick: true, autolink: true, defaultProtocol: 'https', HTMLAttributes: { target: '_blank', rel: 'noopener noreferrer' } }),
       smallText,
       documentHighlight,
@@ -383,23 +429,50 @@ export function mountDocument(
     ]);
     const fontSize = createStyleSelect('fontSize', '字号', [
       ['', '字号'],
-      ['12px', '12'],
-      ['14px', '14'],
-      ['16px', '16'],
-      ['18px', '18'],
-      ['20px', '20'],
-      ['24px', '24'],
-      ['28px', '28'],
+      ...FONT_SIZE_STEPS.map(size => [`${size}px`, String(size)] as [string, string]),
     ]);
+    const fontSizeStepper = document.createElement('span');
+    fontSizeStepper.className = 'format-size-stepper';
+    const applyFontSizeStep = (direction: -1 | 1) => {
+      const current = editor.getAttributes('documentTextStyle') as { fontFamily?: string | null; fontSize?: string | null };
+      const currentSize = Number.parseFloat(current.fontSize || '14') || 14;
+      const currentIndex = FONT_SIZE_STEPS.indexOf(currentSize);
+      const nextIndex = currentIndex >= 0
+        ? currentIndex + direction
+        : direction > 0
+          ? FONT_SIZE_STEPS.findIndex(size => size > currentSize)
+          : FONT_SIZE_STEPS.reduce((lastIndex, size, index) => size < currentSize ? index : lastIndex, -1);
+      const nextSize = FONT_SIZE_STEPS[Math.max(0, Math.min(FONT_SIZE_STEPS.length - 1, nextIndex < 0 ? 0 : nextIndex))];
+      editor.chain().focus().setMark('documentTextStyle', { ...current, fontSize: `${nextSize}px` }).run();
+      syncTextStyleControls();
+    };
+    const createFontSizeStepButton = (direction: -1 | 1) => {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.title = direction > 0 ? '增大字号' : '缩小字号';
+      button.setAttribute('aria-label', button.title);
+      button.innerHTML = `<i data-lucide="${direction > 0 ? 'plus' : 'minus'}"></i>`;
+      button.addEventListener('mousedown', event => event.preventDefault());
+      button.addEventListener('click', () => applyFontSizeStep(direction));
+      return button;
+    };
+    decreaseFontSizeButton = createFontSizeStepButton(-1);
+    increaseFontSizeButton = createFontSizeStepButton(1);
+    fontSizeStepper.append(decreaseFontSizeButton, increaseFontSizeButton);
     const indentText = document.createElement('button');
     indentText.type = 'button';
     indentText.dataset.format = 'indent-text';
-    indentText.title = '缩进单元格文本';
+    indentText.title = '缩进文本';
     indentText.setAttribute('aria-label', '缩进文本');
     indentText.innerHTML = '<i data-lucide="indent-increase"></i>';
     fontFamilyControl = fontFamily;
     fontSizeControl = fontSize;
-    toolbar.querySelector('.format-sep')?.before(fontFamily, fontSize, indentText);
+    const styleAnchor = toolbar.querySelector('.format-sep') || toolbar.querySelector('[data-format="rule"]');
+    if (styleAnchor?.classList.contains('format-sep')) {
+      styleAnchor.before(fontFamily, fontSize, fontSizeStepper, indentText);
+    } else {
+      styleAnchor?.after(fontFamily, fontSize, fontSizeStepper, indentText);
+    }
     createIcons({ icons });
     syncTextStyleControls();
   }
@@ -418,17 +491,18 @@ export function mountDocument(
       }
       if (format === 'table') openTableDialog();
       if (format === 'indent-text') {
-        if (!editor.isActive('table')) {
-          window.dispatchEvent(new CustomEvent('office-error', { detail: '请将光标放在表格单元格内，再使用缩进文本。' }));
-          return;
-        }
-        const paragraph = editor.getAttributes('paragraph') as { textIndent?: string | null };
-        chain.updateAttributes('paragraph', { textIndent: paragraph.textIndent ? null : '1em' }).run();
+        const nodeType = editor.isActive('heading') ? 'heading' : 'paragraph';
+        const node = editor.getAttributes(nodeType) as { textIndent?: string | null };
+        chain.updateAttributes(nodeType, { textIndent: node.textIndent ? null : '1em' }).run();
       }
       if (format === 'code') chain.toggleCode().run();
       if (format === 'h1') chain.toggleHeading({ level: 1 }).run();
       if (format === 'heading') chain.toggleHeading({ level: 2 }).run();
       if (format === 'h3') chain.toggleHeading({ level: 3 }).run();
+      if (format === 'h4') chain.toggleHeading({ level: 4 }).run();
+      if (format === 'h5') chain.toggleHeading({ level: 5 }).run();
+      if (format === 'h6') chain.toggleHeading({ level: 6 }).run();
+      if (format === 'paragraph') chain.setParagraph().run();
       if (format === 'list') {
         if (listStack(editor).length) nestUnderNumber(editor);
         else chain.toggleOrderedList().run();
@@ -441,11 +515,13 @@ export function mountDocument(
   });
   return {
     load(asset) {
+      saveReadingPosition();
       loading = true;
       assetId = asset.id;
       revision = asset.revision;
       editor.commands.setContent(asset.content || FALLBACK);
       loading = false;
+      restoreSavedReadingPosition(assetId);
       changed();
     },
     context() {

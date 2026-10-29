@@ -1,6 +1,7 @@
 import { historyForApi, isAiAskContent, parseAskThread, serializeAskThread, type AskThread, type AskTurn } from './ask-ai';
 import { markdownToHtml } from '../document/markdown';
 import { appendThinkingBlock } from '../../ui/thinking-status';
+import { createIcons, icons } from 'lucide';
 
 type AskAiHooks = {
   userName: string;
@@ -136,7 +137,7 @@ export function openAskAiDialog(args: AskAiOpenArgs, hooks: AskAiHooks) {
       <header class="ask-ai-drag" data-drag>
         <h2 id="ask-ai-title">问 AI</h2>
         <span class="ask-ai-drag-hint">拖动</span>
-        <button type="button" class="ask-ai-close" data-cancel aria-label="关闭">关闭</button>
+        <button type="button" class="ask-ai-close" data-cancel title="关闭" aria-label="关闭"><i data-lucide="x"></i></button>
       </header>
       <section class="ask-ai-selection">
         <div class="ask-ai-label">选区：</div>
@@ -168,8 +169,14 @@ export function openAskAiDialog(args: AskAiOpenArgs, hooks: AskAiHooks) {
     const finish = (result: { action: 'saved' | 'deleted' | 'closed'; content?: string; xref?: number; markXref?: number; deleted?: number[] }) => {
       if (settled) return;
       settled = true;
+      document.removeEventListener('keydown', onKey);
       panel.remove();
       resolve(result);
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      event.preventDefault();
+      void closeDialog();
     };
 
     function syncChrome() {
@@ -364,6 +371,7 @@ export function openAskAiDialog(args: AskAiOpenArgs, hooks: AskAiHooks) {
     (panel as HTMLElement & { __askAiClose?: () => Promise<void> }).__askAiClose = () => closeDialog({ force: true });
 
     panel.querySelector('[data-cancel]')!.addEventListener('click', () => { void closeDialog(); });
+    document.addEventListener('keydown', onKey);
     saveBtn.addEventListener('click', async () => {
       if (busy || !thread.turns.some(turn => turn.role === 'assistant') || (xref && !dirty)) return;
       setBusy(true);
@@ -394,6 +402,7 @@ export function openAskAiDialog(args: AskAiOpenArgs, hooks: AskAiHooks) {
     });
 
     document.body.append(panel);
+    createIcons({ icons });
     const pos = loadPos(panel);
     panel.style.left = `${pos.left}px`;
     panel.style.top = `${pos.top}px`;

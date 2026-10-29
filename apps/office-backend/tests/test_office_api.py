@@ -107,6 +107,30 @@ class OfficeApiTests(unittest.TestCase):
         notebook = self.client.get(f"/assets/{notebooks[0]['id']}", headers=headers).json()
         self.assertEqual(notebook["content"], {"type": "doc", "content": [{"type": "paragraph"}]})
 
+    def test_pdf_folders_are_project_scoped_without_mutating_assets(self):
+        data = self.auth("pdf-folders@example.com")
+        headers = {"Authorization": f"Bearer {data['token']}"}
+        project_id = data["user"]["last_project_id"]
+        pdf = self.client.post(
+            f"/projects/{project_id}/assets", headers=headers,
+            json={"kind": "pdf", "name": "年报"},
+        ).json()
+        initial = self.client.get(f"/projects/{project_id}/pdf-folders", headers=headers)
+        self.assertEqual(initial.status_code, 200)
+        self.assertFalse(initial.json()["configured"])
+        body = {
+            "folders": [{"id": "financials", "name": "财报", "children": []}],
+            "placements": {pdf["id"]: "financials"},
+            "collapsed": {"financials": False},
+        }
+        saved = self.client.put(f"/projects/{project_id}/pdf-folders", headers=headers, json=body)
+        self.assertEqual(saved.status_code, 200)
+        self.assertTrue(saved.json()["configured"])
+        self.assertEqual(saved.json()["placements"], body["placements"])
+        asset = self.store.asset(data["user"]["id"], pdf["id"])
+        self.assertEqual(asset["project_id"], project_id)
+        self.assertIsNone(asset["file_path"])
+
     def test_document_visibility_and_legacy_migration(self):
         data = self.auth("visibility@example.com")
         headers = {"Authorization": f"Bearer {data['token']}"}
@@ -189,6 +213,33 @@ class OfficeApiTests(unittest.TestCase):
             f"/projects/{second['id']}/assets?kind=project_plan", headers=headers,
         ).json()["assets"]
         self.assertIn(personal["id"], [item["id"] for item in still_second])
+
+    def test_diagram_visibility_create_and_edit(self):
+        data = self.auth("diagram-vis@example.com")
+        headers = {"Authorization": f"Bearer {data['token']}"}
+        first = data["user"]["last_project_id"]
+        personal = self.client.post(
+            f"/projects/{first}/assets",
+            headers=headers,
+            json={"kind": "diagram", "name": "个人绘图", "visibility": "user"},
+        ).json()
+        self.assertEqual(personal["placement"], "user")
+        self.assertIsNone(personal["project_id"])
+
+        second = self.client.post("/projects", headers=headers, json={"name": "另一项目"}).json()
+        listed = self.client.get(
+            f"/projects/{second['id']}/assets?kind=diagram", headers=headers,
+        ).json()["assets"]
+        self.assertIn(personal["id"], [item["id"] for item in listed])
+
+        self.client.post(f"/projects/{second['id']}/select", headers=headers)
+        project_scoped = self.client.put(
+            f"/assets/{personal['id']}",
+            headers=headers,
+            json={"revision": personal["revision"], "visibility": "project"},
+        ).json()
+        self.assertEqual(project_scoped["placement"], "project")
+        self.assertEqual(project_scoped["project_id"], second["id"])
 
     def test_user_tools_stay_visible_across_projects(self):
         data = self.auth("a@example.com")
@@ -298,6 +349,47 @@ class OfficeApiTests(unittest.TestCase):
         again = self.client.post(f"/projects/{second['id']}/select", headers=token).json()
         self.assertEqual(again["last_assets"]["sheet"], second_extra["id"])
 
+    def test_outline_templates_belong_to_the_user_and_cross_projects(self):
+        data = self.auth("outline-tpl@example.com")
+        token = {"Authorization": f"Bearer {data['token']}"}
+        first = data["user"]["last_project_id"]
+        doc = {"type": "doc", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "收入"}]}]}
+        created = self.client.post(
+            f"/projects/{first}/assets",
+            headers=token,
+            json={
+                "kind": "outline_template",
+                "name": "年报大纲",
+                "content": {"format": "pdf-outline-template-v1", "doc": doc},
+            },
+        ).json()
+        self.assertEqual(created["placement"], "user")
+        self.assertIsNone(created["project_id"])
+        self.assertEqual(created["content"]["doc"]["content"][0]["content"][0]["text"], "收入")
+        another = self.client.post(
+            f"/projects/{first}/assets",
+            headers=token,
+            json={
+                "kind": "outline_template",
+                "name": "季报大纲",
+                "content": {"format": "pdf-outline-template-v1", "doc": doc},
+            },
+        ).json()
+        self.assertNotEqual(another["id"], created["id"])
+        second = self.client.post("/projects", headers=token, json={"name": "二号项目"}).json()
+        listed = self.client.get(
+            f"/projects/{second['id']}/assets?kind=outline_template", headers=token,
+        ).json()["assets"]
+        self.assertEqual({item["id"] for item in listed}, {created["id"], another["id"]})
+        recent = self.client.get(f"/assets/recent?project_id={first}", headers=token).json()["assets"]
+        self.assertNotIn(created["id"], [item["id"] for item in recent])
+        invalid = self.client.post(
+            f"/projects/{first}/assets",
+            headers=token,
+            json={"kind": "outline_template", "name": "坏模板", "content": {"format": "nope"}},
+        )
+        self.assertEqual(invalid.status_code, 400)
+
     def test_recent_assets_follow_opening_order_and_include_project_name(self):
         data = self.auth("recent@example.com")
         token = {"Authorization": f"Bearer {data['token']}"}
@@ -365,6 +457,30 @@ class OfficeApiTests(unittest.TestCase):
             json={"project_id": project_id, "asset_ids": reordered_ids[:-1]},
         )
         self.assertEqual(invalid.status_code, 400)
+
+    def test_dismiss_recent_asset_removes_only_the_tab(self):
+        data = self.auth("recent-close@example.com")
+        token = {"Authorization": f"Bearer {data['token']}"}
+        project_id = data["user"]["last_project_id"]
+        first = self.client.post(
+            f"/projects/{project_id}/assets", headers=token,
+            json={"kind": "sheet", "name": "估值表"},
+        ).json()
+        second = self.client.post(
+            f"/projects/{project_id}/assets", headers=token,
+            json={"kind": "document", "name": "研究笔记"},
+        ).json()
+        self.client.post(f"/assets/{first['id']}/select", headers=token)
+        self.client.post(f"/assets/{second['id']}/select", headers=token)
+        closed = self.client.delete(
+            f"/assets/recent/{second['id']}?project_id={project_id}", headers=token,
+        )
+        self.assertEqual(closed.status_code, 200)
+        ids = [item["id"] for item in closed.json()["assets"]]
+        self.assertNotIn(second["id"], ids)
+        self.assertIn(first["id"], ids)
+        kept = self.client.get(f"/assets/{second['id']}", headers=token)
+        self.assertEqual(kept.status_code, 200)
 
     def test_save_revision_conflict(self):
         data = self.auth("a@example.com")
@@ -1027,6 +1143,8 @@ class OfficeApiTests(unittest.TestCase):
         self.assertIn("/mcp/sheets", skill.text)
         self.assertIn("/api/spreadsheets/read", skill.text)
         self.assertIn("/mcp/documents", skill.text)
+        self.assertIn("/mcp/project-plans", skill.text)
+        self.assertIn("add_project_plan_task", skill.text)
         self.assertIn("generate_pdf_outline", skill.text)
         self.assertNotIn("announcement-pdf/SKILL.md", skill.text)
 
@@ -1169,6 +1287,107 @@ class OfficeApiTests(unittest.TestCase):
             self.assertEqual(count, 0)
         finally:
             empty.close()
+
+
+class SheetEncryptionApiTests(unittest.TestCase):
+    def setUp(self):
+        self.store = MemoryStore()
+        self.client = TestClient(create_app(self.store))
+        patcher = patch("sheet_crypto.KDF_PARAMS", {"n": 16, "r": 8, "p": 1, "dklen": 32})
+        self.addCleanup(patcher.stop)
+        patcher.start()
+
+    def _sheet(self):
+        data = self.client.post("/auth/register", json={"email": "enc@example.com", "password": "secret1"}).json()
+        headers = {"Authorization": f"Bearer {data['token']}"}
+        return headers, data["user"]["last_assets"]["sheet"]
+
+    def test_enable_locks_get_until_password(self):
+        headers, asset_id = self._sheet()
+        opened = self.client.get(f"/assets/{asset_id}", headers=headers).json()
+        enabled = self.client.post(f"/assets/{asset_id}/encryption", headers=headers, json={
+            "action": "enable", "password": "secret1", "password_confirm": "secret1",
+        })
+        self.assertEqual(enabled.status_code, 200, enabled.text)
+        self.assertTrue(enabled.json()["encrypted"])
+        self.assertFalse(enabled.json()["locked"])
+        self.assertEqual(enabled.json()["content"], opened["content"])
+        locked = self.client.get(f"/assets/{asset_id}", headers=headers).json()
+        self.assertTrue(locked["encrypted"])
+        self.assertTrue(locked["locked"])
+        self.assertNotIn("content", locked)
+        stored = self.store.asset(self.store.user_by_email("enc@example.com")["id"], asset_id)
+        self.assertEqual(stored["content"]["format"], "youju-sheet-encrypted-v1")
+        wrong = self.client.get(f"/assets/{asset_id}", headers={**headers, "X-File-Password": "secret2"})
+        self.assertEqual(wrong.status_code, 403)
+        unlocked = self.client.get(f"/assets/{asset_id}", headers={**headers, "X-File-Password": "secret1"}).json()
+        self.assertFalse(unlocked["locked"])
+        self.assertEqual(unlocked["content"], opened["content"])
+
+    def test_save_requires_password_and_keeps_ciphertext(self):
+        headers, asset_id = self._sheet()
+        self.client.post(f"/assets/{asset_id}/encryption", headers=headers, json={
+            "action": "enable", "password": "secret1", "password_confirm": "secret1",
+        })
+        denied = self.client.put(f"/assets/{asset_id}", headers=headers, json={
+            "content": {"name": "机密", "sheetOrder": [], "sheets": {}}, "revision": 1,
+        })
+        self.assertEqual(denied.status_code, 403)
+        saved = self.client.put(
+            f"/assets/{asset_id}",
+            headers={**headers, "X-File-Password": "secret1"},
+            json={"content": {"name": "机密", "sheetOrder": ["a"], "sheets": {"a": {"name": "S1"}}}, "revision": 1},
+        )
+        self.assertEqual(saved.status_code, 200, saved.text)
+        self.assertEqual(saved.json()["content"]["name"], "机密")
+        user_id = self.store.user_by_email("enc@example.com")["id"]
+        self.assertEqual(self.store.asset(user_id, asset_id)["content"]["format"], "youju-sheet-encrypted-v1")
+
+    def test_sheet_cache_rejected_when_encrypted(self):
+        headers, asset_id = self._sheet()
+        self.client.put(f"/assets/{asset_id}/sheet-cache", headers=headers, json={
+            "sheet_id": "s1", "sheet_name": "S1", "revision": 0, "values": [["a"]],
+        })
+        self.client.post(f"/assets/{asset_id}/encryption", headers=headers, json={
+            "action": "enable", "password": "secret1", "password_confirm": "secret1",
+        })
+        blocked = self.client.put(f"/assets/{asset_id}/sheet-cache", headers=headers, json={
+            "sheet_id": "s1", "sheet_name": "S1", "revision": 1, "values": [["secret"]],
+        })
+        self.assertEqual(blocked.status_code, 403)
+        missing = self.client.get(f"/assets/{asset_id}/sheet-cache?sheet_id=s1", headers=headers)
+        self.assertEqual(missing.status_code, 403)
+
+    def test_disable_restores_plaintext(self):
+        headers, asset_id = self._sheet()
+        self.client.post(f"/assets/{asset_id}/encryption", headers=headers, json={
+            "action": "enable", "password": "secret1", "password_confirm": "secret1",
+        })
+        disabled = self.client.post(f"/assets/{asset_id}/encryption", headers=headers, json={
+            "action": "disable", "password": "secret1",
+        })
+        self.assertEqual(disabled.status_code, 200, disabled.text)
+        self.assertFalse(disabled.json()["encrypted"])
+        opened = self.client.get(f"/assets/{asset_id}", headers=headers).json()
+        self.assertFalse(opened["encrypted"])
+        self.assertIn("content", opened)
+
+    def test_change_password(self):
+        headers, asset_id = self._sheet()
+        opened = self.client.get(f"/assets/{asset_id}", headers=headers).json()
+        self.client.post(f"/assets/{asset_id}/encryption", headers=headers, json={
+            "action": "enable", "password": "secret1", "password_confirm": "secret1",
+        })
+        changed = self.client.post(f"/assets/{asset_id}/encryption", headers=headers, json={
+            "action": "change", "password": "secret1", "new_password": "secret2", "password_confirm": "secret2",
+        })
+        self.assertEqual(changed.status_code, 200, changed.text)
+        self.assertFalse(changed.json()["locked"])
+        old = self.client.get(f"/assets/{asset_id}", headers={**headers, "X-File-Password": "secret1"})
+        self.assertEqual(old.status_code, 403)
+        unlocked = self.client.get(f"/assets/{asset_id}", headers={**headers, "X-File-Password": "secret2"}).json()
+        self.assertEqual(unlocked["content"], opened["content"])
+
 
 if __name__ == "__main__":
     unittest.main()

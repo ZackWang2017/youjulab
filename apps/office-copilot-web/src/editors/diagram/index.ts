@@ -2,7 +2,9 @@ import './style.css';
 import { download, type EditorAdapter, type Patch } from '../../context/types';
 
 const ORIGIN = 'https://embed.diagrams.net';
-const FRAME_SRC = `${ORIGIN}/?embed=1&ui=atlas&proto=json&spin=1&libraries=1&lang=zh&saveAndExit=0&noSaveBtn=1&noExitBtn=1`;
+const FRAME_SRC = `${ORIGIN}/?embed=1&ui=atlas&proto=json&configure=1&spin=1&libraries=1&lang=zh&saveAndExit=0&noSaveBtn=1&noExitBtn=1`;
+const HIDDEN_MENUS = ['file', 'edit', 'view', 'arrange', 'extras', 'help'];
+const EMBED_CSS = '.geMenubarContainer,.geMenubar{display:none!important;height:0!important;min-height:0!important;overflow:hidden!important}.geToolbarContainer{top:0!important}';
 
 const DEFAULT_XML = `<mxGraphModel dx="1000" dy="600" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="827" pageHeight="1169" math="0" shadow="0"><root><mxCell id="0"/><mxCell id="1" parent="0"/><mxCell id="2" value="公告" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="1"><mxGeometry x="120" y="220" width="140" height="70" as="geometry"/></mxCell><mxCell id="3" value="解读" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="1"><mxGeometry x="360" y="220" width="140" height="70" as="geometry"/></mxCell><mxCell id="4" value="结论" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="1"><mxGeometry x="600" y="220" width="140" height="70" as="geometry"/></mxCell><mxCell id="5" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=classic;" edge="1" parent="1" source="2" target="3"><mxGeometry relative="1" as="geometry"/></mxCell><mxCell id="6" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=classic;" edge="1" parent="1" source="3" target="4"><mxGeometry relative="1" as="geometry"/></mxCell></root></mxGraphModel>`;
 
@@ -84,6 +86,10 @@ export function mountDiagram(
     if (event.origin !== ORIGIN || event.source !== frame.contentWindow) return;
     const message = readMessage(event.data);
     if (!message) return;
+    if (message.event === 'configure') {
+      post({ action: 'configure', config: { hideMenus: HIDDEN_MENUS, css: EMBED_CSS } });
+      return;
+    }
     if (message.event === 'init') {
       ready = true;
       sendLoad();

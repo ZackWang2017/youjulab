@@ -60,6 +60,13 @@ for pkg in (
 
 # office-backend 本地包（不含 tests）
 hiddenimports += collect_submodules("announcement_intelligence")
+# 规则包是数据文件，collect_submodules 不会带上；运行时按包目录读取
+for item in (BACKEND / "announcement_intelligence").iterdir():
+    if item.is_file() and item.suffix in {".json", ".yaml", ".yml"}:
+        datas.append((str(item), "announcement_intelligence"))
+glossary = BACKEND / "data" / "finance_glossary.json"
+if glossary.is_file():
+    datas.append((str(glossary), "data"))
 for name in BACKEND.glob("*.py"):
     if name.name == "__init__.py":
         continue

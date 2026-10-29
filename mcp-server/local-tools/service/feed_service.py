@@ -8,7 +8,7 @@ from typing import Any
 
 import httpx
 
-MAX_ITEMS_PER_SOURCE = 8
+MAX_ITEMS_PER_SOURCE = 24
 MAX_SUMMARY = 800
 _TIMEOUT = httpx.Timeout(20.0, read=40.0)
 
@@ -73,7 +73,17 @@ def _fetch_rss(url: str) -> list[dict[str, Any]]:
         import feedparser
     except ImportError as exc:
         raise ValueError("缺少 feedparser 依赖，请安装后重试。") from exc
-    parsed = feedparser.parse(url)
+    with httpx.Client(timeout=_TIMEOUT, follow_redirects=True) as client:
+        response = client.get(
+            url,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept": "application/rss+xml, application/xml, text/xml, */*;q=0.8",
+            },
+        )
+        if response.is_error:
+            raise ValueError(f"拉取 RSS 失败 HTTP {response.status_code}：{url}")
+        parsed = feedparser.parse(response.content)
     if getattr(parsed, "bozo", False) and not parsed.entries:
         raise ValueError(f"无法解析 RSS：{url}")
     items: list[dict[str, Any]] = []
@@ -85,9 +95,21 @@ def _fetch_rss(url: str) -> list[dict[str, Any]]:
             "title": title,
             "url": link,
             "summary": summary[:MAX_SUMMARY],
+            "published_at": _entry_time(entry),
             "source_url": url,
         })
     return items
+
+
+def _entry_time(entry: Any) -> str:
+    text = (getattr(entry, "published", None) or getattr(entry, "updated", None) or "").strip()
+    parsed = getattr(entry, "published_parsed", None) or getattr(entry, "updated_parsed", None)
+    if parsed:
+        try:
+            return f"{parsed.tm_year:04d}-{parsed.tm_mon:02d}-{parsed.tm_mday:02d} {parsed.tm_hour:02d}:{parsed.tm_min:02d}"
+        except (AttributeError, TypeError, ValueError):
+            pass
+    return text[:16]
 
 
 def _fetch_url_page(url: str) -> list[dict[str, Any]]:

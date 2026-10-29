@@ -67,6 +67,9 @@ for _layer in (
     "account-service/endpoints",
     "embedding-service/service",
     "embedding-service/endpoints",
+    "information-service/repository",
+    "information-service/service",
+    "information-service/endpoints",
 ):
     sys.path.insert(0, str(HERE / _layer))
 
@@ -76,6 +79,7 @@ import office_agent_endpoint  # noqa: E402
 import spreadsheet_endpoint  # noqa: E402
 import document_endpoint  # noqa: E402
 import mindmap_endpoint  # noqa: E402
+import project_plan_endpoint  # noqa: E402
 import pdf_index_endpoint  # noqa: E402
 import announcement_outline_endpoint  # noqa: E402
 import statement_endpoint  # noqa: E402
@@ -88,6 +92,7 @@ import wechat_article_endpoint  # noqa: E402
 import preset_news_endpoint  # noqa: E402
 import feed_endpoint  # noqa: E402
 import portfolio_endpoint  # noqa: E402
+import information_endpoint  # noqa: E402
 from access_token import bearer_matches, bearer_token, is_user_office_path, reset_incoming_access_token, set_incoming_access_token  # noqa: E402
 from account_jwt import reset_claims, set_claims, verify  # noqa: E402
 from dotenv import load_dotenv  # noqa: E402
@@ -106,6 +111,8 @@ pdf_index_endpoint.register_tools(docs_mcp)
 announcement_outline_endpoint.register_tools(docs_mcp)
 mindmaps_mcp = FastMCP("invp-mindmaps", streamable_http_path="/mcp/mindmaps")
 mindmap_endpoint.register_tools(mindmaps_mcp)
+project_plans_mcp = FastMCP("invp-project-plans", streamable_http_path="/mcp/project-plans")
+project_plan_endpoint.register_tools(project_plans_mcp)
 external_mcp = FastMCP("invp-external-tools", streamable_http_path="/mcp/external-tools")
 external_tools.register_tools(external_mcp)
 local_mcp = FastMCP("invp-local-tools", streamable_http_path="/mcp/local-tools")
@@ -136,6 +143,7 @@ def _run_http() -> None:
     from spreadsheet_endpoint import mount_sheet_mcp, register_routes as register_sheet_routes
     from document_endpoint import register_routes as register_document_routes
     from mindmap_endpoint import register_routes as register_mindmap_routes
+    from project_plan_endpoint import register_routes as register_project_plan_routes
     register_routes(app)
 
     _CORS = {
@@ -146,9 +154,11 @@ def _run_http() -> None:
     register_sheet_routes(app, _CORS)
     register_document_routes(app, _CORS)
     register_mindmap_routes(app, _CORS)
+    register_project_plan_routes(app, _CORS)
     mount_sheet_mcp(app, sheets_mcp)
     mount_sheet_mcp(app, docs_mcp)
     mount_sheet_mcp(app, mindmaps_mcp)
+    mount_sheet_mcp(app, project_plans_mcp)
     external_tools.mount_external_mcp(app, external_mcp)
     website_crawler_endpoint.mount_local_mcp(app, local_mcp)
 
@@ -170,6 +180,7 @@ def _run_http() -> None:
     }
     _JWT_PREFIXES = (
         "/api/portfolio",
+        "/api/information",
         "/api/embeddings",
         "/api/scheduler",
         "/api/account/me",
@@ -236,6 +247,7 @@ def _run_http() -> None:
     feed_endpoint.register_routes(app, _CORS)
     portfolio_endpoint.register_routes(app, _CORS)
     portfolio_endpoint.mount_scheduler(app)
+    information_endpoint.register_routes(app, _CORS)
     import account_endpoint  # noqa: E402
     import embedding_endpoint  # noqa: E402
     account_endpoint.register_routes(app, _CORS)
@@ -249,6 +261,7 @@ def _run_http() -> None:
     print(f"invp-sheets MCP: streamable-http at http://{host}:{port}/mcp/sheets", file=sys.stderr)
     print(f"invp-documents MCP: streamable-http at http://{host}:{port}/mcp/documents", file=sys.stderr)
     print(f"invp-mindmaps MCP: streamable-http at http://{host}:{port}/mcp/mindmaps", file=sys.stderr)
+    print(f"invp-project-plans MCP: streamable-http at http://{host}:{port}/mcp/project-plans", file=sys.stderr)
     print(f"invp-external-tools MCP: streamable-http at http://{host}:{port}/mcp/external-tools", file=sys.stderr)
     print(f"invp-local-tools MCP: streamable-http at http://{host}:{port}/mcp/local-tools", file=sys.stderr)
     print(f"spreadsheet API: POST http://{host}:{port}/api/spreadsheets/{{create,read,write,merge,unmerge,background,border,font}}", file=sys.stderr)
@@ -265,6 +278,7 @@ def _run_http() -> None:
     print(f"account: http://{host}:{port}/api/account/{{health,register,login}}", file=sys.stderr)
     print(f"embeddings: POST http://{host}:{port}/api/embeddings", file=sys.stderr)
     print(f"portfolio: GET/POST http://{host}:{port}/api/portfolio/portfolios (Authorization: Bearer JWT)", file=sys.stderr)
+    print(f"information: GET/POST http://{host}:{port}/api/information/groups (Authorization: Bearer JWT)", file=sys.stderr)
     print(f"scheduler: GET http://{host}:{port}/api/scheduler/tasks, POST /api/scheduler/tasks/{{name}}/run", file=sys.stderr)
     uvicorn.run(app, host=host, port=port, log_level="info")
 

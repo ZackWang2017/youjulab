@@ -41,3 +41,6 @@ apps/office-desktop/mcp-sidecar/__pycache__/
 
 # mcp 自动部署日志
 deploy/deploy-mcp.log
+
+# 误生成在仓库根下的 Windows 绝对路径目录（用户 PDF，勿提交）
+D\:*/

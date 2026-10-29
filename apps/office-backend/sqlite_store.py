@@ -21,6 +21,7 @@ _TABLES = (
     "sheet_cache",
     "sheet_charts",
     "user_model_configs",
+    "pdf_folders",
 )
 
 _ATTR = {
@@ -33,6 +34,7 @@ _ATTR = {
     "sheet_cache": "_sheet_cache",
     "sheet_charts": "_sheet_charts",
     "user_model_configs": "_user_model_configs",
+    "pdf_folders": "_pdf_folders",
 }
 
 # 方法 → 可能改动的表；未列出的写操作仍全量落盘。
@@ -60,9 +62,11 @@ _METHOD_TABLES: dict[str, tuple[str, ...]] = {
     "update_assistant_session": ("assistant_sessions",),
     "delete_assistant_session": ("assistant_sessions",),
     "upsert_sheet_cache": ("sheet_cache",),
+    "delete_sheet_caches": ("sheet_cache",),
     "create_sheet_chart": ("sheet_charts",),
     "update_sheet_chart": ("sheet_charts",),
     "delete_sheet_charts": ("sheet_charts",),
+    "upsert_pdf_folder_store": ("pdf_folders",),
     "reassign_owner": _TABLES,
 }
 
@@ -177,6 +181,7 @@ def _wrap_mutations(cls: type[SqliteStore]) -> type[SqliteStore]:
         "users", "get_user_model_config", "get_digest_job", "list_document_skills",
         "get_document_skill", "list_enabled_digest_jobs", "list_assistant_sessions",
         "get_assistant_session", "get_sheet_cache", "list_sheet_charts", "get_sheet_chart",
+        "get_pdf_folder_store",
     }
     for name in dir(MemoryStore):
         if name.startswith("_") or name in skip or name in reads:

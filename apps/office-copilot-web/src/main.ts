@@ -19,16 +19,21 @@ import { renderPatch } from './patches/preview';
 import type { Context, EditorAdapter, Patch, Surface } from './context/types';
 import { persist, saved } from './context/types';
 import {
-  bindLocalAccount, bootstrap, createAsset, createProject, flushSave, getAsset, hasUnsavedWork, logout, openAsset, queueSave,
-  loadRecentAssets, rememberRevision, renameAsset, renameProject, reorderRecentAssets, retrySave, selectProject, updateAsset, uploadPdf,
+  assetNeedsUnlock, bindLocalAccount, bootstrap, createAsset, createProject, discardSave, flushSave, getAsset, hasUnsavedWork, logout, openAsset, queueSave,
+  dismissRecentAsset, loadRecentAssets, lockEncryptedAsset, rememberRevision, renameAsset, renameProject, reorderRecentAssets, retrySave, selectProject, updateAsset, uploadPdf,
+  clearFilePassword, setFilePassword,
   type Asset, type Kind, type Workspace,
 } from './workspace/session';
+import { promptSheetPassword } from './editors/sheet/encryption-dialog';
 import {
-  alertSaveError, askConfirm, askDocumentCreate, askProjectPlanCreate, askScopedAssetEdit, askText,
-  openBackupRecordsDialog, renderAuth, renderChrome, renderNav, type PortfolioNavState, type PortfolioNavView,
+  alertSaveError, askConfirm, askDiagramCreate, askDocumentCreate, askProjectPlanCreate, askScopedAssetEdit, askText,
+  renderAuth, renderChrome, renderNav, type InformationNavState, type InformationNavView, type PortfolioNavState, type PortfolioNavView,
 } from './workspace/nav';
 import { mountPortfolio, type PortfolioController } from './portfolio';
 import { ALL_PORTFOLIOS_ID, ALL_PORTFOLIOS_NAME, portfolioApi } from './portfolio/api';
+import { mountInformation, type InformationController } from './information';
+import { informationApi } from './information/api';
+import { openGroupDialog } from './information/dialogs';
 import { openCalcWindow } from './workspace/calc-window';
 import { openNotebookWindow, showNotebookLoadError, notebookContainsFocus, saveNotebookNow } from './workspace/notebook-window';
 import { loadPdfFolders, placePdf, savePdfFolders } from './workspace/pdf-folders';
@@ -61,10 +66,12 @@ let assistantThread: { anchor: Context; turns: AssistantTurn[] } | null = null;
 let liveAssistant: LiveAssistant | null = null;
 let sessionController: SessionController | null = null;
 let sessionSummary = '';
-/** 主界面模式：工作区（项目/资产）或持仓管理。 */
-let appView: 'workspace' | 'portfolio' = 'workspace';
+/** 主界面模式：工作区（项目/资产）、持仓管理或资讯。 */
+let appView: 'workspace' | 'portfolio' | 'information' = 'workspace';
 let portfolioController: PortfolioController | null = null;
 const portfolioNav: PortfolioNavState = { active: false, items: [], currentId: null, view: 'holdings' };
+let informationController: InformationController | null = null;
+const informationNav: InformationNavState = { active: false, items: [], currentId: null, view: 'today' };
 
 window.addEventListener('wheel', event => {
   if (event.ctrlKey || event.metaKey) return;
@@ -335,22 +342,6 @@ function paintFooterUser() {
   const el = document.querySelector<HTMLElement>('#footer-user');
   if (!el) return;
   const email = remoteEmail();
-  const backup = document.querySelector<HTMLButtonElement>('#backup-status');
-  if (backup) {
-    if (email && window.youju?.backupStatus) {
-      backup.hidden = false;
-      backup.textContent = '备份记录';
-      backup.onclick = () => { void openBackupRecordsDialog(email); };
-      void window.youju.backupStatus(email).then(status => {
-        const date = status.lastBackupAt ? new Date(status.lastBackupAt) : null;
-        backup.textContent = date && !Number.isNaN(date.getTime())
-          ? `备份 ${date.toLocaleString('zh-CN', { hour12: false })}`
-          : '尚未备份';
-      }).catch(() => { backup.textContent = '备份记录'; });
-    } else {
-      backup.hidden = true;
-    }
-  }
   if (remoteToken() && email) {
     el.replaceChildren(document.createTextNode(email));
     return;
@@ -371,6 +362,12 @@ function footer() {
       ? ALL_PORTFOLIOS_NAME
       : portfolioNav.items.find(item => item.id === portfolioNav.currentId)?.name;
     $('#footer-surface').textContent = name ? `持仓 · ${name}` : '持仓管理';
+    paintFooterUser();
+    return;
+  }
+  if (appView === 'information') {
+    const name = informationNav.items.find(item => item.id === informationNav.currentId)?.name;
+    $('#footer-surface').textContent = name ? `资讯 · ${name}` : '资讯';
     paintFooterUser();
     return;
   }
@@ -396,6 +393,22 @@ function noteSaved(text?: string) {
 }
 
 window.addEventListener('office-saved', () => noteSaved());
+window.addEventListener('office-sheet-encrypted', event => {
+  const savedAsset = (event as CustomEvent<Asset>).detail;
+  if (!workspace || !savedAsset?.id) return;
+  const merge = (item: Asset) => item.id === savedAsset.id
+    ? { ...item, ...savedAsset, content: savedAsset.content ?? item.content }
+    : item;
+  if (workspace.selected.sheet?.id === savedAsset.id) {
+    workspace.selected.sheet = merge(workspace.selected.sheet);
+  }
+  workspace.assets.sheet = workspace.assets.sheet.map(merge);
+  workspace.recentAssets = workspace.recentAssets.map(item => (
+    item.id === savedAsset.id ? { ...item, ...savedAsset, content: item.content } : item
+  ));
+  paintNav();
+  refresh();
+});
 window.addEventListener('office-document-replaced', event => {
   const detail = (event as CustomEvent<{ id?: string; archived_name?: string }>).detail || {};
   if (!detail.id) return;
@@ -484,6 +497,7 @@ function paintNav() {
     onSurface: kind => { void switchSurface(kind); },
     onSelectAsset: (kind, id) => { void run(() => chooseAsset(kind, id)); },
     onSelectRecentAsset: id => { void run(() => chooseRecentAsset(id)); },
+    onCloseRecentAsset: id => { void run(() => closeRecentAsset(id)); },
     onReorderRecentAssets: ids => { void run(async () => {
       if (!workspace) return;
       workspace.recentAssets = await reorderRecentAssets(workspace.project.id, ids);
@@ -535,7 +549,7 @@ function paintNav() {
       });
     },
     onOpenPortfolio: () => { void run(() => enterPortfolio()); },
-    onClosePortfolio: () => { if (appView === 'portfolio') void run(() => switchSurface(surface)); },
+    onClosePortfolio: () => { if (appView === 'portfolio' || appView === 'information') void run(() => switchSurface(surface)); },
     onSelectPortfolio: id => { void run(() => showPortfolio(id, portfolioNav.view)); },
     onPortfolioView: view => { void run(() => showPortfolio(portfolioNav.currentId, view)); },
     onNewPortfolio: () => { void run(async () => {
@@ -564,7 +578,34 @@ function paintNav() {
       const next = portfolioNav.currentId === id || !portfolioNav.items.length ? (portfolioNav.items[0]?.id ?? null) : portfolioNav.currentId;
       await showPortfolio(next, portfolioNav.view);
     }); },
-  }, { ...portfolioNav, active: appView === 'portfolio' });
+    onOpenInformation: () => { void run(() => enterInformation()); },
+    onCloseInformation: () => { if (appView === 'information' || appView === 'portfolio') void run(() => switchSurface(surface)); },
+    onSelectInformation: id => { void run(() => showInformation(id, informationNav.view)); },
+    onInformationView: view => { void run(() => showInformation(informationNav.currentId, view)); },
+    onNewInformation: () => { void run(async () => {
+      const created = await openGroupDialog();
+      if (!created) return;
+      informationNav.items = await informationApi.list();
+      await showInformation(created.id, 'today');
+    }); },
+    onRenameInformation: id => { void run(async () => {
+      const groups = await informationApi.list();
+      const full = groups.find(group => group.id === id);
+      if (!full || !await openGroupDialog(full)) return;
+      informationNav.items = await informationApi.list();
+      paintNav(); footer();
+      await informationController?.refresh();
+    }); },
+    onDeleteInformation: id => { void run(async () => {
+      const item = informationNav.items.find(group => group.id === id);
+      if (!item) return;
+      if (!await askConfirm(`删除资讯组「${item.name}」？该组下未收藏的资讯会一并删除。`)) return;
+      await informationApi.remove(id);
+      informationNav.items = await informationApi.list();
+      const next = informationNav.currentId === id ? (informationNav.items[0]?.id ?? null) : informationNav.currentId;
+      await showInformation(next, informationNav.view);
+    }); },
+  }, { ...portfolioNav, active: appView === 'portfolio' }, { ...informationNav, active: appView === 'information' });
 }
 
 /** 在当前工作区上弹出登录窗。登录成功后会整页重载资产；afterLogin 在重载后再跑（如进入持仓）。 */
@@ -622,12 +663,59 @@ async function showPortfolio(id: number | null, view: PortfolioNavView) {
   await portfolioController?.show(id, view);
 }
 
+async function enterInformation() {
+  closeAllMenus();
+  if (!(await remoteHealthy())) {
+    fail(new RemoteDownError('服务器不可用。'));
+    return;
+  }
+  let items;
+  try {
+    items = await informationApi.list();
+  } catch (e) {
+    if (e instanceof RemoteAuthError) {
+      openRemoteLogin(async () => { await enterInformation(); });
+      return;
+    }
+    throw e;
+  }
+  informationNav.items = items;
+  appView = 'information';
+  persist('office-view', 'information');
+  document.querySelectorAll<HTMLElement>('.surface').forEach(el => { el.hidden = el.id !== 'information'; });
+  if (!informationController) {
+    informationController = mountInformation($('#information'), fail, {
+      onOpenFavorites: () => {
+        const favorites = informationNav.items.find(item => item.kind === 'favorites');
+        if (favorites) void run(() => showInformation(favorites.id, 'today'));
+      },
+    });
+  }
+  const remembered = Number(saved('office-information-id'));
+  const valid = (id: number | null) => id !== null && informationNav.items.some(item => item.id === id);
+  const currentId = valid(informationNav.currentId) ? informationNav.currentId
+    : valid(remembered) ? remembered
+    : (informationNav.items[0]?.id ?? null);
+  const view = saved('office-information-view');
+  await showInformation(currentId, view === 'review' ? 'review' : informationNav.view);
+}
+
+async function showInformation(id: number | null, view: InformationNavView) {
+  informationNav.currentId = id;
+  informationNav.view = view;
+  persist('office-information-id', id);
+  persist('office-information-view', view);
+  paintNav(); footer();
+  window.dispatchEvent(new Event('resize'));
+  await informationController?.show(id, view);
+}
+
 function closeAllMenus() {
   document.querySelectorAll<HTMLElement>('.menu').forEach(menu => { menu.hidden = true; });
 }
 
 async function switchSurface(kind: Kind) {
-  if (appView === 'portfolio') {
+  if (appView === 'portfolio' || appView === 'information') {
     appView = 'workspace';
     persist('office-view', 'workspace');
   }
@@ -650,6 +738,27 @@ async function switchSurface(kind: Kind) {
   refresh();
 }
 
+async function unlockEncryptedSheet(asset: Asset): Promise<Asset> {
+  let current = asset;
+  while (assetNeedsUnlock(current)) {
+    const password = await promptSheetPassword(current.name);
+    if (!password) throw new Error('表格已加密，请先解锁。');
+    setFilePassword(current.id, password);
+    try {
+      current = await getAsset(current.id, { force: true, unlock: true });
+    } catch (error) {
+      clearFilePassword(current.id);
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.includes('密码')) {
+        window.dispatchEvent(new CustomEvent('office-error', { detail: message }));
+        continue;
+      }
+      throw error;
+    }
+  }
+  return current;
+}
+
 async function loadEditor(kind: Kind) {
   const meta = workspace?.selected[kind];
   if (!editors || !meta) {
@@ -667,7 +776,8 @@ async function loadEditor(kind: Kind) {
     meta.content.sheets || meta.content.sheetOrder || meta.content.nodeData || meta.content.type === 'doc' || meta.content.format === 'drawio-v1' || meta.content.format === 'mermaid-v1' || meta.content.format === 'invp-research-diagram-v1' || meta.content.format === 'invp-project-plan-v1'
   )) || (kind === 'pdf' && 'content' in meta);
   // Asset lists omit content; PDF notes live in content too, so always hydrate before loading.
-  const asset = hasBody ? meta : await getAsset(meta.id);
+  let asset = hasBody ? meta : await getAsset(meta.id);
+  if (kind === 'sheet') asset = await unlockEncryptedSheet(asset);
   if (workspace) workspace.selected[kind] = asset;
   await editors[kind].load(asset);
 }
@@ -675,14 +785,31 @@ async function loadEditor(kind: Kind) {
 async function chooseAsset(kind: Kind, id: string, trackRecent = true) {
   if (!workspace || !editors) return;
   // 已是当前打开的文件：只切到对应工作区，不再重新拉取/装载。
-  if (workspace.selected[kind]?.id === id) {
+  if (workspace.selected[kind]?.id === id && !(kind === 'sheet' && assetNeedsUnlock(workspace.selected[kind]))) {
     if (trackRecent) {
-      void office.json(`/assets/${id}/select`, { method: 'POST' }).catch(() => {});
+      const projectId = workspace.project.id;
+      void office.json(`/assets/${id}/select`, { method: 'POST' })
+        .then(() => loadRecentAssets(projectId))
+        .then(list => {
+          if (workspace?.project.id === projectId) {
+            workspace.recentAssets = list;
+            paintNav();
+          }
+        })
+        .catch(() => {});
     }
     await switchSurface(kind);
     return;
   }
-  const { asset } = await openAsset(id, trackRecent);
+  const previous = workspace.selected[kind];
+  const opened = await openAsset(id, trackRecent);
+  if (previous?.id && previous.id !== id) {
+    const locked = lockEncryptedAsset(previous.id);
+    if (locked && previous.kind === 'sheet') {
+      workspace.assets.sheet = workspace.assets.sheet.map(item => item.id === locked.id ? { ...item, encrypted: true } : item);
+    }
+  }
+  const asset = kind === 'sheet' ? await unlockEncryptedSheet(opened.asset) : opened.asset;
   resetAssistantThread();
   workspace.selected[kind] = asset;
   workspace.assets[kind] = workspace.assets[kind].map(item => item.id === asset.id ? asset : item);
@@ -712,6 +839,46 @@ async function chooseRecentAsset(id: string) {
   await chooseAsset(recent.kind as Kind, recent.id, false);
 }
 
+async function closeRecentAsset(id: string) {
+  if (!workspace) return;
+  const previous = workspace.recentAssets;
+  const index = previous.findIndex(item => item.id === id);
+  if (index < 0) return;
+  const closing = previous[index];
+  const rest = previous.filter(item => item.id !== id);
+  const wasVisible = workspace.selected[surface]?.id === id;
+  const closingEncrypted = closing.kind === 'sheet' && Boolean(
+    closing.encrypted || (workspace.selected.sheet?.id === id && workspace.selected.sheet.encrypted),
+  );
+  if (closingEncrypted) discardSave(id);
+  workspace.recentAssets = await dismissRecentAsset(workspace.project.id, id);
+  if (wasVisible) {
+    const neighbor = rest[index] || rest[index - 1];
+    const next = neighbor && workspace.recentAssets.find(item => item.id === neighbor.id);
+    if (next) {
+      await chooseRecentAsset(next.id);
+      return;
+    }
+    if (!closingEncrypted) await flushSave();
+    if (closing.kind === 'sheet' && editors) {
+      const locked = lockEncryptedAsset(id) || workspace.selected.sheet;
+      if (locked?.encrypted) {
+        const meta: Asset = { ...locked, encrypted: true, locked: true };
+        delete meta.content;
+        workspace.selected.sheet = meta;
+        await editors.sheet.load(meta);
+      }
+    }
+  } else if (closing.kind === 'sheet') {
+    lockEncryptedAsset(id);
+    if (workspace.selected.sheet?.id === id) {
+      const locked = lockEncryptedAsset(id);
+      if (locked) workspace.selected.sheet = locked;
+    }
+  }
+  paintNav();
+}
+
 async function addAsset(kind: Kind) {
   if (!workspace) return;
   if (kind === 'pdf') {
@@ -720,10 +887,12 @@ async function addAsset(kind: Kind) {
   }
   const scopedCreate = kind === 'document'
     ? await askDocumentCreate()
+    : kind === 'diagram'
+      ? await askDiagramCreate()
     : kind === 'project_plan'
       ? await askProjectPlanCreate()
       : null;
-  if ((kind === 'document' || kind === 'project_plan') && !scopedCreate) return;
+  if ((kind === 'document' || kind === 'diagram' || kind === 'project_plan') && !scopedCreate) return;
   const name = scopedCreate?.name || await askText(
     kind === 'sheet' ? '新建表格' : kind === 'document' ? '新建文档' : kind === 'research' ? '新建研究图' : kind === 'diagram' ? '新建绘图' : kind === 'project_plan' ? '新建项目计划' : '新建导图',
     kind === 'sheet' ? '表格名称' : kind === 'document' ? '文档名称' : kind === 'research' ? '研究图名称' : kind === 'diagram' ? '绘图名称' : kind === 'project_plan' ? '项目计划名称' : '导图名称',
@@ -825,10 +994,10 @@ async function editAsset(kind: Kind, id: string) {
   if (!current) return;
   const currentVisibility = current.placement === 'user' ? 'user' as const : 'project' as const;
   let updated: Asset;
-  if (kind === 'document' || kind === 'project_plan') {
+  if (kind === 'document' || kind === 'diagram' || kind === 'project_plan') {
     const edited = await askScopedAssetEdit({
-      title: kind === 'document' ? '编辑文档' : '编辑项目计划',
-      nameLabel: kind === 'document' ? '文档名称' : '项目计划名称',
+      title: kind === 'document' ? '编辑文档' : kind === 'diagram' ? '编辑绘图' : '编辑项目计划',
+      nameLabel: kind === 'document' ? '文档名称' : kind === 'diagram' ? '绘图名称' : '项目计划名称',
       name: current.name,
       visibility: currentVisibility,
     });
@@ -843,7 +1012,7 @@ async function editAsset(kind: Kind, id: string) {
   workspace.assets[kind] = workspace.assets[kind].map(item => item.id === id ? { ...item, ...updated } : item);
   if (workspace.selected[kind]?.id === id) workspace.selected[kind] = { ...workspace.selected[kind]!, ...updated };
   // 改为「我可见」后仍在当前项目列表；改为「项目可见」且绑到其他项目时，可能离开当前列表
-  if (kind === 'document' || kind === 'project_plan') {
+  if (kind === 'document' || kind === 'diagram' || kind === 'project_plan') {
     const listed = await office.json<{ assets: Asset[] }>(
       `/projects/${workspace.project.id}/assets?kind=${kind}`,
     );
@@ -1038,6 +1207,57 @@ function bindWorkspace() {
         const asset = workspace?.selected.pdf;
         if (!asset) return Promise.reject(new Error('未打开 PDF。'));
         return office.stream('/assistant/pdf-summary', { document_id: asset.id, ...body }, onEvent);
+      },
+      listOutlineTemplates: async () => {
+        const projectId = workspace?.project.id;
+        if (!projectId) return [];
+        const listed = await office.json<{ assets: { id: string; name: string }[] }>(
+          `/projects/${projectId}/assets?kind=outline_template`,
+        );
+        return listed.assets.map(item => ({ id: item.id, name: item.name }));
+      },
+      loadOutlineTemplate: async id => {
+        const asset = await office.json<{ id: string; name: string; revision: number; content?: { doc?: unknown } }>(`/assets/${id}`);
+        return {
+          id: asset.id,
+          name: asset.name,
+          revision: asset.revision,
+          doc: asset.content?.doc ?? { type: 'doc', content: [{ type: 'paragraph' }] },
+        };
+      },
+      saveOutlineTemplate: async (name, doc) => {
+        const projectId = workspace?.project.id;
+        if (!projectId) throw new Error('未打开项目。');
+        const saved = await office.json<{ id: string; name: string; revision: number; content?: { doc?: unknown } }>(`/projects/${projectId}/assets`, {
+          method: 'POST',
+          body: JSON.stringify({
+            kind: 'outline_template',
+            name,
+            content: { format: 'pdf-outline-template-v1', doc },
+          }),
+        });
+        return {
+          id: saved.id,
+          name: saved.name,
+          revision: saved.revision,
+          doc: saved.content?.doc ?? doc,
+        };
+      },
+      updateOutlineTemplate: async (id, name, doc, revision) => {
+        const saved = await office.json<{ id: string; name: string; revision: number; content?: { doc?: unknown } }>(`/assets/${id}`, {
+          method: 'PUT',
+          body: JSON.stringify({
+            name,
+            revision,
+            content: { format: 'pdf-outline-template-v1', doc },
+          }),
+        });
+        return {
+          id: saved.id,
+          name: saved.name,
+          revision: saved.revision,
+          doc: saved.content?.doc ?? doc,
+        };
       },
     }),
     mindmap: mountMindmap($('#mindmap'), refresh, (id, content) => {
@@ -1551,6 +1771,7 @@ async function boot(options?: { forceAuth?: boolean }) {
   const last = saved('office-surface');
   await switchSurface(last === 'document' || last === 'pdf' || last === 'mindmap' || last === 'research' || last === 'diagram' || last === 'project_plan' || last === 'calendar' ? last : 'sheet');
   if (saved('office-view') === 'portfolio') await enterPortfolio().catch(fail);
+  if (saved('office-view') === 'information') await enterInformation().catch(fail);
   await Promise.all(ALL_KINDS.map(kind => loadEditor(kind).catch(fail)));
   if (sessionController && isStructuredAssistant() && workspace?.selected[surface]) {
     await sessionController.refreshList();

@@ -4,7 +4,7 @@ import {
   type PDFDocumentProxy, type PDFDocumentLoadingTask,
 } from 'pdfjs-dist/legacy/build/pdf.mjs';
 import { EventBus, PDFLinkService, PDFViewer, ScrollMode } from 'pdfjs-dist/legacy/web/pdf_viewer.mjs';
-import { Editor } from '@tiptap/core';
+import { Editor, Mark } from '@tiptap/core';
 import Link from '@tiptap/extension-link';
 import StarterKit from '@tiptap/starter-kit';
 import { createIcons, icons } from 'lucide';
@@ -17,11 +17,12 @@ import { isAiAskContent, parseAskThread } from './ask-ai';
 import { openAskAiDialog } from './ask-ai-dialog';
 import { openPdfAnnotationDialog, pdfAnnotationPreview } from './annotation-dialog';
 import { openOutlineDialog } from './outline-dialog';
-import { outlineToTiptap, type PdfOutlineItem } from './outline';
+import { matchTemplateOutline, outlineToTiptap, type PdfOutlineItem } from './outline';
 import { bindPdfShots } from './shots';
 import { openPdfSummaryDialog } from './summary-dialog';
-import { circleBullet, collapsibleListItem, fourLevelBulletTab } from '../rich-text-lists';
+import { circleBullet, collapsibleListItem, pdfIndentedParagraph, pdfNotebookTab } from '../rich-text-lists';
 import type { PdfFileOptions, PdfFileProgress } from '../../office-client/client';
+import { openTemplateDialog, type OutlineTemplateRecord } from './template-dialog';
 
 GlobalWorkerOptions.workerSrc = worker;
 
@@ -31,6 +32,32 @@ const MAX_PDF = 30 * 1024 * 1024;
 /** 与 office-backend PdfAnnotBody / pdf_annot 对齐；前端先按行合并再截断。 */
 const MAX_ANNOT_BOXES = 200;
 const EMPTY_NOTEBOOK = { type: 'doc', content: [{ type: 'paragraph' }] };
+
+const pdfOutlineReference = Mark.create({
+  name: 'pdfOutlineReference',
+  inclusive: false,
+  addAttributes() {
+    return {
+      page: {
+        default: null,
+        parseHTML: element => Number((element as HTMLElement).dataset.pdfOutlinePage) || null,
+        renderHTML: attributes => attributes.page ? { 'data-pdf-outline-page': String(attributes.page) } : {},
+      },
+    };
+  },
+  parseHTML: () => [{ tag: '[data-pdf-outline-page]' }],
+  renderHTML: ({ HTMLAttributes }) => {
+    const page = HTMLAttributes['data-pdf-outline-page'] ?? HTMLAttributes.page;
+    return ['span', {
+      ...HTMLAttributes,
+      class: 'pdf-outline-reference',
+      'data-pdf-outline-page': page,
+      role: 'link',
+      tabindex: '0',
+      title: `跳转至 PDF 第 ${page} 页`,
+    }, 0];
+  },
+});
 
 /** 合并同行相邻矩形，减少大选区 getClientRects 数量。 */
 function mergeSelectionBoxes(boxes: number[][], yTol = 3, xGap = 6): number[][] {
@@ -107,6 +134,11 @@ type PdfAssetViewState = {
   notebookOpen?: boolean;
   notebookWidth?: number;
   notebookScrollTop?: number;
+  generatedOutline?: PdfOutlineItem[];
+  readingHistory?: Array<{ page: number; scrollTop: number }>;
+  readingHistoryIndex?: number;
+  copyReadingHistory?: Array<{ page: number; scrollTop: number }>;
+  copyReadingHistoryIndex?: number;
 };
 
 function xrefOf(id: string) {
@@ -184,6 +216,10 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
   }, onEvent: (event: Record<string, any>) => void) => Promise<void>;
   generateOutline: (onEvent: (event: Record<string, any>) => void) => Promise<void>;
   generateSummary: (body: { selection: string; page: number }, onEvent: (event: Record<string, any>) => void) => Promise<void>;
+  listOutlineTemplates: () => Promise<{ id: string; name: string }[]>;
+  loadOutlineTemplate: (id: string) => Promise<OutlineTemplateRecord>;
+  saveOutlineTemplate: (name: string, doc: unknown) => Promise<OutlineTemplateRecord>;
+  updateOutlineTemplate: (id: string, name: string, doc: unknown, revision: number) => Promise<OutlineTemplateRecord>;
 }): EditorAdapter {
   let pdf: PDFDocumentProxy | undefined;
   let copyPdf: PDFDocumentProxy | undefined;
@@ -220,6 +256,13 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
   let busy = false;
   let outlineBusy = false;
   let summaryBusy = false;
+  let generatedOutline: PdfOutlineItem[] = [];
+  type ReadingHistory = { entries: Array<{ page: number; scrollTop: number }>; index: number };
+  const readingHistories: Record<PaneId, ReadingHistory> = {
+    main: { entries: [], index: -1 },
+    copy: { entries: [], index: -1 },
+  };
+  let restoringReadingHistory = false;
   let notebookInsertAt: number | null = null;
   let opening = false;
   // pagesinit 里跳到上次页码后，pdf.js 还会同步 update()。这段时间不能把页码写回第 1 页。
@@ -257,6 +300,7 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
   const counter = container.querySelector<HTMLElement>('[data-page]')!;
   const notebookToggle = container.querySelector<HTMLButtonElement>('[data-pdf-notebook]')!;
   const outlineToggle = container.querySelector<HTMLButtonElement>('[data-pdf-outline]')!;
+  const templateButton = container.querySelector<HTMLButtonElement>('[data-pdf-template]')!;
   container.querySelector<HTMLButtonElement>('[data-pdf-note-command="quote"]')?.remove();
   const summaryToggle = document.createElement('button');
   summaryToggle.type = 'button';
@@ -287,6 +331,22 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
   const fitWidth = container.querySelector<HTMLButtonElement>('[data-fit-width]')!;
   const splitBtn = container.querySelector<HTMLButtonElement>('[data-split-view]')!;
   const askAiBtn = container.querySelector<HTMLButtonElement>('[data-ask-ai]')!;
+  const createReadingHistoryToolbar = (pane: PaneId, root: HTMLElement) => {
+    const toolbar = document.createElement('div');
+    toolbar.className = 'pdf-reading-history';
+    toolbar.setAttribute('role', 'toolbar');
+    toolbar.setAttribute('aria-label', '阅读历史');
+    toolbar.innerHTML = '<button type="button" data-reading-back title="返回上次阅读位置" aria-label="返回上次阅读位置" disabled><i data-lucide="arrow-left"></i></button><button type="button" data-reading-forward title="前进下次阅读位置" aria-label="前进下次阅读位置" disabled><i data-lucide="arrow-right"></i></button>';
+    root.prepend(toolbar);
+    const back = toolbar.querySelector<HTMLButtonElement>('[data-reading-back]')!;
+    const forward = toolbar.querySelector<HTMLButtonElement>('[data-reading-forward]')!;
+    back.onclick = () => restoreReadingPosition(pane, readingHistories[pane].index - 1);
+    forward.onclick = () => restoreReadingPosition(pane, readingHistories[pane].index + 1);
+    return { back, forward };
+  };
+  const mainHistoryControls = createReadingHistoryToolbar('main', mainRoot);
+  const copyHistoryControls = createReadingHistoryToolbar('copy', copyRoot);
+  createIcons({ icons });
   const annotateButtons = [...container.querySelectorAll<HTMLButtonElement>('[data-annotate]')];
   const error = (detail: string) => window.dispatchEvent(new CustomEvent('office-error', { detail }));
   const MIN_PANE = 120;
@@ -471,8 +531,48 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
     if (command === 'bullet') chain.toggleBulletList().run();
     if (command === 'ordered') chain.toggleOrderedList().run();
     if (command === 'quote') chain.toggleBlockquote().run();
-    if (command === 'undo') chain.undo().run();
-    if (command === 'redo') chain.redo().run();
+  }
+  function openNotebookPageLinkDialog() {
+    const currentPdf = pdf;
+    if (!notebookEditor || !currentPdf) return;
+    const { from, to } = notebookEditor.state.selection;
+    if (from === to) {
+      alertMessage('请先在笔记中选中需要关联页码的文字。');
+      return;
+    }
+    document.querySelector<HTMLElement>('.pdf-page-link-overlay')?.remove();
+    const overlay = document.createElement('div');
+    overlay.className = 'dialog-overlay pdf-page-link-overlay';
+    overlay.innerHTML = [
+      '<form class="name-dialog pdf-page-link-dialog" role="dialog" aria-modal="true" aria-labelledby="pdf-page-link-title">',
+      '<h2 id="pdf-page-link-title">关联 PDF 页码</h2>',
+      `<p>输入页码（1 - ${currentPdf.numPages}），选中文字将可点击跳转。</p>`,
+      `<input type="number" min="1" max="${currentPdf.numPages}" step="1" value="${main.viewer.currentPageNumber || 1}" aria-label="PDF 页码" required>`,
+      '<div class="dialog-actions"><button type="button" data-cancel>取消</button><button type="submit" class="primary">添加链接</button></div>',
+      '</form>',
+    ].join('');
+    const close = () => overlay.remove();
+    const form = overlay.querySelector<HTMLFormElement>('form')!;
+    const input = overlay.querySelector<HTMLInputElement>('input')!;
+    overlay.addEventListener('click', event => { if (event.target === overlay) close(); });
+    overlay.querySelector<HTMLButtonElement>('[data-cancel]')!.onclick = close;
+    form.onsubmit = event => {
+      event.preventDefault();
+      const page = Number(input.value);
+      if (!Number.isInteger(page) || page < 1 || page > currentPdf.numPages) {
+        input.setCustomValidity(`请输入 1 至 ${currentPdf.numPages} 的整数页码。`);
+        input.reportValidity();
+        return;
+      }
+      input.setCustomValidity('');
+      notebookEditor!.chain().focus().setTextSelection({ from, to })
+        .setMark('pdfOutlineReference', { page }).run();
+      queueNotebookSave(notebookEditor!.getJSON());
+      close();
+    };
+    document.body.append(overlay);
+    input.focus();
+    input.select();
   }
   function flushNotebookSave() {
     clearTimeout(notebookSaveTimer);
@@ -509,14 +609,29 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
     notebookEditor = new Editor({
       element: notebookEditorHost,
       extensions: [
-        StarterKit.configure({ bulletList: false, listItem: false }),
+        StarterKit.configure({ bulletList: false, listItem: false, paragraph: false }),
         Link.configure({ openOnClick: true, autolink: true, defaultProtocol: 'https' }),
+        pdfOutlineReference,
         circleBullet,
         collapsibleListItem,
-        fourLevelBulletTab,
+        pdfIndentedParagraph,
+        pdfNotebookTab,
       ],
       content: notebookContent as any,
       editable: Boolean(documentId),
+      editorProps: {
+        handleClick: (_view, _position, event) => {
+          const target = event.target instanceof Element
+            ? event.target.closest<HTMLElement>('[data-pdf-outline-page]')
+            : event.target instanceof Node
+              ? event.target.parentElement?.closest<HTMLElement>('[data-pdf-outline-page]')
+              : null;
+          const page = Number(target?.dataset.pdfOutlinePage);
+          if (!target || !Number.isInteger(page) || page < 1) return false;
+          jumpToOutlinePage(page);
+          return true;
+        },
+      },
       onUpdate: ({ editor }) => {
         if (!notebookLoading) queueNotebookSave(editor.getJSON());
       },
@@ -607,6 +722,8 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
     }, 120);
   }, { passive: true });
   function appendOutline(outline: PdfOutlineItem[]) {
+    generatedOutline = outline;
+    persistPdfViewState({ generatedOutline });
     setNotebookOpen(true);
     ensureNotebookEditor();
     if (!notebookEditor) return;
@@ -615,6 +732,40 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
     // Outline generation is a completed PDF action; persist it before a refresh can discard it.
     void flushNotebookSave();
     changed();
+  }
+  function insertNotebookNodes(nodes: unknown[]) {
+    setNotebookOpen(true);
+    ensureNotebookEditor();
+    if (!notebookEditor || !nodes.length) return;
+    notebookEditor.chain().focus('end').insertContent(nodes).run();
+    queueNotebookSave(notebookEditor.getJSON());
+    void flushNotebookSave();
+    changed();
+  }
+  function replaceNotebook(doc: unknown) {
+    setNotebookOpen(true);
+    ensureNotebookEditor();
+    if (!notebookEditor) return;
+    notebookEditor.commands.setContent(doc as any);
+    queueNotebookSave(notebookEditor.getJSON());
+    void flushNotebookSave();
+    changed();
+  }
+  function templateNodes(doc: unknown) {
+    return doc && typeof doc === 'object' && Array.isArray((doc as { content?: unknown }).content)
+      ? (doc as { content: unknown[] }).content
+      : [];
+  }
+  function applyMatchedTemplate(template: unknown, replace: boolean) {
+    if (!generatedOutline.length) {
+      alertMessage('请先点击“生成大纲”，解析当前 PDF 后再套用模板。');
+      return;
+    }
+    const result = matchTemplateOutline(template, generatedOutline);
+    if (replace) replaceNotebook(result.doc);
+    else insertNotebookNodes(templateNodes(result.doc));
+    const unmatched = result.unmatched ? `，${result.unmatched} 项未定位` : '';
+    alertMessage(`已匹配 ${result.matched} 项${unmatched}。`);
   }
   function summaryToTiptap(raw: unknown, depth = 0): unknown[] {
     if (!Array.isArray(raw) || depth >= 4) return [];
@@ -672,11 +823,13 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
     askAiBtn.disabled = busy || !main.ready || !documentId;
     notebookToggle.disabled = busy || !documentId;
     outlineToggle.disabled = busy || outlineBusy || !main.ready || !documentId;
+    templateButton.disabled = busy || !documentId;
     summaryToggle.disabled = busy || summaryBusy || !main.ready || !documentId || !notebookEditor;
     splitBtn.disabled = busy || !main.ready || !documentId || !fileBytes;
     splitBtn.setAttribute('aria-pressed', split ? 'true' : 'false');
     splitBtn.textContent = split ? '关闭浏览' : '复制浏览';
     splitBtn.title = split ? '关闭左侧对照窗格' : '左右对照同一份 PDF';
+    updateReadingHistoryControls();
     shots.sync();
   }
   function whenVisible() {
@@ -706,12 +859,89 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
     if (!key) return;
     persist(key, { ...pdfViewState(id), ...patch });
   }
+  function updateReadingHistoryControls() {
+    const update = (controls: typeof mainHistoryControls, history: ReadingHistory, enabled: boolean) => {
+      controls.back.disabled = busy || !enabled || history.index <= 0;
+      controls.forward.disabled = busy || !enabled || history.index < 0 || history.index >= history.entries.length - 1;
+    };
+    update(mainHistoryControls, readingHistories.main, main.ready);
+    update(copyHistoryControls, readingHistories.copy, split && copy.ready);
+  }
+  function saveReadingHistory() {
+    persistPdfViewState({
+      readingHistory: readingHistories.main.entries,
+      readingHistoryIndex: readingHistories.main.index,
+      copyReadingHistory: readingHistories.copy.entries,
+      copyReadingHistoryIndex: readingHistories.copy.index,
+    });
+    updateReadingHistoryControls();
+  }
+  function recordReadingPosition(pane: Pane = main) {
+    if (restoringReadingHistory || !documentId || !pane.ready || busy || container.hidden) return;
+    const history = readingHistories[pane.id];
+    const page = pane.viewer.currentPageNumber || 1;
+    const next = { page, scrollTop: Math.max(0, Math.round(pane.scroller.scrollTop)) };
+    const current = history.entries[history.index];
+    if (current?.page === next.page) {
+      current.scrollTop = next.scrollTop;
+      saveReadingHistory();
+      return;
+    }
+    history.entries = history.entries.slice(0, history.index + 1);
+    history.entries.push(next);
+    if (history.entries.length > 5) history.entries.shift();
+    history.index = history.entries.length - 1;
+    saveReadingHistory();
+  }
+  function restoreReadingPosition(paneId: PaneId, index: number) {
+    const pane = paneId === 'main' ? main : copy;
+    const history = readingHistories[paneId];
+    const target = history.entries[index];
+    const loadedPdf = paneId === 'main' ? pdf : copyPdf;
+    if (!target || !pane.ready || !loadedPdf) return;
+    recordReadingPosition(pane);
+    history.index = index;
+    restoringReadingHistory = true;
+    setActive(paneId);
+    pane.viewer.currentPageNumber = target.page;
+    pane.viewer.scrollPageIntoView({ pageNumber: target.page });
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      pane.scroller.scrollTop = target.scrollTop;
+      restoringReadingHistory = false;
+      saveReadingHistory();
+      controls();
+    }));
+  }
   function restoreAssetUi(id = documentId) {
     const state = pdfViewState(id);
     const storedRatio = Number(state.splitRatio);
     const storedWidth = Number(state.notebookWidth);
     splitRatio = Number.isFinite(storedRatio) && storedRatio > 0 && storedRatio < 1 ? storedRatio : 0.5;
     notebookWidth = Number.isFinite(storedWidth) && storedWidth >= MIN_NOTEBOOK_WIDTH ? storedWidth : 360;
+    generatedOutline = Array.isArray(state.generatedOutline)
+      ? state.generatedOutline.filter((item): item is PdfOutlineItem => Boolean(item)
+        && typeof item.id === 'string'
+        && typeof item.title === 'string'
+        && Number.isInteger(item.page)
+        && Number.isInteger(item.level))
+      : [];
+    const restoreHistory = (entries: unknown, savedIndex: unknown): ReadingHistory => {
+      const validEntries = Array.isArray(entries)
+        ? entries.filter((item): item is { page: number; scrollTop: number } => Boolean(item)
+          && Number.isInteger(item.page) && item.page > 0
+          && Number.isFinite(item.scrollTop) && item.scrollTop >= 0).slice(-5)
+        : [];
+      const index = Number(savedIndex);
+      return {
+        entries: validEntries,
+        index: validEntries.length
+          ? Math.min(validEntries.length - 1, Math.max(0, Number.isInteger(index) ? index : validEntries.length - 1))
+          : -1,
+      };
+    };
+    readingHistories.main = restoreHistory(state.readingHistory, state.readingHistoryIndex);
+    readingHistories.copy = restoreHistory(state.copyReadingHistory, state.copyReadingHistoryIndex);
+    updateReadingHistoryControls();
     applySplitRatio(splitRatio);
     applyNotebookWidth(notebookWidth);
     setNotebookOpen(state.notebookOpen === true, false);
@@ -781,6 +1011,7 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
             requestAnimationFrame(() => {
               if (epoch !== viewEpoch) return;
               restoringView = false;
+              recordReadingPosition(main);
               if (openingToken === tokenAtInit) opening = false;
               controls();
             });
@@ -790,12 +1021,14 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
         const stored = pdfViewState();
         applyStoredScale(pane, stored?.copyScale);
         jumpToStoredPage(pane, stored?.copyPage, copyPdf?.numPages || 0);
+        requestAnimationFrame(() => recordReadingPosition(copy));
       }
       controls();
     });
     pane.eventBus.on('pagechanging', () => {
       if (active() === pane) { clearSelection(); controls(); }
       rememberView();
+      requestAnimationFrame(() => recordReadingPosition(pane));
     });
     pane.eventBus.on('scalechanging', () => {
       if (active() === pane) controls();
@@ -1585,11 +1818,49 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
       error('页码应为 1 至 ' + pdf.numPages + ' 的整数。');
       return;
     }
+    recordReadingPosition(pane);
     clearSelection();
     window.getSelection()?.removeAllRanges();
     pane.viewer.scrollPageIntoView({ pageNumber: number });
     controls();
   }
+  function jumpToOutlinePage(page: number) {
+    if (!main.ready || busy || !pdf) {
+      error('PDF 尚未就绪，暂时无法定位。');
+      return;
+    }
+    if (page > pdf.numPages) {
+      error(`该大纲页码超出当前 PDF 的 ${pdf.numPages} 页范围。`);
+      return;
+    }
+    recordReadingPosition(main);
+    setActive('main');
+    clearSelection();
+    window.getSelection()?.removeAllRanges();
+    // 显式设置当前页并滚动，避免 PDF.js 在连续滚动视图中忽略纯 scrollPageIntoView 调用。
+    main.viewer.currentPageNumber = page;
+    main.viewer.scrollPageIntoView({ pageNumber: page });
+    requestAnimationFrame(() => main.viewer.scrollPageIntoView({ pageNumber: page }));
+    controls();
+  }
+  const outlineTarget = (target: EventTarget | null) => {
+    const element = target instanceof Element ? target : target instanceof Node ? target.parentElement : null;
+    return element?.closest<HTMLElement>('[data-pdf-outline-page]') || null;
+  };
+  const jumpToOutlineReference = (event: Event) => {
+    const target = outlineTarget(event.target);
+    const page = Number(target?.dataset.pdfOutlinePage);
+    if (!target || !Number.isInteger(page) || page < 1) return;
+    event.preventDefault();
+    event.stopPropagation();
+    jumpToOutlinePage(page);
+  };
+  document.addEventListener('click', jumpToOutlineReference, true);
+  document.addEventListener('pointerup', jumpToOutlineReference, true);
+  notebookEditorHost.addEventListener('click', jumpToOutlineReference, true);
+  notebookEditorHost.addEventListener('keydown', event => {
+    if (event.key === 'Enter' || event.key === ' ') jumpToOutlineReference(event);
+  }, true);
   prev.onclick = () => goTo(active().viewer.currentPageNumber - 1);
   next.onclick = () => goTo(active().viewer.currentPageNumber + 1);
   pageInput.onchange = () => goTo(Number(pageInput.value));
@@ -1619,10 +1890,28 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
     });
   };
   summaryToggle.onclick = () => { void summarizeSelection(); };
+  templateButton.addEventListener('mousedown', event => event.preventDefault());
+  templateButton.onclick = () => {
+    if (!documentId) return;
+    setNotebookOpen(true);
+    ensureNotebookEditor();
+    openTemplateDialog({
+      currentDoc: () => notebookEditor?.getJSON() || EMPTY_NOTEBOOK,
+      list: () => hooks.listOutlineTemplates(),
+      load: id => hooks.loadOutlineTemplate(id),
+      create: (name, doc) => hooks.saveOutlineTemplate(name, doc),
+      update: (id, name, doc, revision) => hooks.updateOutlineTemplate(id, name, doc, revision),
+      onInsert: doc => applyMatchedTemplate(doc, false),
+      onReplace: doc => applyMatchedTemplate(doc, true),
+    });
+  };
   container.querySelectorAll<HTMLButtonElement>('[data-pdf-note-command]').forEach(button => {
     button.addEventListener('mousedown', event => event.preventDefault());
     button.onclick = () => runNotebookCommand(button.dataset.pdfNoteCommand || '');
   });
+  const pageLinkButton = container.querySelector<HTMLButtonElement>('[data-pdf-note-page-link]')!;
+  pageLinkButton.addEventListener('mousedown', event => event.preventDefault());
+  pageLinkButton.onclick = openNotebookPageLinkDialog;
   window.addEventListener('pagehide', () => {
     rememberView(true);
     rememberNotebookUi();

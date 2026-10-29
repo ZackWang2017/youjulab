@@ -1,4 +1,5 @@
-import { persist, saved } from '../context/types';
+import { saved } from '../context/types';
+import { office } from '../office-client/client';
 
 /** 只用于 PDF 菜单分类，不写入资产。 */
 export interface PdfFolder {
@@ -7,7 +8,7 @@ export interface PdfFolder {
   children: PdfFolder[];
 }
 
-interface PdfFolderStore {
+export interface PdfFolderStore {
   folders: PdfFolder[];
   /** assetId -> folderId。不在表里的 PDF 留在根目录。 */
   placements: Record<string, string>;
@@ -15,6 +16,8 @@ interface PdfFolderStore {
 }
 
 const empty = (): PdfFolderStore => ({ folders: [], placements: {}, collapsed: {} });
+const cache = new Map<string, PdfFolderStore>();
+const hydrations = new Map<string, Promise<boolean>>();
 
 function key(projectId: string) {
   return `office-pdf-folders:${projectId}`;
@@ -35,7 +38,7 @@ function normalizeFolders(value: unknown): PdfFolder[] {
   }));
 }
 
-export function loadPdfFolders(projectId: string): PdfFolderStore {
+function legacyPdfFolders(projectId: string): PdfFolderStore {
   const raw = saved(key(projectId));
   if (!raw || typeof raw !== 'object') return empty();
   const row = raw as Partial<PdfFolderStore>;
@@ -52,8 +55,68 @@ export function loadPdfFolders(projectId: string): PdfFolderStore {
   return { folders: normalizeFolders(row.folders), placements, collapsed };
 }
 
+export function loadPdfFolders(projectId: string): PdfFolderStore {
+  const stored = cache.get(projectId);
+  if (stored) return stored;
+  const legacy = legacyPdfFolders(projectId);
+  cache.set(projectId, legacy);
+  return legacy;
+}
+
+function normalizeStore(value: Partial<PdfFolderStore>): PdfFolderStore {
+  const placements: Record<string, string> = {};
+  if (value.placements && typeof value.placements === 'object') {
+    for (const [assetId, folderId] of Object.entries(value.placements)) {
+      if (typeof folderId === 'string') placements[assetId] = folderId;
+    }
+  }
+  const collapsed: Record<string, boolean> = {};
+  if (value.collapsed && typeof value.collapsed === 'object') {
+    for (const [id, isCollapsed] of Object.entries(value.collapsed)) collapsed[id] = Boolean(isCollapsed);
+  }
+  return { folders: normalizeFolders(value.folders), placements, collapsed };
+}
+
+/** 首次进入项目时把旧 UI 偏好迁移到独立的项目数据库记录。 */
+export function hydratePdfFolders(projectId: string): Promise<boolean> {
+  const pending = hydrations.get(projectId);
+  if (pending) return pending;
+  const before = loadPdfFolders(projectId);
+  const task = office.json<{ configured: boolean } & PdfFolderStore>(`/projects/${projectId}/pdf-folders`)
+    .then(async remote => {
+      if (remote.configured) {
+        const next = normalizeStore(remote);
+        const changed = JSON.stringify(next) !== JSON.stringify(before);
+        cache.set(projectId, next);
+        return changed;
+      }
+      await office.json(`/projects/${projectId}/pdf-folders`, {
+        method: 'PUT', body: JSON.stringify(before),
+      });
+      localStorage.removeItem(key(projectId));
+      return false;
+    })
+    .catch(error => {
+      window.dispatchEvent(new CustomEvent('office-error', {
+        detail: `PDF 文件夹读取失败：${error instanceof Error ? error.message : String(error)}`,
+      }));
+      return false;
+    })
+    .finally(() => hydrations.delete(projectId));
+  hydrations.set(projectId, task);
+  return task;
+}
+
 export function savePdfFolders(projectId: string, store: PdfFolderStore) {
-  persist(key(projectId), store);
+  const next = normalizeStore(store);
+  cache.set(projectId, next);
+  void office.json(`/projects/${projectId}/pdf-folders`, {
+    method: 'PUT', body: JSON.stringify(next),
+  }).catch(error => {
+    window.dispatchEvent(new CustomEvent('office-error', {
+      detail: `PDF 文件夹保存失败：${error instanceof Error ? error.message : String(error)}`,
+    }));
+  });
 }
 
 export function findFolder(folders: PdfFolder[], id: string): PdfFolder | null {

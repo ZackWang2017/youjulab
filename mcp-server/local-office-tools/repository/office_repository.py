@@ -85,7 +85,10 @@ class OfficeClient:
         return self.call("POST", f"/projects/{project_id}/assets", {"kind": kind, "name": name})
 
     def get_asset(self, asset_id: str) -> dict:
-        return self.call("GET", f"/assets/{asset_id}")
+        asset = self.call("GET", f"/assets/{asset_id}")
+        if isinstance(asset, dict) and asset.get("locked"):
+            raise OfficeError(403, "表格已加密，请先在编辑器中解锁。")
+        return asset
 
     def save_asset(self, asset_id: str, content: dict, revision: int, name: str | None = None) -> dict:
         body: dict[str, Any] = {"content": content, "revision": revision}

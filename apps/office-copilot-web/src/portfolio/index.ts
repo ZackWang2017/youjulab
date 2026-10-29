@@ -7,7 +7,7 @@ import type { EChartsType } from 'echarts/core';
 import { ALL_PORTFOLIOS_NAME, isAllPortfolios, portfolioApi, type Holding, type HoldingAction, type HoldingsOverview, type PortfolioStats } from './api';
 import { openAdjustDialog, openBuyDialog, openDividendDialog, openSchedulerDialog, openTransactionsDialog } from './dialogs';
 import {
-  formatDate, formatDateTime, formatMoney, formatMoneyWithCurrency, formatPercent, formatPercentPoint, formatShares, signClass, toNumber,
+  formatClock, formatDate, formatDateTime, formatMoney, formatMoneyWithCurrency, formatPercent, formatPercentPoint, formatShares, signClass, toNumber,
 } from './format';
 import './style.css';
 
@@ -19,11 +19,22 @@ const esc = (value: string) => value.replace(/[&<>'"]/g, char => ({ '&': '&amp;'
 
 const SOURCE_LABEL: Record<string, { label: string; cls: string }> = {
   live: { label: '实时', cls: 'is-ok' },
-  cache_today: { label: '今日收盘', cls: '' },
-  cache_last: { label: '上次收盘', cls: 'is-warn' },
+  cache_today: { label: '收盘价', cls: '' },
+  cache_last: { label: '收盘价', cls: '' },
   cash: { label: '现金', cls: '' },
   none: { label: '无报价', cls: '' },
 };
+
+function navAsOfLabel(nav: PortfolioStats['nav']): string {
+  if (!nav.as_of) return '';
+  if (nav.as_of_source === 'live') {
+    const clock = formatClock(nav.as_of_at);
+    const day = formatDate(nav.as_of_at || nav.as_of);
+    return clock ? `净值日期 ${day} ${clock}` : `净值日期 ${day}`;
+  }
+  if (nav.as_of_source === 'close') return `净值日期 ${formatDate(nav.as_of)} 收盘`;
+  return `净值日期 ${formatDate(nav.as_of)}`;
+}
 
 export interface PortfolioController {
   show(portfolioId: number | null, view: PortfolioView): Promise<void>;
@@ -145,6 +156,9 @@ export function mountPortfolio(section: HTMLElement, onError: (error: unknown) =
   function holdingRow(h: Holding, all = false) {
     const cash = h.market_code === 'CASH';
     const source = SOURCE_LABEL[h.price_source] ?? SOURCE_LABEL.none;
+    const priceStamp = h.price_source === 'live'
+      ? formatClock(h.price_as_of)
+      : (h.price_trade_date ? formatDate(h.price_trade_date).slice(0, 10) : '');
     const profitSign = signClass(h.profit_cny ?? h.profit);
     const sources = (h.portfolios ?? []).map(name => `<span class="portfolio-chip-small">${esc(name)}</span>`).join('');
     return `<tr data-holding="${h.id ?? ''}">
@@ -152,7 +166,7 @@ export function mountPortfolio(section: HTMLElement, onError: (error: unknown) =
       ${all ? `<td class="portfolio-sources">${sources || '—'}</td>` : ''}
       <td class="num">${formatMoneyWithCurrency(h.avg_cost, h.currency, 4)}</td>
       <td class="num">${cash ? formatMoney(h.shares, 2) : formatShares(h.shares)}</td>
-      <td class="num"><div>${formatMoneyWithCurrency(h.current_price, h.currency, 4)}</div>${cash ? '' : `<div class="portfolio-asset-meta right"><span class="portfolio-badge ${source.cls}">${source.label}</span>${h.price_trade_date ? `<span>${formatDate(h.price_trade_date)}</span>` : ''}</div>`}</td>
+      <td class="num"><div>${formatMoneyWithCurrency(h.current_price, h.currency, 4)}</div>${cash ? '' : `<div class="portfolio-asset-meta right"><span class="portfolio-badge ${source.cls}">${source.label}</span>${priceStamp ? `<span>${priceStamp}</span>` : ''}</div>`}</td>
       <td class="num ${signClass(h.change_pct)}">${cash || h.change_pct === null ? '—' : `${formatMoney(h.change, 3)}<div class="portfolio-sub">${formatPercent(h.change_pct, 2, true)}</div>`}</td>
       <td class="num ${signClass(h.year_change_pct)}">${cash || h.year_change_pct === null ? '—' : formatPercent(h.year_change_pct, 2, true)}</td>
       <td class="num">${formatMoneyWithCurrency(h.market_value, h.currency, 2)}</td>
@@ -175,7 +189,7 @@ export function mountPortfolio(section: HTMLElement, onError: (error: unknown) =
     const all = aggregate();
     const note = all
       ? `<span class="portfolio-aggregate-note"><i data-lucide="layers"></i>${aggregateNote()}</span>把所有组合的资金流水合并后按净值法即时计算，不落库。`
-      : `净值法按每日收盘价与资金进出计算；工作日 17:00 自动计算上一交易日净值${stats?.nav.computed_at ? `，最近计算 ${formatDateTime(stats.nav.computed_at)}` : ''}。`;
+      : `已收盘用收盘价，交易时段用实时价；工作日 17:00 自动把当天收盘计入净值${stats?.nav.computed_at ? `，最近计算 ${formatDateTime(stats.nav.computed_at)}` : ''}。`;
     const head = `<header class="portfolio-head ${all ? 'is-aggregate' : ''}">
       <div><h1>${all ? `${ALL_PORTFOLIOS_NAME} · 净值和收益` : '净值和收益统计'}</h1><p class="portfolio-muted">${note}</p></div>
       <div class="portfolio-head-actions">
@@ -203,7 +217,7 @@ export function mountPortfolio(section: HTMLElement, onError: (error: unknown) =
       `<div class="portfolio-metric"><span>${label}</span><b class="${cls}">${value}</b>${hint ? `<small>${hint}</small>` : ''}</div>`;
     return `${head}<div class="portfolio-body portfolio-stats">
       <section class="portfolio-card portfolio-card-nav">
-        <div class="portfolio-card-title"><i data-lucide="gauge"></i>${all ? '全部持仓净值' : '组合净值'}<span class="portfolio-card-title-aside">${nav.as_of ? `净值日期 ${formatDate(nav.as_of)}` : ''}</span></div>
+        <div class="portfolio-card-title"><i data-lucide="gauge"></i>${all ? '全部持仓净值' : '组合净值'}<span class="portfolio-card-title-aside">${navAsOfLabel(nav)}</span></div>
         <div class="portfolio-nav-main"><span class="portfolio-big ${signClass(growth)}">${nav.current ? formatMoney(nav.current, 4) : '—'}</span><span class="portfolio-chip ${signClass(growth)}">${growth === null ? '—' : formatPercent(growth, 2, true)}</span><span class="portfolio-muted">日增长率</span></div>
         <div class="portfolio-metrics">
           ${metric(`前一日净值${nav.previous_date ? ` <small>${formatDate(nav.previous_date)}</small>` : ''}`, nav.previous ? formatMoney(nav.previous, 4) : '—')}

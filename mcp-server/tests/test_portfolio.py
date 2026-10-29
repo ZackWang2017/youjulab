@@ -21,8 +21,10 @@ sys.path.insert(0, str(HERE / "financial-data-service" / "repository"))
 
 import account_jwt  # noqa: E402
 import market_quote_repository as market  # noqa: E402
+import market_sync_service  # noqa: E402
 import portfolio_endpoint  # noqa: E402
 import portfolio_service as service  # noqa: E402
+from market_session import last_closed_session_date, mark_price, session_in_progress  # noqa: E402
 from nav_service import DatedSeries, PricingContext, compute_nav_series, previous_weekday, xirr  # noqa: E402
 from scheduler.daily_scheduler import DailyTask, DailyTaskScheduler, MemoryRunStore  # noqa: E402
 
@@ -40,6 +42,115 @@ def tx(day: str, ticker: str, action: str, shares: str, price: str = "1", flow: 
         "price": D(price),
         "external_flow": D(flow),
     }
+
+
+class CloseSyncTests(unittest.TestCase):
+    def test_recent_closes_are_refetched_even_when_that_day_is_already_stored(self):
+        end = date(2026, 10, 22)
+        held = [{"ticker_code": "00700.HK", "market_code": "HK", "first_date": date(2026, 10, 1)}]
+        refreshed = [(date(2026, 10, 21), D("393.8")), (end, D("382.4"))]
+        closed = datetime(2026, 10, 22, 17, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+        with patch.object(market_sync_service.repo, "held_tickers_everywhere", return_value=held), \
+             patch.object(market_sync_service.repo, "last_close_date", return_value=end), \
+             patch.object(market_sync_service.market, "fetch_daily_closes", return_value=refreshed) as fetch, \
+             patch.object(market_sync_service.repo, "upsert_close_prices", return_value=2) as upsert, \
+             patch.object(market_sync_service.time, "sleep"):
+            result = market_sync_service.sync_close_prices(end, now=closed)
+        fetch.assert_called_once_with("00700.HK", date(2026, 10, 12), end)
+        self.assertEqual(
+            list(upsert.call_args.args[0]),
+            [("00700.HK", day, close) for day, close in refreshed],
+        )
+        self.assertEqual(result["rows_inserted"], 2)
+
+    def test_open_session_bar_is_not_stored_as_close(self):
+        end = date(2026, 10, 22)
+        held = [{"ticker_code": "00700.HK", "market_code": "HK", "first_date": date(2026, 10, 1)}]
+        refreshed = [(date(2026, 10, 21), D("393.8")), (end, D("390"))]
+        trading = datetime(2026, 10, 22, 10, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+        with patch.object(market_sync_service.repo, "held_tickers_everywhere", return_value=held), \
+             patch.object(market_sync_service.repo, "last_close_date", return_value=end), \
+             patch.object(market_sync_service.market, "fetch_daily_closes", return_value=refreshed), \
+             patch.object(market_sync_service.repo, "upsert_close_prices", return_value=1) as upsert, \
+             patch.object(market_sync_service.time, "sleep"):
+            market_sync_service.sync_close_prices(end, now=trading)
+        self.assertEqual(list(upsert.call_args.args[0]), [("00700.HK", date(2026, 10, 21), D("393.8"))])
+
+
+class SessionPriceTests(unittest.TestCase):
+    def test_session_clocks_follow_each_exchange(self):
+        sh = ZoneInfo("Asia/Shanghai")
+        # 沪深 15:00 已收盘，港股 16:00 才收盘
+        afternoon = datetime(2026, 10, 22, 15, 30, tzinfo=sh)
+        self.assertFalse(session_in_progress("SH", afternoon))
+        self.assertTrue(session_in_progress("HK", afternoon))
+        self.assertEqual(last_closed_session_date("SH", afternoon), date(2026, 10, 22))
+        self.assertEqual(last_closed_session_date("HK", afternoon), date(2026, 10, 21))
+        # 开盘前和周末都用上一个已结束的交易日
+        self.assertEqual(last_closed_session_date("SZ", datetime(2026, 10, 26, 9, 0, tzinfo=sh)), date(2026, 10, 23))
+        self.assertFalse(session_in_progress("SH", datetime(2026, 10, 24, 11, 0, tzinfo=sh)))
+        # 美股按纽约时间，夏令时和冬令时都从 9:30 起算
+        self.assertTrue(session_in_progress("US", datetime(2026, 7, 15, 21, 30, tzinfo=sh)))
+        self.assertFalse(session_in_progress("US", datetime(2026, 7, 15, 21, 0, tzinfo=sh)))
+        self.assertTrue(session_in_progress("US", datetime(2026, 1, 15, 22, 30, tzinfo=sh)))
+        self.assertFalse(session_in_progress("US", datetime(2026, 1, 15, 22, 0, tzinfo=sh)))
+
+    def test_mark_uses_live_only_while_the_session_is_open(self):
+        sh = ZoneInfo("Asia/Shanghai")
+        trading = datetime(2026, 10, 22, 10, 0, tzinfo=sh)
+        price, _day, is_live = mark_price(
+            "SH", trading, live=D("11"), prev_close=D("10"), closes=[(date(2026, 10, 22), D("9"))],
+        )
+        self.assertEqual((price, is_live), (D("11"), True))
+
+        before_open = datetime(2026, 10, 22, 9, 0, tzinfo=sh)
+        price, day, is_live = mark_price(
+            "SH", before_open, live=D("11"), prev_close=D("10"), closes=[(date(2026, 10, 21), D("9"))],
+        )
+        self.assertEqual((price, day, is_live), (D("10"), date(2026, 10, 21), False))
+
+        after_close = datetime(2026, 10, 22, 15, 30, tzinfo=sh)
+        price, day, is_live = mark_price(
+            "SH", after_close, live=D("10.5"), prev_close=D("10"), closes=[(date(2026, 10, 22), D("9"))],
+        )
+        self.assertEqual((price, day, is_live), (D("10.5"), date(2026, 10, 22), False))
+
+        ny = ZoneInfo("America/New_York")
+        us_after = datetime(2026, 10, 22, 16, 30, tzinfo=ny)
+        price, day, is_live = mark_price(
+            "US", us_after, live=D("105"), prev_close=D("100"), closes=[(date(2026, 10, 22), D("102"))],
+        )
+        self.assertEqual((price, day, is_live), (D("102"), date(2026, 10, 22), False))
+
+    def test_holding_change_uses_the_same_prices_as_the_session_rule(self):
+        sh = ZoneInfo("Asia/Shanghai")
+        quote = market.LiveQuote("600000.SH", D("11"), datetime(2026, 10, 22, 10, 0, tzinfo=sh), prev_close=D("10"))
+        price, source, _day, _change, change_pct, base = service._session_mark("SH", quote.fetched_at, quote, [])
+        self.assertEqual((price, source, base, change_pct), (D("11"), "live", D("10"), D("0.1")))
+
+        early = datetime(2026, 10, 22, 9, 0, tzinfo=sh)
+        price, source, _day, _change, change_pct, base = service._session_mark(
+            "SH", early, quote, [(date(2026, 10, 21), D("9"))],
+        )
+        self.assertEqual((price, source, base, change_pct), (D("10"), "cache_last", D("10"), D("0")))
+
+    def test_nav_override_replaces_only_the_given_day(self):
+        rows = [
+            tx("2026-01-05", "CNY.CASH", "deposit", "1000", flow="1000", id=1),
+            tx("2026-01-05", "CNY.CASH", "cash_out", "1000", id=2),
+            tx("2026-01-05", "600000.SH", "buy", "100", price="10", id=3),
+        ]
+        pricing = PricingContext(closes={"600000.SH": DatedSeries([
+            (date(2026, 1, 5), D("10")), (date(2026, 1, 6), D("10")),
+        ])})
+        points = compute_nav_series(
+            rows, pricing, end=date(2026, 1, 7),
+            price_overrides={date(2026, 1, 7): {"600000.SH": D("12")}},
+        )
+        by_date = {p.nav_date: p for p in points}
+        self.assertEqual(by_date[date(2026, 1, 6)].total_value_cny, D("1000.0000"))
+        self.assertEqual(by_date[date(2026, 1, 7)].total_value_cny, D("1200.0000"))
+        self.assertEqual(by_date[date(2026, 1, 7)].daily_return, D("0.20000000"))
 
 
 class NavMethodTests(unittest.TestCase):
@@ -385,6 +496,31 @@ class RiskMetricsTests(unittest.TestCase):
             rf = market._fetch_eastmoney_cgb_10y()
         self.assertEqual(rf.rate, D("0.01648"))
         self.assertEqual(rf.as_of, date(2026, 10, 16))
+
+
+class NavQuoteStampTests(unittest.TestCase):
+    def test_close_when_no_live_holding(self):
+        source, stamp = service._nav_quote_stamp({
+            "holdings": [
+                {"price_source": "cache_today", "price_as_of": None},
+                {"price_source": "cash", "price_as_of": None},
+            ],
+        })
+        self.assertEqual(source, "close")
+        self.assertIsNone(stamp)
+
+    def test_live_uses_latest_quote_time(self):
+        earlier = datetime(2026, 10, 23, 10, 15, tzinfo=ZoneInfo("Asia/Shanghai"))
+        later = datetime(2026, 10, 23, 14, 32, tzinfo=ZoneInfo("Asia/Shanghai"))
+        source, stamp = service._nav_quote_stamp({
+            "holdings": [
+                {"price_source": "live", "price_as_of": earlier},
+                {"price_source": "cache_today", "price_as_of": None},
+                {"price_source": "live", "price_as_of": later},
+            ],
+        })
+        self.assertEqual(source, "live")
+        self.assertEqual(stamp, later)
 
 
 class YearToDateTests(unittest.TestCase):

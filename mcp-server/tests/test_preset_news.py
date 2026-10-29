@@ -92,6 +92,12 @@ class PresetNewsTests(unittest.TestCase):
         self.assertEqual([row["title"] for row in out["results"]], ["腾讯回购", "仓位需要多确定", "腾讯的基本盘是社交。"])
         self.assertEqual(out["results"][1]["url"], "https://xueqiu.com/1/2")
 
+    def test_us_symbols_for_xueqiu_and_tencent(self):
+        self.assertEqual(news.news_symbol("xueqiu", "AAPL.US"), "AAPL")
+        self.assertEqual(news.news_symbol("tencent", "AAPL.US"), "usAAPL")
+        self.assertEqual(news.news_symbol("sina", "AAPL.US"), "")
+        self.assertEqual(news.news_symbol("sina", "00700.HK"), "hk00700")
+
     def test_tencent_maps_symbol_and_keeps_publish_time(self):
         payload = {"code": 0, "data": {"data": [{
             "title": "花旗维持买入",

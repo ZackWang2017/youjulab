@@ -1,5 +1,6 @@
 import { mountThinkingStatus } from '../../ui/thinking-status';
 import type { PdfOutlineItem } from './outline';
+import { createIcons, icons } from 'lucide';
 
 type OutlineResult = { status: 'success' | 'unsupported'; outline?: PdfOutlineItem[]; message?: string };
 type Hooks = {
@@ -42,7 +43,7 @@ export function openOutlineDialog(hooks: Hooks) {
   panel.className = 'ask-ai-float pdf-outline-float';
   panel.setAttribute('role', 'dialog');
   panel.setAttribute('aria-label', '生成文档大纲');
-  panel.innerHTML = '<header class="ask-ai-drag" data-drag><h2>生成大纲</h2><span class="ask-ai-drag-hint">拖动</span><button type="button" class="ask-ai-close" data-close aria-label="关闭">关闭</button></header><div class="pdf-outline-content"><div data-status></div><ol class="pdf-outline-log" data-log></ol></div>';
+  panel.innerHTML = '<header class="ask-ai-drag" data-drag><h2>生成大纲</h2><span class="ask-ai-drag-hint">拖动</span><button type="button" class="ask-ai-close" data-close title="关闭" aria-label="关闭"><i data-lucide="x"></i></button></header><div class="pdf-outline-content"><div data-status></div><ol class="pdf-outline-log" data-log></ol></div>';
   let left = window.innerWidth - 444;
   let top = 74;
   try {
@@ -53,8 +54,19 @@ export function openOutlineDialog(hooks: Hooks) {
   panel.style.left = String(clamp(left, 8, Math.max(8, window.innerWidth - 420))) + 'px';
   panel.style.top = String(clamp(top, 8, Math.max(8, window.innerHeight - 120))) + 'px';
   document.body.append(panel);
+  createIcons({ icons });
+  const close = () => {
+    document.removeEventListener('keydown', onKey);
+    panel.remove();
+  };
+  const onKey = (event: KeyboardEvent) => {
+    if (event.key !== 'Escape') return;
+    event.preventDefault();
+    close();
+  };
+  document.addEventListener('keydown', onKey);
   bindDrag(panel, panel.querySelector<HTMLElement>('[data-drag]')!);
-  panel.querySelector<HTMLButtonElement>('[data-close]')!.onclick = () => panel.remove();
+  panel.querySelector<HTMLButtonElement>('[data-close]')!.onclick = close;
   const thinking = mountThinkingStatus(panel.querySelector<HTMLElement>('[data-status]')!);
   const log = panel.querySelector<HTMLOListElement>('[data-log]')!;
   const note = (message: string) => {

@@ -8,8 +8,8 @@ import sys
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Literal
-from urllib.parse import urlparse
+from typing import Any, Literal
+from urllib.parse import unquote, urlparse
 
 import os
 
@@ -39,6 +39,7 @@ from sheet_chart import generate_sheet_chart, iter_sheet_chart_events, validate_
 from assistant_sessions import public_session, public_session_list_item, session_title, validate_session_turns  # noqa: E402
 from pdf_ask import iter_pdf_ask_events  # noqa: E402
 from pdf_summary import iter_pdf_selection_summary_events  # noqa: E402
+from information_skills import iter_analyze_events, iter_impact_events, iter_keyword_events, iter_review_events  # noqa: E402
 from pdf_glossary import delete_project_term, list_project_terms, upsert_project_term  # noqa: E402
 from config import (  # noqa: E402
     mcp_remote_base,
@@ -52,6 +53,14 @@ from config import (  # noqa: E402
     set_file_root_override,
 )
 from model_credentials import CredentialEncryptionError, encrypt_api_key, public_model_config  # noqa: E402
+from sheet_crypto import (  # noqa: E402
+    LOCKED_MESSAGE,
+    MIN_PASSWORD,
+    SheetCryptoError,
+    decrypt_sheet,
+    encrypt_sheet,
+    is_encrypted,
+)
 from model_runtime import model_api_key, model_configuration_error, model_configured, model_name, set_current_model, settings_for_user  # noqa: E402
 from pdf_annot import add_pdf_annotation, delete_pdf_annotation, update_pdf_annotation  # noqa: E402
 from office_pdf_vector import delete_document_index, ensure_index, get_index_status, pg_configured, search_chunks  # noqa: E402
@@ -82,6 +91,8 @@ from store import (  # noqa: E402
     recent_asset_histories,
     recent_asset_ids,
     remove_recent_asset,
+    dismiss_project_recent_asset,
+    is_singleton_user_kind,
     is_user_kind,
     supports_scoped_visibility,
     public_asset,
@@ -162,10 +173,17 @@ class NameBody(BaseModel):
     name: str = Field(min_length=1, max_length=80)
 
 
+class PdfFolderStoreBody(BaseModel):
+    folders: list[dict[str, Any]] = Field(default_factory=list, max_length=300)
+    placements: dict[str, str] = Field(default_factory=dict)
+    collapsed: dict[str, bool] = Field(default_factory=dict)
+
+
 class CreateAssetBody(BaseModel):
     kind: str
     name: str = Field(min_length=1, max_length=80)
     visibility: Literal["project", "user"] = "project"
+    content: dict | None = None
 
 
 class SaveAssetBody(BaseModel):
@@ -173,6 +191,14 @@ class SaveAssetBody(BaseModel):
     content: dict | list | None = None
     revision: int | None = Field(default=None, ge=0)
     visibility: Literal["project", "user"] | None = None
+    password: str | None = None
+
+
+class EncryptionBody(BaseModel):
+    action: Literal["enable", "disable", "change"]
+    password: str = Field(min_length=1)
+    password_confirm: str | None = None
+    new_password: str | None = None
 
 
 class HistoryTurn(BaseModel):
@@ -302,6 +328,25 @@ class PdfSummaryBody(BaseModel):
     selection: str = Field(min_length=1, max_length=16_000)
 
 
+class InformationKeywordBody(BaseModel):
+    kind: Literal["finance_api", "finance_rss"]
+    description: str = Field(min_length=1, max_length=2000)
+    extra: dict = Field(default_factory=dict)
+
+
+class InformationImpactBody(BaseModel):
+    group_id: int = Field(ge=1)
+    item_ids: list[int] = Field(default_factory=list, max_length=80)
+
+
+class InformationAnalyzeBody(BaseModel):
+    item_id: int = Field(ge=1)
+
+
+class InformationReviewBody(BaseModel):
+    group_id: int = Field(ge=1)
+
+
 class ProjectTermBody(BaseModel):
     en: str = Field(min_length=1, max_length=120)
     zh: str = Field(min_length=1, max_length=120)
@@ -401,6 +446,25 @@ def asset_of(store: Store, user: dict, asset_id: str) -> dict | None:
     return store.asset(workspace_user_id(user), asset_id)
 
 
+def file_password_of(request: Request, body_password: str | None = None) -> str:
+    header = (request.headers.get("x-file-password") or "").strip()
+    if header:
+        header = unquote(header)
+    return (body_password or "").strip() or header
+
+
+def unlock_sheet_content(asset: dict, password: str) -> Any:
+    try:
+        return decrypt_sheet(asset.get("content"), password, asset_id=str(asset.get("id") or ""))
+    except SheetCryptoError as exc:
+        raise HTTPException(403 if "密码" in str(exc) else 400, str(exc)) from exc
+
+
+def require_unencrypted_sheet(asset: dict) -> None:
+    if is_encrypted(asset.get("content")):
+        raise HTTPException(403, LOCKED_MESSAGE)
+
+
 def public_sheet_chart(row: dict) -> dict:
     return {
         "id": row["id"],
@@ -411,6 +475,13 @@ def public_sheet_chart(row: dict) -> dict:
         "created_at": row.get("created_at"),
         "updated_at": row.get("updated_at"),
     }
+
+
+def outline_template_content(raw: dict | None) -> dict:
+    doc = raw.get("doc") if isinstance(raw, dict) else None
+    if not isinstance(raw, dict) or raw.get("format") != "pdf-outline-template-v1" or not isinstance(doc, dict) or doc.get("type") != "doc":
+        raise HTTPException(400, "大纲模板内容无效。")
+    return {"format": "pdf-outline-template-v1", "doc": doc}
 
 
 def seed_project(store: Store, user: dict, project: dict) -> dict:
@@ -1088,6 +1159,32 @@ def create_app(store: Store | None = None) -> FastAPI:
         store.promote_user_assets(workspace_user_id(user))
         return {"assets": [public_asset(a) for a in assets_of(store, user, project_id, kind)]}
 
+    @app.get("/projects/{project_id}/pdf-folders")
+    def get_pdf_folders(project_id: str, user: dict = Depends(user_from), store: Store = Depends(get_store)):
+        if not project_of(store, user, project_id):
+            raise HTTPException(404, "项目不存在。")
+        saved = store.get_pdf_folder_store(workspace_user_id(user), project_id)
+        if not saved:
+            return {"configured": False, "folders": [], "placements": {}, "collapsed": {}}
+        return {
+            "configured": True,
+            "folders": saved.get("folders") or [],
+            "placements": saved.get("placements") or {},
+            "collapsed": saved.get("collapsed") or {},
+        }
+
+    @app.put("/projects/{project_id}/pdf-folders")
+    def put_pdf_folders(project_id: str, body: PdfFolderStoreBody, user: dict = Depends(user_from), store: Store = Depends(get_store)):
+        if not project_of(store, user, project_id):
+            raise HTTPException(404, "项目不存在。")
+        saved = store.upsert_pdf_folder_store(workspace_user_id(user), project_id, body.model_dump())
+        return {
+            "configured": True,
+            "folders": saved.get("folders") or [],
+            "placements": saved.get("placements") or {},
+            "collapsed": saved.get("collapsed") or {},
+        }
+
     @app.post("/projects/{project_id}/assets")
     def add_asset(project_id: str, body: CreateAssetBody, user: dict = Depends(user_from), store: Store = Depends(get_store)):
         project = project_of(store, user, project_id)
@@ -1113,10 +1210,12 @@ def create_app(store: Store | None = None) -> FastAPI:
             content = default_calc()
         elif body.kind == "notebook":
             content = default_notebook()
+        elif body.kind == "outline_template":
+            content = outline_template_content(body.content)
         else:
             content = None
         oid = owner_id(user, project)
-        if is_user_kind(body.kind):
+        if is_singleton_user_kind(body.kind):
             existing = store.assets(oid, None, body.kind)
             if existing:
                 current = store.asset(oid, existing[0]["id"]) or existing[0]
@@ -1126,7 +1225,7 @@ def create_app(store: Store | None = None) -> FastAPI:
         ) else project_id
         asset = store.create_asset(oid, placed, body.kind, body.name.strip(), content)
         owner = store.user_by_id(oid)
-        if owner:
+        if owner and body.kind != "outline_template":
             last = {**empty_last_assets(), **dict(owner.get("last_assets") or {})}
             last[body.kind] = asset["id"]
             store.update_user(
@@ -1184,16 +1283,51 @@ def create_app(store: Store | None = None) -> FastAPI:
         store.update_user(user["id"], recent_assets_by_project=histories)
         return list_recent_assets(body.project_id, user, store)
 
+    @app.delete("/assets/recent/{asset_id}")
+    def dismiss_recent_asset(
+        asset_id: str,
+        project_id: str,
+        user: dict = Depends(user_from),
+        store: Store = Depends(get_store),
+    ):
+        """从当前项目的最近打开标签中关闭一份资产。"""
+        owner = store.user_by_id(user["id"]) or user
+        if not store.project(user["id"], project_id):
+            raise HTTPException(404, "项目不存在。")
+        store.update_user(
+            user["id"],
+            recent_assets_by_project=dismiss_project_recent_asset(owner, project_id, asset_id),
+        )
+        return list_recent_assets(project_id, user, store)
+
     @app.get("/assets/{asset_id}")
-    def get_asset(asset_id: str, meta: int = 0, user: dict = Depends(user_from), store: Store = Depends(get_store)):
+    def get_asset(
+        asset_id: str,
+        request: Request,
+        meta: int = 0,
+        user: dict = Depends(user_from),
+        store: Store = Depends(get_store),
+    ):
         asset = asset_of(store, user, asset_id)
         if not asset:
             raise HTTPException(404, "文件不存在。")
         # meta=1 只回版本等元数据，供浏览器本地缓存命中时跳过整份 JSON。
-        return public_asset(asset, include_content=meta != 1)
+        include = meta != 1
+        if include and is_encrypted(asset.get("content")):
+            password = file_password_of(request)
+            if not password:
+                return public_asset(asset, include_content=True)
+            return public_asset(asset, include_content=True, plaintext=unlock_sheet_content(asset, password))
+        return public_asset(asset, include_content=include)
 
     @app.put("/assets/{asset_id}")
-    def save_asset(asset_id: str, body: SaveAssetBody, user: dict = Depends(user_from), store: Store = Depends(get_store)):
+    def save_asset(
+        asset_id: str,
+        body: SaveAssetBody,
+        request: Request,
+        user: dict = Depends(user_from),
+        store: Store = Depends(get_store),
+    ):
         asset = asset_of(store, user, asset_id)
         if not asset:
             raise HTTPException(404, "文件不存在。")
@@ -1219,13 +1353,75 @@ def create_app(store: Store | None = None) -> FastAPI:
             fresh = public_asset(archived["asset"], include_content=True)
             fresh["archived_name"] = archived["archived_name"]
             return fresh
+        plaintext = None
         if body.content is not None:
             if asset["kind"] == "pdf":
                 if not isinstance(body.content, dict) or set(body.content) != {"notebook"}:
                     raise HTTPException(400, "PDF 仅支持保存关联笔记本。")
-            fields["content"] = body.content
+            if is_encrypted(asset.get("content")):
+                password = file_password_of(request, body.password)
+                if not password:
+                    raise HTTPException(403, LOCKED_MESSAGE)
+                unlock_sheet_content(asset, password)
+                if is_encrypted(body.content):
+                    raise HTTPException(400, "请提交未加密的表格内容。")
+                fields["content"] = encrypt_sheet(body.content, password, asset_id=asset_id)
+                plaintext = body.content
+            else:
+                fields["content"] = body.content
         updated = store.update_asset(asset["owner_id"], asset_id, **fields)
+        if plaintext is not None:
+            return public_asset(updated, include_content=True, plaintext=plaintext)
+        if is_encrypted((updated or {}).get("content")):
+            return public_asset(updated, include_content=True)
         return public_asset(updated, include_content=True)
+
+    @app.post("/assets/{asset_id}/encryption")
+    def set_asset_encryption(
+        asset_id: str,
+        body: EncryptionBody,
+        user: dict = Depends(user_from),
+        store: Store = Depends(get_store),
+    ):
+        asset = asset_of(store, user, asset_id)
+        if not asset or asset["kind"] != "sheet":
+            raise HTTPException(404, "表格不存在。")
+        encrypted = is_encrypted(asset.get("content"))
+        password = body.password
+        if body.action == "enable":
+            if encrypted:
+                raise HTTPException(400, "表格已经加密。")
+            if password != (body.password_confirm or ""):
+                raise HTTPException(400, "两次输入的文件密码不一致。")
+            if len(password) < MIN_PASSWORD:
+                raise HTTPException(400, f"文件密码至少 {MIN_PASSWORD} 位。")
+            envelope = encrypt_sheet(asset.get("content") or {}, password, asset_id=asset_id)
+            updated = store.update_asset(
+                asset["owner_id"], asset_id,
+                content=envelope, revision=asset.get("revision", 0) + 1,
+            )
+            store.delete_sheet_caches(asset["owner_id"], asset_id)
+            return public_asset(updated, include_content=True, plaintext=asset.get("content") or {})
+        if not encrypted:
+            raise HTTPException(400, "表格尚未加密。")
+        plaintext = unlock_sheet_content(asset, password)
+        if body.action == "disable":
+            updated = store.update_asset(
+                asset["owner_id"], asset_id,
+                content=plaintext, revision=asset.get("revision", 0) + 1,
+            )
+            return public_asset(updated, include_content=True)
+        new_password = body.new_password or ""
+        if len(new_password) < MIN_PASSWORD:
+            raise HTTPException(400, f"文件密码至少 {MIN_PASSWORD} 位。")
+        if new_password != (body.password_confirm or new_password):
+            raise HTTPException(400, "两次输入的文件密码不一致。")
+        envelope = encrypt_sheet(plaintext, new_password, asset_id=asset_id)
+        updated = store.update_asset(
+            asset["owner_id"], asset_id,
+            content=envelope, revision=asset.get("revision", 0) + 1,
+        )
+        return public_asset(updated, include_content=True, plaintext=plaintext)
 
     @app.delete("/assets/{asset_id}")
     def remove_asset(asset_id: str, user: dict = Depends(user_from), store: Store = Depends(get_store)):
@@ -1234,7 +1430,7 @@ def create_app(store: Store | None = None) -> FastAPI:
             raise HTTPException(404, "文件不存在。")
         visible_project = asset.get("project_id") or user.get("last_project_id")
         same = store.assets(user["id"], visible_project, asset["kind"])
-        if asset["kind"] != "pdf" and len(same) <= 1:
+        if asset["kind"] not in ("pdf", "outline_template") and len(same) <= 1:
             raise HTTPException(400, "该类型至少保留一份。")
         store.delete_asset(user["id"], asset_id)
         if asset["kind"] == "sheet":
@@ -1397,7 +1593,8 @@ def create_app(store: Store | None = None) -> FastAPI:
 
     @app.get("/assets/{asset_id}/sheet-cache")
     def get_sheet_cache(asset_id: str, sheet_id: str, user: dict = Depends(user_from), store: Store = Depends(get_store)):
-        _, oid = _sheet_asset(asset_id, user, store)
+        asset, oid = _sheet_asset(asset_id, user, store)
+        require_unencrypted_sheet(asset)
         found = store.get_sheet_cache(oid, asset_id, sheet_id)
         if not found:
             raise HTTPException(404, "尚未缓存表结构。")
@@ -1405,7 +1602,8 @@ def create_app(store: Store | None = None) -> FastAPI:
 
     @app.put("/assets/{asset_id}/sheet-cache")
     def put_sheet_cache(asset_id: str, body: SheetCachePutBody, user: dict = Depends(user_from), store: Store = Depends(get_store)):
-        _, oid = _sheet_asset(asset_id, user, store)
+        asset, oid = _sheet_asset(asset_id, user, store)
+        require_unencrypted_sheet(asset)
         try:
             fields = normalize_cache_body(body.model_dump(), revision=body.revision)
         except ValueError as exc:
@@ -1423,7 +1621,8 @@ def create_app(store: Store | None = None) -> FastAPI:
 
     @app.patch("/assets/{asset_id}/sheet-cache")
     def patch_sheet_cache(asset_id: str, body: SheetCachePatchBody, user: dict = Depends(user_from), store: Store = Depends(get_store)):
-        _, oid = _sheet_asset(asset_id, user, store)
+        asset, oid = _sheet_asset(asset_id, user, store)
+        require_unencrypted_sheet(asset)
         existing = store.get_sheet_cache(oid, asset_id, body.sheet_id)
         if not existing:
             raise HTTPException(404, "尚未缓存表结构。")
@@ -1432,7 +1631,8 @@ def create_app(store: Store | None = None) -> FastAPI:
 
     @app.post("/assets/{asset_id}/sheet-cache/profile")
     async def post_sheet_profile(asset_id: str, body: SheetCacheProfileBody, user: dict = Depends(user_from), store: Store = Depends(get_store)):
-        _, oid = _sheet_asset(asset_id, user, store)
+        asset, oid = _sheet_asset(asset_id, user, store)
+        require_unencrypted_sheet(asset)
         if not model_configured():
             raise HTTPException(503, model_configuration_error())
         cache = store.get_sheet_cache(oid, asset_id, body.sheet_id)
@@ -1456,7 +1656,8 @@ def create_app(store: Store | None = None) -> FastAPI:
         user: dict = Depends(user_from),
         store: Store = Depends(get_store),
     ):
-        _, oid = _sheet_asset(asset_id, user, store)
+        asset, oid = _sheet_asset(asset_id, user, store)
+        require_unencrypted_sheet(asset)
         if not model_configured():
             raise HTTPException(503, model_configuration_error())
         cache = store.get_sheet_cache(oid, asset_id, body.sheet_id)
@@ -1474,7 +1675,8 @@ def create_app(store: Store | None = None) -> FastAPI:
         user: dict = Depends(user_from),
         store: Store = Depends(get_store),
     ):
-        _, oid = _sheet_asset(asset_id, user, store)
+        asset, oid = _sheet_asset(asset_id, user, store)
+        require_unencrypted_sheet(asset)
         if not model_configured():
             raise HTTPException(503, model_configuration_error())
         cache = store.get_sheet_cache(oid, asset_id, body.sheet_id)
@@ -1502,7 +1704,8 @@ def create_app(store: Store | None = None) -> FastAPI:
         user: dict = Depends(user_from),
         store: Store = Depends(get_store),
     ):
-        _, oid = _sheet_asset(asset_id, user, store)
+        asset, oid = _sheet_asset(asset_id, user, store)
+        require_unencrypted_sheet(asset)
         rows = store.list_sheet_charts(oid, asset_id, sheet_id)
         return {"charts": [public_sheet_chart(row) for row in rows]}
 
@@ -1513,7 +1716,8 @@ def create_app(store: Store | None = None) -> FastAPI:
         user: dict = Depends(user_from),
         store: Store = Depends(get_store),
     ):
-        _, oid = _sheet_asset(asset_id, user, store)
+        asset, oid = _sheet_asset(asset_id, user, store)
+        require_unencrypted_sheet(asset)
         try:
             chart = validate_chart_plan(body.chart)
         except ValueError as exc:
@@ -1553,9 +1757,15 @@ def create_app(store: Store | None = None) -> FastAPI:
             try:
                 context = body.context
                 if body.use_sheet_cache and context.get("surface") == "sheet":
-                    sheet_id = str((context.get("selection") or {}).get("sheet_id") or "")
-                    cache = store.get_sheet_cache(owner_id(user), str(context.get("document_id") or ""), sheet_id)
-                    context = bind_sheet_context(context, cache, body.intent)
+                    doc_id = str(context.get("document_id") or "")
+                    sheet_asset = store.asset(owner_id(user), doc_id)
+                    if sheet_asset and is_encrypted(sheet_asset.get("content")):
+                        # 加密表不落明文 cache；已在编辑器解锁时仍可用客户端选区继续问答。
+                        pass
+                    else:
+                        sheet_id = str((context.get("selection") or {}).get("sheet_id") or "")
+                        cache = store.get_sheet_cache(owner_id(user), doc_id, sheet_id)
+                        context = bind_sheet_context(context, cache, body.intent)
                 history = [item.model_dump() for item in body.history]
                 async for event in iter_assistant_events(
                     context, body.intent, body.task, history, summary=body.summary,
@@ -1600,6 +1810,82 @@ def create_app(store: Store | None = None) -> FastAPI:
                 yield sse_pack({"type": "error", "error": str(exc)})
             except Exception:
                 yield sse_pack({"type": "error", "error": "模型请求失败，请检查接口配置与服务日志。"})
+
+        return StreamingResponse(events(), media_type="text/event-stream", headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        })
+
+    @app.post("/assistant/information/keywords")
+    async def assistant_information_keywords(body: InformationKeywordBody, _user: dict = Depends(user_from)):
+        if not model_configured():
+            raise HTTPException(503, model_configuration_error())
+
+        async def events():
+            try:
+                async for event in iter_keyword_events(body.kind, body.description, body.extra):
+                    yield sse_pack(event)
+            except ValueError as exc:
+                yield sse_pack({"type": "error", "error": str(exc)})
+            except Exception:
+                yield sse_pack({"type": "error", "error": "生成关键字失败，请检查模型配置与服务日志。"})
+
+        return StreamingResponse(events(), media_type="text/event-stream", headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        })
+
+    @app.post("/assistant/information/impact")
+    async def assistant_information_impact(body: InformationImpactBody, _user: dict = Depends(user_from)):
+        if not model_configured():
+            raise HTTPException(503, model_configuration_error())
+
+        async def events():
+            try:
+                async for event in iter_impact_events(body.group_id, body.item_ids):
+                    yield sse_pack(event)
+            except ValueError as exc:
+                yield sse_pack({"type": "error", "error": str(exc)})
+            except Exception:
+                yield sse_pack({"type": "error", "error": "初步判断失败，请检查模型配置与服务日志。"})
+
+        return StreamingResponse(events(), media_type="text/event-stream", headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        })
+
+    @app.post("/assistant/information/analyze")
+    async def assistant_information_analyze(body: InformationAnalyzeBody, _user: dict = Depends(user_from)):
+        if not model_configured():
+            raise HTTPException(503, model_configuration_error())
+
+        async def events():
+            try:
+                async for event in iter_analyze_events(body.item_id):
+                    yield sse_pack(event)
+            except ValueError as exc:
+                yield sse_pack({"type": "error", "error": str(exc)})
+            except Exception:
+                yield sse_pack({"type": "error", "error": "深入分析失败，请检查模型配置与服务日志。"})
+
+        return StreamingResponse(events(), media_type="text/event-stream", headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        })
+
+    @app.post("/assistant/information/review")
+    async def assistant_information_review(body: InformationReviewBody, _user: dict = Depends(user_from)):
+        if not model_configured():
+            raise HTTPException(503, model_configuration_error())
+
+        async def events():
+            try:
+                async for event in iter_review_events(body.group_id):
+                    yield sse_pack(event)
+            except ValueError as exc:
+                yield sse_pack({"type": "error", "error": str(exc)})
+            except Exception:
+                yield sse_pack({"type": "error", "error": "深入点评失败，请检查模型配置与服务日志。"})
 
         return StreamingResponse(events(), media_type="text/event-stream", headers={
             "Cache-Control": "no-cache",

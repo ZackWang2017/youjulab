@@ -10,10 +10,12 @@ from uuid import uuid4
 
 from config import mongo_db, mongo_url
 
-KINDS = ("sheet", "document", "pdf", "mindmap", "research", "diagram", "project_plan", "calendar", "calc", "notebook")
-USER_KINDS = frozenset({"calendar", "calc", "notebook"})
+KINDS = ("sheet", "document", "pdf", "mindmap", "research", "diagram", "project_plan", "calendar", "calc", "notebook", "outline_template")
+# 每种只保留一份的用户资产。大纲模板可以有多份。
+USER_SINGLETON_KINDS = frozenset({"calendar", "calc", "notebook"})
+USER_KINDS = USER_SINGLETON_KINDS | frozenset({"outline_template"})
 # 可在「项目可见 / 我可见」间切换；我可见时 project_id 为空，跨项目出现在列表中。
-SCOPED_VISIBILITY_KINDS = frozenset({"document", "project_plan"})
+SCOPED_VISIBILITY_KINDS = frozenset({"document", "diagram", "project_plan"})
 DEFAULT_SHEET_NAME = "未命名表格"
 DEFAULT_DOCUMENT_NAME = "未命名文档"
 DEFAULT_MINDMAP_NAME = "未命名导图"
@@ -63,6 +65,14 @@ def remove_recent_asset(doc: dict, asset_id: str) -> dict[str, list[str]]:
         for project_id, ids in histories.items()
         if isinstance(project_id, str) and isinstance(ids, list)
     }
+
+
+def dismiss_project_recent_asset(doc: dict, project_id: str, asset_id: str) -> dict[str, list[str]]:
+    """从当前项目的最近打开里拿掉一个标签，不删除资产本身。"""
+    histories = doc.get("recent_assets_by_project")
+    result = dict(histories) if isinstance(histories, dict) else {}
+    result[project_id] = [item for item in recent_asset_ids(doc, project_id) if item != asset_id]
+    return result
 
 
 def new_access_token() -> str:
@@ -144,6 +154,11 @@ def is_user_kind(kind: str) -> bool:
     return kind in USER_KINDS
 
 
+def is_singleton_user_kind(kind: str) -> bool:
+    """用户级单例：再次创建时返回已有的那一份。"""
+    return kind in USER_SINGLETON_KINDS
+
+
 def supports_scoped_visibility(kind: str) -> bool:
     return kind in SCOPED_VISIBILITY_KINDS
 
@@ -195,10 +210,12 @@ def public_project(doc: dict) -> dict:
     return {"id": doc["id"], "name": doc["name"], "created_at": doc["created_at"], "updated_at": doc["updated_at"]}
 
 
-def public_asset(doc: dict, include_content: bool = False) -> dict:
+def public_asset(doc: dict, include_content: bool = False, *, plaintext: Any = None) -> dict:
+    from sheet_crypto import is_encrypted
     placement = doc.get("visibility")
     if placement not in ("user", "project"):
         placement = "user" if not doc.get("project_id") or is_user_kind(str(doc.get("kind") or "")) else "project"
+    encrypted = is_encrypted(doc.get("content"))
     item = {
         "id": doc["id"],
         "project_id": doc.get("project_id") or None,
@@ -209,11 +226,17 @@ def public_asset(doc: dict, include_content: bool = False) -> dict:
         "filename": doc.get("filename"),
         "size": doc.get("size"),
         "placement": placement,
+        "encrypted": encrypted,
     }
     if doc.get("index_status"):
         item["index_status"] = doc["index_status"]
     if include_content:
-        item["content"] = doc.get("content")
+        if encrypted and plaintext is None:
+            item["locked"] = True
+        else:
+            item["content"] = plaintext if encrypted else doc.get("content")
+            if encrypted:
+                item["locked"] = False
     return item
 
 
@@ -274,11 +297,14 @@ class Store:
     def delete_assistant_session(self, user_id: str, session_id: str) -> bool: raise NotImplementedError
     def get_sheet_cache(self, user_id: str, document_id: str, sheet_id: str) -> dict | None: raise NotImplementedError
     def upsert_sheet_cache(self, user_id: str, document_id: str, fields: dict) -> dict: raise NotImplementedError
+    def delete_sheet_caches(self, user_id: str, document_id: str) -> None: raise NotImplementedError
     def list_sheet_charts(self, user_id: str, document_id: str, sheet_id: str) -> list[dict]: raise NotImplementedError
     def get_sheet_chart(self, user_id: str, chart_id: str) -> dict | None: raise NotImplementedError
     def create_sheet_chart(self, user_id: str, document_id: str, sheet_id: str, fields: dict) -> dict: raise NotImplementedError
     def update_sheet_chart(self, user_id: str, chart_id: str, fields: dict) -> dict | None: raise NotImplementedError
     def delete_sheet_charts(self, user_id: str, document_id: str) -> None: raise NotImplementedError
+    def get_pdf_folder_store(self, user_id: str, project_id: str) -> dict | None: raise NotImplementedError
+    def upsert_pdf_folder_store(self, user_id: str, project_id: str, fields: dict) -> dict: raise NotImplementedError
     def reassign_owner(self, from_user_id: str, to_user_id: str) -> int: raise NotImplementedError
 
 
@@ -293,6 +319,7 @@ class MemoryStore(Store):
         self._sheet_cache: dict[str, dict] = {}
         self._sheet_charts: dict[str, dict] = {}
         self._user_model_configs: dict[str, dict] = {}
+        self._pdf_folders: dict[str, dict] = {}
 
     def create_user(self, email: str, password: str) -> dict:
         user = {
@@ -525,6 +552,19 @@ class MemoryStore(Store):
                 chart["user_id"] = to_user_id
                 chart["updated_at"] = now()
                 moved += 1
+        for key, folder_store in list(self._pdf_folders.items()):
+            if folder_store.get("user_id") != from_user_id:
+                continue
+            project_id = str(folder_store.get("project_id") or "")
+            new_key = f"{to_user_id}:{project_id}"
+            self._pdf_folders.pop(key, None)
+            if new_key in self._pdf_folders:
+                continue
+            folder_store["id"] = new_key
+            folder_store["user_id"] = to_user_id
+            folder_store["updated_at"] = now()
+            self._pdf_folders[new_key] = folder_store
+            moved += 1
         if from_user_id in self._user_model_configs and to_user_id not in self._user_model_configs:
             cfg = self._user_model_configs.pop(from_user_id)
             cfg["user_id"] = to_user_id
@@ -689,6 +729,11 @@ class MemoryStore(Store):
         self._sheet_cache[key] = current
         return copy.deepcopy(current)
 
+    def delete_sheet_caches(self, user_id: str, document_id: str) -> None:
+        for key, cache in list(self._sheet_cache.items()):
+            if cache.get("user_id") == user_id and cache.get("document_id") == document_id:
+                del self._sheet_cache[key]
+
     def list_sheet_charts(self, user_id: str, document_id: str, sheet_id: str) -> list[dict]:
         rows = [
             copy.deepcopy(row) for row in self._sheet_charts.values()
@@ -731,6 +776,23 @@ class MemoryStore(Store):
             if row.get("user_id") == user_id and row.get("document_id") == document_id:
                 del self._sheet_charts[chart_id]
 
+    def get_pdf_folder_store(self, user_id: str, project_id: str) -> dict | None:
+        found = self._pdf_folders.get(f"{user_id}:{project_id}")
+        return copy.deepcopy(found) if found else None
+
+    def upsert_pdf_folder_store(self, user_id: str, project_id: str, fields: dict) -> dict:
+        key = f"{user_id}:{project_id}"
+        current = self._pdf_folders.get(key) or {
+            "id": key, "user_id": user_id, "project_id": project_id, "created_at": now(),
+        }
+        current.update(fields)
+        current["id"] = key
+        current["user_id"] = user_id
+        current["project_id"] = project_id
+        current["updated_at"] = now()
+        self._pdf_folders[key] = current
+        return copy.deepcopy(current)
+
 
 class MongoStore(Store):
     def __init__(self, url: str, dbname: str) -> None:
@@ -755,6 +817,7 @@ class MongoStore(Store):
         self.db.document_skills.create_index("id", unique=True)
         self.db.document_skills.create_index([("user_id", 1), ("document_id", 1), ("updated_at", -1)])
         self.db.user_model_configs.create_index("user_id", unique=True)
+        self.db.pdf_folders.create_index([("user_id", 1), ("project_id", 1)], unique=True)
 
     def _one(self, collection: str, query: dict) -> dict | None:
         doc = self.db[collection].find_one(query)
@@ -1041,6 +1104,9 @@ class MongoStore(Store):
             self.db.sheet_cache.insert_one(payload)
         return self.get_sheet_cache(user_id, document_id, sheet_id) or payload
 
+    def delete_sheet_caches(self, user_id: str, document_id: str) -> None:
+        self.db.sheet_cache.delete_many({"user_id": user_id, "document_id": document_id})
+
     def list_sheet_charts(self, user_id: str, document_id: str, sheet_id: str) -> list[dict]:
         return list(self.db.sheet_charts.find(
             {"user_id": user_id, "document_id": document_id, "sheet_id": sheet_id},
@@ -1070,6 +1136,22 @@ class MongoStore(Store):
 
     def delete_sheet_charts(self, user_id: str, document_id: str) -> None:
         self.db.sheet_charts.delete_many({"user_id": user_id, "document_id": document_id})
+
+    def get_pdf_folder_store(self, user_id: str, project_id: str) -> dict | None:
+        return self.db.pdf_folders.find_one(
+            {"user_id": user_id, "project_id": project_id}, {"_id": 0},
+        )
+
+    def upsert_pdf_folder_store(self, user_id: str, project_id: str, fields: dict) -> dict:
+        query = {"user_id": user_id, "project_id": project_id}
+        existing = self.get_pdf_folder_store(user_id, project_id)
+        payload = {**fields, "id": f"{user_id}:{project_id}", **query, "updated_at": now()}
+        if existing:
+            self.db.pdf_folders.update_one(query, {"$set": payload})
+        else:
+            payload["created_at"] = now()
+            self.db.pdf_folders.insert_one(payload)
+        return self.get_pdf_folder_store(user_id, project_id) or payload
 
 
 def create_store(url: str | None = None) -> Store:

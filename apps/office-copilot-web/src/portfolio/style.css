@@ -34,8 +34,8 @@
 .portfolio-table .strong{font-weight:600}
 .portfolio-table tfoot td{background:#f8faf9;font-weight:600;border-top:2px solid #e2e7e9;border-bottom:0}
 .portfolio-table tfoot small{display:block;font-weight:400;font-size:11px;margin:2px 0 0 0}
-.portfolio-table .is-up,.portfolio-stats .is-up,.portfolio-tx-table .is-up{color:#1d8a5a}
-.portfolio-table .is-down,.portfolio-stats .is-down,.portfolio-tx-table .is-down{color:#c73b3b}
+.portfolio-table .is-up,.portfolio-stats .is-up,.portfolio-tx-table .is-up{color:#c73b3b}
+.portfolio-table .is-down,.portfolio-stats .is-down,.portfolio-tx-table .is-down{color:#1d8a5a}
 .portfolio-asset-name{font-weight:500}
 .portfolio-holdings-table.is-aggregate .portfolio-aggregate-asset-cell{width:200px;max-width:200px}
 .portfolio-holdings-table.is-aggregate .portfolio-aggregate-asset-cell .portfolio-asset-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -67,11 +67,11 @@
 #portfolio .portfolio-card-title svg{width:16px;height:16px;color:#147c6e}
 #portfolio .portfolio-nav-main{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:12px}
 #portfolio .portfolio-big{font-size:34px;font-weight:700;letter-spacing:-.5px;font-variant-numeric:tabular-nums;color:#24282d}
-#portfolio .portfolio-big.is-up{color:#1d8a5a}
-#portfolio .portfolio-big.is-down{color:#c73b3b}
+#portfolio .portfolio-big.is-up{color:#c73b3b}
+#portfolio .portfolio-big.is-down{color:#1d8a5a}
 #portfolio .portfolio-chip{display:inline-flex;padding:3px 9px;border-radius:12px;font-size:13px;font-weight:600;background:#eef1f3;color:#59656d}
-#portfolio .portfolio-chip.is-up{background:#e4f5ee;color:#157347}
-#portfolio .portfolio-chip.is-down{background:#fdeaea;color:#b23434}
+#portfolio .portfolio-chip.is-up{background:#fdeaea;color:#b23434}
+#portfolio .portfolio-chip.is-down{background:#e4f5ee;color:#157347}
 #portfolio .portfolio-kv{display:flex;justify-content:space-between;gap:12px;padding:7px 0;border-top:1px dashed #e4e9eb;font-size:13px;color:#59656d}
 #portfolio .portfolio-kv b{font-weight:600;color:#24282d;font-variant-numeric:tabular-nums}
 #portfolio .portfolio-chart{height:280px;min-height:200px;display:flex;align-items:center;justify-content:center}
@@ -86,8 +86,8 @@
 #portfolio .portfolio-metric>span{font-size:11px;color:#6b7880;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 #portfolio .portfolio-metric>span small{font-size:10px;color:#9aa5ab;margin-left:2px}
 #portfolio .portfolio-metric>b{font-size:17px;font-weight:600;font-variant-numeric:tabular-nums;color:#24282d;line-height:1.2}
-#portfolio .portfolio-metric>b.is-up{color:#1d8a5a}
-#portfolio .portfolio-metric>b.is-down{color:#c73b3b}
+#portfolio .portfolio-metric>b.is-up{color:#c73b3b}
+#portfolio .portfolio-metric>b.is-down{color:#1d8a5a}
 #portfolio .portfolio-metric>small{font-size:10px;color:#9aa5ab}
 #portfolio .portfolio-footnote{margin:10px 0 0;font-size:11px;font-style:italic;line-height:1.6;color:#7d8991}
 #portfolio .portfolio-footnote b{font-style:normal;font-weight:600;color:#354047}

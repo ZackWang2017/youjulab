@@ -82,7 +82,13 @@
 #pdf .pdf-notebook-panel .notebook-editor .tiptap .pdf-list-fold-toggle:hover,
 #pdf .pdf-notebook-panel .notebook-editor .tiptap .pdf-list-fold-toggle:focus-visible { background: #dcefeb; outline: 0; }
 #pdf .pdf-notebook-panel .notebook-editor .tiptap blockquote { margin: 12px 0; padding-left: 12px; border-left: 3px solid #a9bbb5; color: #65716d; }
-#pdf .pdf-notebook-panel .notebook-editor .tiptap a { color: #0f6f68; text-decoration: underline; }
+#pdf .pdf-notebook-panel .notebook-editor .tiptap a { color: #242b29; text-decoration: underline; }
+#pdf .pdf-notebook-panel .notebook-editor .tiptap .pdf-outline-reference { color: #242b29; text-decoration: underline; text-decoration-style: dotted; text-underline-offset: 3px; cursor: pointer; pointer-events: auto; }
+#pdf .pdf-notebook-panel .notebook-editor .tiptap .pdf-outline-reference:hover { color: #161b1a; text-decoration-style: solid; background: #e7f4f2; }
+#pdf .pdf-notebook-panel .notebook-editor .tiptap .pdf-outline-reference:focus-visible { outline: 2px solid #79b8ae; outline-offset: 2px; border-radius: 2px; }
+.pdf-page-link-dialog { width: min(380px, calc(100vw - 32px)); }
+.pdf-page-link-dialog p { margin: 0; color: #68727b; font-size: 13px; line-height: 1.55; }
+.pdf-page-link-dialog input { width: 100%; }
 #pdf .pdf-pane {
   position: relative;
   flex: 1 1 auto;
@@ -200,6 +206,11 @@
 #pdf .textLayer,
 #pdf .textLayer :is(span, br) { box-sizing: content-box; }
 #pdf .pdf-nav, #pdf .pdf-zoom { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+#pdf .pdf-reading-history { position: absolute; z-index: 12; top: 12px; left: 12px; display: inline-flex; align-items: center; filter: drop-shadow(0 2px 5px rgba(20, 34, 32, .14)); }
+#pdf .pdf-reading-history button { width: 30px; min-width: 30px; min-height: 30px; padding: 0; border-radius: 0; background: rgba(255, 255, 255, .94); }
+#pdf .pdf-reading-history button:first-child { border-radius: 4px 0 0 4px; }
+#pdf .pdf-reading-history button + button { margin-left: -1px; border-radius: 0 4px 4px 0; }
+#pdf .pdf-reading-history button svg { width: 16px; height: 16px; }
 #pdf [data-page] { min-width: 0; }
 #pdf [data-page-input] { width: 54px; height: 34px; flex: 0 0 54px; border: 1px solid #d8dde1; border-radius: 4px; text-align: center; background: white; }
 #pdf [data-page-total] { flex-shrink: 0; min-width: 28px; color: #6f7c84; font-size: 12px; }
@@ -216,6 +227,51 @@
 #pdf .pdf-ask-ai span { line-height: 1; }
 #pdf .pdf-outline-toggle { flex-shrink: 0; min-width: 32px; padding: 6px 7px; color: #0f6f64; }
 #pdf .pdf-outline-toggle:hover:not(:disabled) { background: #e7f4f2; border-color: #b7d8d2; }
+#pdf .pdf-notebook-panel .notebook-toolbar [data-pdf-template] { color: #0f6f64; }
+#pdf .pdf-notebook-panel .notebook-toolbar [data-pdf-template]:hover:not(:disabled) { background: #e7f4f2; }
+.pdf-template-dialog { width: min(640px, calc(100vw - 32px)); max-height: min(82vh, 760px); }
+#pdf-template-dialog header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+#pdf-template-dialog .pdf-template-tabs { display: flex; align-items: center; gap: 4px; }
+#pdf-template-dialog .pdf-template-tabs button {
+  min-height: 32px; padding: 4px 12px; border: 0; border-bottom: 2px solid transparent; border-radius: 0;
+  background: transparent; color: #5d6a70;
+}
+#pdf-template-dialog .pdf-template-tabs button[aria-selected="true"] { color: #0f6f64; border-bottom-color: #147c6e; font-weight: 650; }
+#pdf-template-dialog header [data-close] {
+  display: inline-grid; place-items: center; width: 30px; min-width: 30px; height: 30px; min-height: 30px;
+  padding: 0; border: 0; border-radius: 4px; background: transparent; color: #52625e;
+}
+#pdf-template-dialog header [data-close]:hover { background: #edf4f2; color: #0f6f64; }
+#pdf-template-dialog header [data-close] svg { width: 16px; height: 16px; }
+.pdf-template-field { display: grid; gap: 6px; color: #5d6a70; font-size: 12px; }
+.pdf-template-field select,
+.pdf-template-field input { width: 100%; height: 36px; border: 1px solid #d8dde1; border-radius: 5px; padding: 0 10px; background: #fff; color: #242b29; font-size: 14px; }
+.pdf-template-field input[readonly] { background: #f6f8f8; color: #3c474d; }
+.pdf-template-editor { min-height: 240px; max-height: min(46vh, 420px); overflow: auto; border: 1px solid #d8dde1; border-radius: 6px; padding: 12px 14px; background: #fff; }
+.pdf-template-editor.is-readonly { background: #f7f9f8; }
+.pdf-template-editor .tiptap { min-height: 210px; outline: 0; line-height: 1.7; color: #242b29; }
+.pdf-template-editor .tiptap p { margin: 0 0 8px; }
+.pdf-template-editor .tiptap h2,
+.pdf-template-editor .tiptap h3,
+.pdf-template-editor .tiptap h4 { margin: 12px 0 6px; }
+.pdf-template-editor .tiptap ul,
+.pdf-template-editor .tiptap ol { margin: 0 0 8px; padding-left: 1.4em; }
+#pdf-template-dialog .pdf-template-editor .tiptap li { position: relative; }
+#pdf-template-dialog .pdf-template-editor .tiptap li[data-collapsed="true"] > ul,
+#pdf-template-dialog .pdf-template-editor .tiptap li[data-collapsed="true"] > ol { display: none; }
+#pdf-template-dialog .pdf-template-editor .tiptap .pdf-list-fold-toggle {
+  position: absolute; z-index: 2; left: -1.45em; top: 0.52em; width: 0.95em; min-width: 0.95em;
+  height: 0.95em; min-height: 0.95em; padding: 0; border: 0; border-radius: 3px; background: #f3f7f6;
+  cursor: pointer;
+}
+#pdf-template-dialog .pdf-template-editor .tiptap .pdf-list-fold-toggle::before {
+  content: ''; position: absolute; left: 0.34em; top: 0.24em; width: 0.32em; height: 0.32em;
+  border-right: 1.5px solid #4d625d; border-bottom: 1.5px solid #4d625d; transform: rotate(45deg);
+}
+#pdf-template-dialog .pdf-template-editor .tiptap li[data-collapsed="true"] > .pdf-list-fold-toggle::before { top: 0.31em; left: 0.25em; transform: rotate(-45deg); }
+#pdf-template-dialog .pdf-template-editor .tiptap .pdf-list-fold-toggle:hover,
+#pdf-template-dialog .pdf-template-editor .tiptap .pdf-list-fold-toggle:focus-visible { background: #dcefeb; outline: 0; }
+.pdf-template-error { margin: 0; color: #a33b32; font-size: 12px; }
 .pdf-outline-float { width: min(420px, calc(100vw - 16px)); min-height: 250px; }
 .pdf-outline-content { display: grid; grid-template-rows: auto minmax(90px, 1fr); gap: 12px; padding: 14px 16px 16px; }
 .pdf-outline-content .thinking-status { padding: 10px; border: 1px solid #e0e8e6; border-radius: 5px; background: #f8fbfa; }

@@ -119,11 +119,13 @@ def compute_nav_series(
     end: date,
     tz: str = "Asia/Shanghai",
     is_cash: callable = lambda ticker: ticker.endswith(".CASH"),
+    price_overrides: dict[date, dict[str, Decimal]] | None = None,
 ) -> list[NavPoint]:
     """根据流水 + 收盘价 + 汇率，重算从首笔流水到 ``end`` 的每日净值。
 
     transactions 每项至少含 ``occurred_at``（datetime）、``ticker_code``、``currency``、``action``、
     ``shares``、``price``、``external_flow``（持仓币种计价，流入为正）。
+    ``price_overrides`` 只替换指定日期的估值价（例如当天交易时段用实时价），不回写收盘价。
     """
     if not transactions:
         return []
@@ -138,6 +140,8 @@ def compute_nav_series(
     # 评估日期：流水日 ∪ 持有证券的收盘价日期 ∪ end
     days: set[date] = {d for d in tx_by_day if d <= end}
     days.add(end)
+    if price_overrides:
+        days.update(day for day in price_overrides if first_day <= day <= end)
     tickers = {tx["ticker_code"] for tx in ordered}
     for ticker in tickers:
         series = pricing.closes.get(ticker)
@@ -185,10 +189,14 @@ def compute_nav_series(
             if is_cash(ticker):
                 price = ONE
             else:
-                series = pricing.closes.get(ticker)
-                price = series.at(day) if series else None
-                if price is None:
-                    price = last_tx_price.get(ticker, ZERO)
+                forced = (price_overrides or {}).get(day, {}).get(ticker)
+                if forced is not None:
+                    price = forced
+                else:
+                    series = pricing.closes.get(ticker)
+                    price = series.at(day) if series else None
+                    if price is None:
+                        price = last_tx_price.get(ticker, ZERO)
             value += qty * price * pricing.rate_to_cny(currency_of.get(ticker, "CNY"), day)
 
         if units <= 0:

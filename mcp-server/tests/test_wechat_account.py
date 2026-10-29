@@ -60,10 +60,30 @@ class WechatAccountTests(unittest.TestCase):
             "createTime": 1727308800,
             "mpInfo": {"title": "早报", "content": "摘要"},
         }}]}]}
-        items = weread_repo._articles_from_reviews(payload, "MP_WXS_1")
+        items = weread_repo._articles_from_reviews(payload, "cookie", "MP_WXS_1")
         self.assertEqual(items[0]["url"], "https://mp.weixin.qq.com/s/token_1")
         self.assertEqual(items[0]["published_at"], "2024-09-26 08:00")
         self.assertEqual(items[0]["summary"], "摘要")
+
+    def test_weread_long_internal_id_uses_article_page_original_url(self) -> None:
+        payload = {"reviews": [{"subReviews": [{"review": {
+            "reviewId": "MP_WXS_1_internal-review",
+            "mpInfo": {"title": "早报", "originalId": "A" * 75},
+        }}]}]}
+        html = '<meta property="og:url" content="https://mp.weixin.qq.com/s/real_token" />'
+        with patch.object(weread_repo, "_get_html", return_value=html) as fetch:
+            items = weread_repo._articles_from_reviews(payload, "cookie", "MP_WXS_1")
+        self.assertEqual(items[0]["url"], "https://mp.weixin.qq.com/s/real_token")
+        fetch.assert_called_once()
+
+    def test_weread_long_internal_id_does_not_emit_invalid_wechat_url(self) -> None:
+        payload = {"reviews": [{"subReviews": [{"review": {
+            "reviewId": "MP_WXS_1_" + "B" * 75,
+            "mpInfo": {"title": "早报", "originalId": "A" * 75},
+        }}]}]}
+        with patch.object(weread_repo, "_get_html", return_value=""):
+            items = weread_repo._articles_from_reviews(payload, "cookie", "MP_WXS_1")
+        self.assertEqual(items[0]["url"], "")
 
     def test_blocked_article_list_uses_the_latest_page(self) -> None:
         cover = {"title": "早报", "reviewId": "MP_WXS_1_token"}

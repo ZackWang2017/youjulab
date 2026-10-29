@@ -1,5 +1,6 @@
 import { Editor, Extension } from '@tiptap/core';
 import { BulletList, ListItem } from '@tiptap/extension-list';
+import Paragraph from '@tiptap/extension-paragraph';
 import { Plugin } from '@tiptap/pm/state';
 import { Decoration, DecorationSet } from '@tiptap/pm/view';
 
@@ -133,6 +134,65 @@ export const fourLevelBulletTab = Extension.create({
     return {
       Tab: () => nestFourLevelBullet(this.editor),
       'Shift-Tab': () => this.editor.commands.liftListItem('listItem'),
+    };
+  },
+});
+
+/** PDF 笔记正文的 Tab 缩进：每一级固定为两个字符宽度，保存为段落属性。 */
+export const pdfIndentedParagraph = Paragraph.extend({
+  addAttributes() {
+    return {
+      ...this.parent?.(),
+      textIndent: {
+        default: null,
+        parseHTML: element => (element as HTMLElement).style.textIndent || null,
+        renderHTML: attributes => attributes.textIndent ? { style: `text-indent:${attributes.textIndent}` } : {},
+      },
+    };
+  },
+});
+
+function paragraphIndentLevel(value: unknown) {
+  const matched = /^\s*(\d+(?:\.\d+)?)em\s*$/i.exec(String(value || ''));
+  return matched ? Math.max(0, Math.round(Number(matched[1]) / 2)) : 0;
+}
+
+function changeParagraphIndent(editor: Editor, delta: number) {
+  return editor.commands.command(({ state, tr }) => {
+    const $from = state.selection.$from;
+    for (let depth = $from.depth; depth > 0; depth -= 1) {
+      const node = $from.node(depth);
+      if (node.type.name !== 'paragraph') continue;
+      const level = Math.max(0, paragraphIndentLevel(node.attrs.textIndent) + delta);
+      tr.setNodeMarkup($from.before(depth), undefined, {
+        ...node.attrs,
+        textIndent: level ? `${level * 2}em` : null,
+      });
+      return true;
+    }
+    return false;
+  });
+}
+
+/** PDF 笔记：编号 -> 实心圆 -> 空心圆 -> 实心方块 -> 空心方块；正文按两格缩进。 */
+export const pdfNotebookTab = Extension.create({
+  name: 'pdfNotebookTab',
+  priority: 1000,
+  addKeyboardShortcuts() {
+    return {
+      Tab: () => {
+        const stack = listStack(this.editor);
+        if (stack.length) {
+          return stack[stack.length - 1] === 'orderedList'
+            ? nestUnderNumber(this.editor)
+            : nestFourLevelBullet(this.editor);
+        }
+        return changeParagraphIndent(this.editor, 1) || true;
+      },
+      'Shift-Tab': () => {
+        if (listStack(this.editor).length) return liftNestedList(this.editor);
+        return changeParagraphIndent(this.editor, -1) || true;
+      },
     };
   },
 });

@@ -21,6 +21,8 @@ export interface Asset {
   size?: number | null;
   content?: any;
   placement?: 'user' | 'project';
+  encrypted?: boolean;
+  locked?: boolean;
 }
 export interface RecentAsset extends Asset {
   project_name: string;
@@ -40,29 +42,86 @@ const KINDS: Kind[] = ['sheet', 'document', 'pdf', 'mindmap', 'research', 'diagr
 const serverRevision = new Map<string, number>();
 /** 已拉取过正文的资产，切换文件时优先直接打开，避免每次重新请求。 */
 const assetCache = new Map<string, Asset>();
+/** 当前标签页内记住的文件密码，关页即忘。 */
+const filePasswords = new Map<string, string>();
 let queued: { id: string; content: unknown } | null = null;
 let saveTimer: ReturnType<typeof setTimeout> | undefined;
 let saving: Promise<void> = Promise.resolve();
 let saveFailed = false;
 
-function cacheAsset(asset: Asset) {
+export function cacheAsset(asset: Asset) {
   assetCache.set(asset.id, asset);
   rememberRevision(asset.id, asset.revision);
   return asset;
 }
 
+function hasDecryptedSheetContent(asset: Asset | null | undefined) {
+  if (!asset || asset.locked) return false;
+  const content = asset.content as Record<string, unknown> | undefined;
+  if (!content || typeof content !== 'object') return false;
+  if (content.format === 'youju-sheet-encrypted-v1') return false;
+  return Boolean(content.sheets || content.sheetOrder);
+}
+
 function assetHasBody(asset: Asset | null | undefined) {
   if (!asset) return false;
+  if (asset.locked || asset.encrypted) return false;
   // PDF 正文在文件流里；缓存命中需至少带过一次详情（含笔记 content 字段）。
   if (asset.kind === 'pdf') return 'content' in asset;
   const content = asset.content as Record<string, unknown> | undefined;
   if (!content || typeof content !== 'object') return false;
+  if (content.format === 'youju-sheet-encrypted-v1') return false;
   return Boolean(
     content.sheets || content.sheetOrder || content.nodeData || content.type === 'doc'
     || content.format === 'drawio-v1' || content.format === 'mermaid-v1'
     || content.format === 'invp-research-diagram-v1' || content.format === 'invp-project-plan-v1'
     || content.format === 'invp-calendar-v1' || content.format === 'mind-elixir-v1',
   );
+}
+
+export function assetNeedsUnlock(asset: Asset | null | undefined) {
+  if (!asset || asset.kind !== 'sheet') return false;
+  if (asset.locked) return true;
+  return Boolean(asset.encrypted && !hasDecryptedSheetContent(asset));
+}
+
+export function discardSave(id?: string) {
+  if (id && queued && queued.id !== id) return;
+  clearTimeout(saveTimer);
+  queued = null;
+  saveFailed = false;
+}
+
+function canSaveEncrypted(id: string) {
+  const cached = assetCache.get(id);
+  if (!cached?.encrypted && !cached?.locked) return true;
+  return Boolean(filePasswords.get(id));
+}
+
+/** 离开加密表时丢掉明文缓存和标签页里的密码，下次打开必须重新输入。 */
+export function lockEncryptedAsset(id: string) {
+  discardSave(id);
+  clearFilePassword(id);
+  const cached = assetCache.get(id);
+  if (!cached || (!cached.encrypted && !cached.locked)) return cached;
+  const next: Asset = { ...cached, encrypted: true, locked: true };
+  delete next.content;
+  assetCache.set(id, next);
+  return next;
+}
+
+export function setFilePassword(id: string, password: string) {
+  if (password) filePasswords.set(id, password);
+  else filePasswords.delete(id);
+}
+
+export function clearFilePassword(id: string) {
+  filePasswords.delete(id);
+}
+
+export function filePasswordHeader(id: string): HeadersInit | undefined {
+  const password = filePasswords.get(id);
+  return password ? { 'X-File-Password': encodeURIComponent(password) } : undefined;
 }
 
 export function rememberRevision(id: string, revision: number) {
@@ -78,10 +137,13 @@ export async function flushSave() {
   const job = queued;
   queued = null;
   if (!job) return saving;
+  if (!canSaveEncrypted(job.id)) return saving;
+  const headers = filePasswordHeader(job.id);
   saving = saving.then(async () => {
     try {
       const saved = await office.json<Asset & { archived_name?: string }>(`/assets/${job.id}`, {
         method: 'PUT',
+        headers,
         body: JSON.stringify({ content: job.content, revision: serverRevision.get(job.id) ?? 0 }),
       });
       const prev = assetCache.get(saved.id);
@@ -113,6 +175,7 @@ export async function flushSave() {
 }
 
 export function queueSave(id: string, content: unknown) {
+  if (!canSaveEncrypted(id)) return;
   queued = { id, content };
   saveFailed = false;
   clearTimeout(saveTimer);
@@ -164,6 +227,13 @@ export async function reorderRecentAssets(projectId: string, assetIds: string[])
   })).assets;
 }
 
+export async function dismissRecentAsset(projectId: string, assetId: string) {
+  return (await office.json<{ assets: RecentAsset[] }>(
+    `/assets/recent/${encodeURIComponent(assetId)}?project_id=${encodeURIComponent(projectId)}`,
+    { method: 'DELETE' },
+  )).assets;
+}
+
 function pick(list: Asset[], last: string | null) {
   return list.find(item => item.id === last) || list[0] || null;
 }
@@ -199,12 +269,13 @@ export async function bootstrap(): Promise<Workspace> {
   };
 }
 
-export async function getAsset(id: string, opts?: { force?: boolean }) {
+export async function getAsset(id: string, opts?: { force?: boolean; unlock?: boolean }) {
   if (!opts?.force) {
     const cached = assetCache.get(id);
     if (cached && assetHasBody(cached)) return cached;
   }
-  const asset = await office.json<Asset>(`/assets/${id}`);
+  const headers = opts?.unlock ? filePasswordHeader(id) : undefined;
+  const asset = await office.json<Asset>(`/assets/${id}`, headers ? { headers } : {});
   return cacheAsset(asset);
 }
 
@@ -228,6 +299,7 @@ export async function openAsset(id: string, trackRecent = true) {
 
 export async function selectProject(id: string) {
   await flushSaveSoft();
+  for (const assetId of [...assetCache.keys()]) lockEncryptedAsset(assetId);
   const user = await office.json<User>(`/projects/${id}/select`, { method: 'POST' });
   const { projects } = await office.json<{ projects: Project[] }>('/projects');
   const project = projects.find(item => item.id === id);
@@ -340,6 +412,7 @@ export function logout() {
   saveFailed = false;
   serverRevision.clear();
   assetCache.clear();
+  filePasswords.clear();
   clearPdfFileCache();
   sessionStorage.removeItem(BOUND_REMOTE_KEY);
   void office.json('/auth/logout', { method: 'POST' }).catch(() => {});

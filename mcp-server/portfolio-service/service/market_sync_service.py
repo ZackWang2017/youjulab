@@ -6,22 +6,49 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import market_quote_repository as market
 import portfolio_repository as repo
 import portfolio_service
+from market_session import exchange_zone, session_in_progress
 from nav_service import previous_weekday
 
 log = logging.getLogger("portfolio.sync")
 
 _BACKFILL_DAYS = 10
+# 最近这段每次都重拉并覆盖。盘中同步会把当时价格写成「当日收盘」，
+# 若之后只补最新日期之后的缺口，这个未收盘价会留在库里，净值日增长就和行情涨跌幅对不上。
+_REVISE_DAYS = 10
 _SLEEP_BETWEEN = 0.15
 
 
-def sync_close_prices(run_date: date | None = None, *, tickers: list[str] | None = None) -> dict:
-    """对所有组合里出现过的证券，从「已有最新收盘价 + 1 天」补到 run_date。"""
+def close_sync_start(last: date | None, first_held: date, end: date) -> date:
+    """新证券从建仓往前补一段；已有收盘价时，除了补缺口，还要回头覆盖最近几天。"""
+    revise_from = end - timedelta(days=_REVISE_DAYS)
+    if last is None:
+        return first_held - timedelta(days=_BACKFILL_DAYS)
+    return min(last + timedelta(days=1), revise_from)
+
+
+def _finished_session_bars(market_code: str, closes: list[tuple[date, object]], now: datetime) -> list:
+    """交易时段内的当日 K 线还不是收盘价，不能写进收盘价表。"""
+    if not session_in_progress(market_code, now):
+        return list(closes)
+    local_today = now.astimezone(exchange_zone(market_code)).date()
+    return [(day, close) for day, close in closes if day != local_today]
+
+
+def sync_close_prices(
+    run_date: date | None = None,
+    *,
+    tickers: list[str] | None = None,
+    now: datetime | None = None,
+) -> dict:
+    """对所有组合里出现过的证券补齐日收盘价，并覆盖最近几天已写入的价格。"""
     end = run_date or date.today()
+    now = now or datetime.now(ZoneInfo("Asia/Shanghai"))
     held = repo.held_tickers_everywhere()
     if tickers:
         wanted = set(tickers)
@@ -31,7 +58,7 @@ def sync_close_prices(run_date: date | None = None, *, tickers: list[str] | None
         ticker = item["ticker_code"]
         scanned += 1
         last = repo.last_close_date(ticker)
-        start = (last + timedelta(days=1)) if last else (item["first_date"] - timedelta(days=_BACKFILL_DAYS))
+        start = close_sync_start(last, item["first_date"], end)
         if start > end:
             ok += 1
             continue
@@ -41,8 +68,10 @@ def sync_close_prices(run_date: date | None = None, *, tickers: list[str] | None
             failed += 1
             log.warning("close sync failed %s: %s", ticker, exc)
             continue
-        if closes:
-            inserted += repo.upsert_close_prices((ticker, day, close) for day, close in closes)
+        market_code = item.get("market_code") or market.split_ticker(ticker)[1]
+        finished = _finished_session_bars(market_code, closes, now)
+        if finished:
+            inserted += repo.upsert_close_prices((ticker, day, close) for day, close in finished)
         ok += 1
         time.sleep(_SLEEP_BETWEEN)
     return {"scanned": scanned, "ok": ok, "failed": failed, "rows_inserted": inserted, "end": end.isoformat()}
@@ -55,8 +84,8 @@ def snapshot_fx_rates(run_date: date | None = None) -> dict:
     return {"date": day.isoformat(), "usd_cny": str(rates.usd_cny), "hkd_cny": str(rates.hkd_cny)}
 
 
-def recompute_all_nav(run_date: date | None = None, *, through_previous_trading_day: bool = True) -> dict:
-    """计划任务在 17:00 跑时按需求固定计算「上一交易日」净值；手动刷新则算到当天。"""
+def recompute_all_nav(run_date: date | None = None, *, through_previous_trading_day: bool = False) -> dict:
+    """算到 run_date 当天。已收盘的市场用当日收盘价；还没开盘的市场没有新收盘，沿用上一交易日。"""
     run_date = run_date or date.today()
     end = previous_weekday(run_date) if through_previous_trading_day else run_date
     ids = repo.all_portfolio_ids()

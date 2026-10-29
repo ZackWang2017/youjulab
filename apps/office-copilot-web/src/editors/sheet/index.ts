@@ -15,6 +15,8 @@ import { coerceNumericString, inferOrKeepNumberFormat } from './numeric-format';
 import { parseSheetStructure, serializeSheetStructure, STRUCTURE_JSON_MAX, type StructureCell } from './read-structure';
 import { patchSheetCache, putSheetCache, refreshSheetProfile } from './sheet-cache';
 import { computeSelectionStats, extractNumbers, formatStatsBrief } from './selection-stats';
+import { openSheetEncryptionDialog } from './encryption-dialog';
+import type { Asset } from '../../workspace/session';
 
 const SHEET_LOCALES = mergeLocales(ZhCN, ThreadCommentZhCN, {
   ui: {
@@ -117,6 +119,9 @@ export function mountSheet(container: HTMLElement, changed: () => void, onDirty:
   let univerAPI: ReturnType<typeof createUniver>['univerAPI'] | undefined;
   let workbook: ReturnType<ReturnType<typeof createUniver>['univerAPI']['createWorkbook']> | undefined;
   let assetId = '';
+  let assetName = '';
+  let encrypted = false;
+  let contentReady = false;
   let revision = 0;
   let loading = false;
   let restoring = false;
@@ -172,7 +177,7 @@ export function mountSheet(container: HTMLElement, changed: () => void, onDirty:
   }
 
   async function publishSheetCache(regenerateProfile: boolean) {
-    if (!assetId || !workbook || loading) return;
+    if (!assetId || !workbook || loading || encrypted) return;
     const structure = currentStructure();
     if (!structure?.sheet_id) return;
     const sameSheet = syncedSheetId === structure.sheet_id && syncedValues.length > 0 && !regenerateProfile;
@@ -207,7 +212,7 @@ export function mountSheet(container: HTMLElement, changed: () => void, onDirty:
   }
 
   function scheduleSheetCache() {
-    if (loading || restoring || !assetId) return;
+    if (loading || restoring || !assetId || encrypted) return;
     if (cacheTimer) clearTimeout(cacheTimer);
     cacheTimer = setTimeout(() => {
       void publishSheetCache(false).catch(err => {
@@ -288,7 +293,7 @@ export function mountSheet(container: HTMLElement, changed: () => void, onDirty:
     lastSheetId = id;
     const custom = { ...(workbook.getCustomMetadata() || {}), activeSheetId: id };
     workbook.setCustomMetadata(custom);
-    if (persist && !loading && !restoring && assetId) {
+    if (persist && !loading && !restoring && assetId && !(encrypted && !contentReady)) {
       revision++;
       onDirty(workbook.save());
     }
@@ -409,6 +414,33 @@ export function mountSheet(container: HTMLElement, changed: () => void, onDirty:
       changed();
       scheduleSheetCache();
     });
+    univerAPI.createMenu({
+      id: 'office.sheet.file-encryption',
+      title: '文件加密',
+      tooltip: '用密码加密本表格；未解锁时无法查看，忘记密码无法恢复',
+      action: () => {
+        if (!assetId) return;
+        void openSheetEncryptionDialog({
+          id: assetId,
+          project_id: null,
+          kind: 'sheet',
+          name: assetName || '未命名表格',
+          revision,
+          updated_at: '',
+          encrypted,
+        } as Asset).then(saved => {
+          if (!saved) return;
+          encrypted = Boolean(saved.encrypted);
+          assetName = saved.name || assetName;
+          revision = saved.revision;
+          window.dispatchEvent(new CustomEvent('office-sheet-encrypted', { detail: saved }));
+        }).catch(error => {
+          window.dispatchEvent(new CustomEvent('office-error', {
+            detail: error instanceof Error ? error.message : '文件加密失败。',
+          }));
+        });
+      },
+    }).appendTo('ribbon.data.others');
     univerAPI.createMenu({
       id: 'office.sheet.text-to-number',
       title: '文本转数值',
@@ -566,6 +598,7 @@ export function mountSheet(container: HTMLElement, changed: () => void, onDirty:
 
     univerAPI.onCommandExecuted(command => {
       if (loading || restoring || command.type !== 2 || !assetId || !workbook) return;
+      if (encrypted && !contentReady) return;
       rememberActiveSheet(false);
       revision++;
       onDirty(workbook.save());
@@ -619,12 +652,15 @@ export function mountSheet(container: HTMLElement, changed: () => void, onDirty:
   return {
     async load(asset) {
       // 同一表格已就绪：不 dispose/重建，避免切回工作区时白屏闪烁
+      const snapshotReady = isSnapshot(asset.content);
       if (
         asset.id
         && asset.id === assetId
         && workbook
         && container.dataset.ready === 'true'
         && asset.revision === revision
+        && snapshotReady
+        && contentReady
       ) {
         window.dispatchEvent(new Event('resize'));
         return;
@@ -632,7 +668,11 @@ export function mountSheet(container: HTMLElement, changed: () => void, onDirty:
       loading = true;
       clearStructureCache();
       assetId = asset.id;
+      assetName = asset.name || '';
+      encrypted = Boolean((asset as Asset).encrypted);
       revision = asset.revision;
+      contentReady = snapshotReady;
+      const locked = encrypted && !snapshotReady;
       let expanded = false;
       let snapshot: Record<string, unknown> = isSnapshot(asset.content)
         ? asset.content
@@ -645,7 +685,7 @@ export function mountSheet(container: HTMLElement, changed: () => void, onDirty:
       lastSheetId = isSnapshot(asset.content) ? rememberedSheetId(snapshot) : '';
       boot(snapshot);
       restoreActiveSheet();
-      if (workbook && (!isSnapshot(asset.content) || expanded)) onDirty(workbook.save());
+      if (!locked && workbook && (!isSnapshot(asset.content) || expanded)) onDirty(workbook.save());
       markReady();
     },
     context() {

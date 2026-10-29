@@ -60,6 +60,13 @@ def list_articles(book_id: str, num: int) -> dict:
     return {"error": "", "results": items}
 
 
+def current_status() -> dict:
+    cookie = session_repository.load_cookie()
+    if cookie and session_repository.session_valid(cookie):
+        return {"status": "authenticated", "session_id": "", "qr_data_url": "", "error": ""}
+    return {"status": "unauthenticated", "session_id": "", "qr_data_url": "", "error": "微信读书尚未登录。"}
+
+
 def start_login() -> dict:
     """仅在用户明确请求读取且登录失效时，创建一个扫码会话。"""
     cookie = session_repository.load_cookie()

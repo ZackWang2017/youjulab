@@ -9,7 +9,7 @@ from datetime import datetime
 from html import unescape
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote, unquote
+from urllib.parse import quote, unquote, urlparse
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -133,7 +133,7 @@ def list_official_accounts(cookie: str) -> dict[str, Any]:
 def latest_articles(cookie: str, book_id: str) -> dict[str, Any]:
     headers = {**_HEADERS, "Cookie": cookie}
     listed = _get_json(f"{_BASE}/web/mp/articles", {"bookId": book_id, "offset": 0}, headers)
-    items = [] if listed.get("auth_expired") else _articles_from_reviews(listed.get("payload") or {}, book_id)
+    items = [] if listed.get("auth_expired") else _articles_from_reviews(listed.get("payload") or {}, cookie, book_id)
     if listed.get("auth_expired"):
         _log(f"{book_id} 文章列表返回登录失效，改读封面，暂不清除登录态")
     elif items:
@@ -249,7 +249,7 @@ def _auth_code(payload: dict[str, Any]) -> int:
     return code if code in _AUTH_CODES else 0
 
 
-def _articles_from_reviews(payload: dict[str, Any], book_id: str) -> list[dict[str, str]]:
+def _articles_from_reviews(payload: dict[str, Any], cookie: str, book_id: str) -> list[dict[str, str]]:
     items: list[dict[str, str]] = []
     for group in payload.get("reviews") or []:
         if not isinstance(group, dict):
@@ -264,7 +264,17 @@ def _articles_from_reviews(payload: dict[str, Any], book_id: str) -> list[dict[s
             if not review_id or not title:
                 continue
             original = str(info.get("originalId") or "")
-            link = _mp_url(original) or _link_from_review(review_id, book_id)
+            link = _mp_url(original)
+            if original and not link:
+                # 微信读书偶尔把内部长 ID 放进 originalId；直接拼成 /s/ 会被微信报“参数错误”。
+                html = _get_html(
+                    f"{_BASE}/web/mp/content",
+                    {"reviewId": review_id},
+                    {**_HEADERS, "Cookie": cookie},
+                )
+                link = _mp_url(_meta(html, "og:url"))
+            if not link:
+                link = _link_from_review(review_id, book_id)
             when = review.get("createTime") or info.get("time") or group.get("createTime") or 0
             items.append({
                 "title": title,
@@ -361,8 +371,17 @@ def _article_from_cover(payload: dict[str, Any], book_id: str) -> dict[str, str]
 
 
 def _mp_url(original_id: str) -> str:
-    token = original_id.strip().replace("~", "_")
-    if not token:
+    raw = unquote(original_id or "").strip()
+    if not raw:
+        return ""
+    parsed = urlparse(raw)
+    if parsed.scheme and parsed.hostname:
+        if parsed.scheme != "https" or parsed.hostname.lower() != "mp.weixin.qq.com" or not parsed.path.startswith("/s"):
+            return ""
+        return parsed.geturl()
+    token = raw.replace("~", "_")
+    # 公众号 s-token 通常是短的 URL-safe 标识。过长值是微信读书内部 ID，不可直接外链。
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,48}", token):
         return ""
     return f"https://mp.weixin.qq.com/s/{quote(token, safe='')}"
 

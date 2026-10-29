@@ -47,6 +47,8 @@ export interface Holding {
   current_price: string | null;
   price_source: PriceSource;
   price_trade_date: string | null;
+  /** 实时价的取得时间；收盘价不使用 */
+  price_as_of?: string | null;
   /** 相对上一收盘价的涨跌额（行情源提供） */
   change: string | null;
   /** 涨跌幅，小数 */
@@ -119,6 +121,10 @@ export interface PortfolioStats {
     previous: string | null;
     growth_rate: string | null;
     as_of: string | null;
+    /** close=收盘价；live=实时行情 */
+    as_of_source?: 'close' | 'live';
+    /** 实时行情的取得时刻 */
+    as_of_at?: string | null;
     previous_date: string | null;
     computed_at: string | null;
     /** 年初净值：上一年最后一条净值；今年建仓则为建仓日净值 1 */

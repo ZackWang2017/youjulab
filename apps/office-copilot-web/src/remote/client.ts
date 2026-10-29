@@ -185,8 +185,10 @@ declare global {
         password: string;
         accountId?: string;
       }) => Promise<Record<string, unknown>>;
-      backupStatus?: (email: string) => Promise<{ directory: string; lastBackupAt: string; records: BackupRecord[] }>;
+      backupStatus?: (email: string) => Promise<{ directory: string; enabled: boolean; lastBackupAt: string; records: BackupRecord[] }>;
       setBackupDirectory?: (directory: string) => Promise<Record<string, unknown>>;
+      setBackupScheduleEnabled?: (enabled: boolean) => Promise<Record<string, unknown>>;
+      onBackupProgress?: (listener: (progress: BackupProgress) => void) => () => void;
       createBackup?: () => Promise<BackupRecord>;
       restoreBackup?: (payload: { id: string; email: string; accountId: string }) => Promise<{ ok: boolean; restartRequired: boolean }>;
       quitAfterRestore?: () => Promise<void>;
@@ -200,4 +202,10 @@ export interface BackupRecord {
   createdAt: string;
   kind: string;
   email?: string;
+}
+
+export interface BackupProgress {
+  phase: string;
+  percent: number;
+  message: string;
 }

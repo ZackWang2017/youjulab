@@ -6,9 +6,11 @@ import re
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import market_quote_repository as market
 import portfolio_repository as repo
+from market_session import after_bell, last_closed_session_date, mark_price, session_in_progress
 from nav_service import (
     MIN_RISK_OBSERVATIONS, DatedSeries, NavPoint, PricingContext, compute_nav_series, previous_weekday, risk_metrics, xirr,
 )
@@ -586,6 +588,85 @@ def _year_start_prices(tickers: list[str], year: int) -> dict[str, Decimal]:
     return bases
 
 
+def _quote_as_of(quote: market.LiveQuote) -> datetime:
+    """行情取到的时刻，带上海时区，供现价列只显示时分。"""
+    fetched = quote.fetched_at
+    if fetched.tzinfo is None:
+        fetched = fetched.replace(tzinfo=ZoneInfo("Asia/Shanghai"))
+    return fetched.astimezone(ZoneInfo("Asia/Shanghai"))
+
+
+def _shanghai_today(now: datetime) -> date:
+    return now.astimezone(ZoneInfo("Asia/Shanghai")).date()
+
+
+def _close_as_of(closes: list[tuple[date, Decimal]], day: date) -> Decimal | None:
+    return DatedSeries(closes).at(day) if closes else None
+
+
+def _session_mark(
+    market_code: str,
+    now: datetime,
+    quote: market.LiveQuote | None,
+    closes: list[tuple[date, Decimal]],
+) -> tuple[Decimal | None, str, date | None, Decimal | None, Decimal | None, Decimal | None]:
+    """返回 (现价, 来源, 交易日, 涨跌额, 涨跌幅, 对比用的收盘价)。"""
+    live = quote.price if quote else None
+    prev = quote.prev_close if quote else None
+    price, price_date, is_live = mark_price(market_code, now, live=live, prev_close=prev, closes=closes)
+    if is_live:
+        source = "live"
+    elif price is None:
+        source = "none"
+    elif price_date == _shanghai_today(now):
+        source = "cache_today"
+    else:
+        source = "cache_last"
+    if price is None:
+        return None, source, price_date, None, None, None
+    today = _shanghai_today(now)
+    closed_today = after_bell(market_code, now) and last_closed_session_date(market_code, now) == today
+    if session_in_progress(market_code, now) or closed_today:
+        base = prev if prev is not None else _close_as_of(closes, previous_weekday(today))
+    else:
+        # 今天的交易还没开始：现价已经是最近收盘，对比价用同一个收盘，今天的涨跌为 0。
+        base = price
+    change = change_pct = None
+    if base is not None and base > 0:
+        change = price - base
+        change_pct = change / base
+    return price, source, price_date, change, change_pct, base
+
+
+def _read_price_overrides(
+    tickers: list[str],
+    close_points: dict[str, list[tuple[date, Decimal]]],
+    end: date,
+    now: datetime,
+) -> dict[date, dict[str, Decimal]]:
+    """读取净值时，把当天和上一估值日的价格换成与持仓涨跌相同的取价。不写回数据库。"""
+    if not tickers or end < _shanghai_today(now):
+        return {}
+    quotes = market.fetch_live_quotes(tickers)
+    baseline = previous_weekday(end)
+    overrides: dict[date, dict[str, Decimal]] = {}
+    for ticker in tickers:
+        _code, market_code = market.split_ticker(ticker)
+        points = close_points.get(ticker) or []
+        price, _source, _price_date, _change, _change_pct, base = _session_mark(
+            market_code, now, quotes.get(ticker), points,
+        )
+        if price is None:
+            continue
+        current = _close_as_of(points, end)
+        if price != current:
+            overrides.setdefault(end, {})[ticker] = price
+        stored_base = _close_as_of(points, baseline)
+        if base is not None and base != stored_base:
+            overrides.setdefault(baseline, {})[ticker] = base
+    return overrides
+
+
 def holdings_overview(owner_id: str, portfolio_id: int, *, refresh_live: bool = True) -> dict:
     portfolio = _portfolio(owner_id, portfolio_id)
     rows = repo.list_holdings(portfolio_id, status="open")
@@ -602,17 +683,23 @@ def all_holdings_overview(owner_id: str, *, refresh_live: bool = True) -> dict:
 def _render_overview(portfolio: dict, rows: list[dict], *, refresh_live: bool) -> dict:
     fx = market.get_fx_rates()
     fx_out = {"usd_cny": fx.usd_cny, "hkd_cny": fx.hkd_cny, "fetched_at": fx.fetched_at}
-    today = date.today()
+    now = datetime.now(ZoneInfo("Asia/Shanghai"))
+    today = _shanghai_today(now)
 
     live: dict[str, market.LiveQuote] = {}
+    security_tickers = [r["ticker_code"] for r in rows if r["market_code"] != market.CASH_MARKET]
     if refresh_live:
-        live = market.fetch_live_quotes([r["ticker_code"] for r in rows if r["market_code"] != market.CASH_MARKET])
-    security_types = _security_types([r["ticker_code"] for r in rows if r["market_code"] != market.CASH_MARKET])
-    # 港股、美股行情不提供年初至今涨跌幅，用上年末收盘价计算
+        live = market.fetch_live_quotes(security_tickers)
+    recent_closes = repo.close_prices_between(security_tickers, today - timedelta(days=14), today) if security_tickers else {}
+    security_types = _security_types(security_tickers)
+    # 交易时段优先用行情源的年初至今；已收盘或未开盘时现价可能不是行情现价，改用上年末收盘价重算
     need_year_base = [
         r["ticker_code"] for r in rows
         if r["market_code"] != market.CASH_MARKET
-        and not (live.get(r["ticker_code"]) and live[r["ticker_code"]].year_change_pct is not None)
+        and (
+            not session_in_progress(r["market_code"], now)
+            or not (live.get(r["ticker_code"]) and live[r["ticker_code"]].year_change_pct is not None)
+        )
     ]
     year_bases = _year_start_prices(need_year_base, today.year)
 
@@ -633,28 +720,20 @@ def _render_overview(portfolio: dict, rows: list[dict], *, refresh_live: bool) -
         source = "none"
         trade_date: date | None = None
         quote = live.get(h["ticker_code"])
+        change = change_pct = year_change_pct = None
         if is_cash:
             price, source, trade_date = ONE, "cash", today
-        elif quote:
-            price, source, trade_date = quote.price, "live", today
         else:
-            cached = repo.latest_close(h["ticker_code"])
-            if cached:
-                trade_date, price = cached
-                source = "cache_today" if trade_date == today else "cache_last"
-            else:
-                price = None
-        change = change_pct = year_change_pct = None
+            price, source, trade_date, change, change_pct, _base = _session_mark(
+                h["market_code"], now, quote, recent_closes.get(h["ticker_code"]) or [],
+            )
         if not is_cash and price is not None:
-            if quote and quote.change_pct is not None:
-                change, change_pct = quote.change, quote.change_pct
-            elif quote and quote.prev_close and quote.prev_close > 0:
-                change = price - quote.prev_close
-                change_pct = change / quote.prev_close
-            if quote and quote.year_change_pct is not None:
+            if session_in_progress(h["market_code"], now) and quote and quote.year_change_pct is not None:
                 year_change_pct = quote.year_change_pct
             elif year_bases.get(h["ticker_code"]):
                 year_change_pct = price / year_bases[h["ticker_code"]] - ONE
+            elif quote and quote.year_change_pct is not None and price == quote.price:
+                year_change_pct = quote.year_change_pct
         rate = fx.rate_to_cny(currency)
         market_value = shares * price if price is not None else None
         cost = shares * avg_cost
@@ -688,6 +767,7 @@ def _render_overview(portfolio: dict, rows: list[dict], *, refresh_live: bool) -
                 "current_price": _q(price),
                 "price_source": source,
                 "price_trade_date": trade_date,
+                "price_as_of": _quote_as_of(quote) if source == "live" and quote is not None else None,
                 "change": _q(change),
                 "change_pct": _q(change_pct, Q6),
                 "year_change_pct": _q(year_change_pct, Q6),
@@ -753,14 +833,19 @@ def recompute_nav(portfolio_id: int, *, end: date | None = None) -> int:
     return repo.replace_nav_series(portfolio_id, [p.as_row() for p in points])
 
 
-def _nav_points(transactions: list[dict], *, end: date | None = None) -> list[NavPoint]:
-    """对任意一组流水（可跨组合）按净值法计算每日净值，不落库。"""
+def _nav_points(transactions: list[dict], *, end: date | None = None, live_overlay: bool = False) -> list[NavPoint]:
+    """对任意一组流水（可跨组合）按净值法计算每日净值，不落库。
+
+    live_overlay 为真时，当天按交易时段取实时价、其余时间取已收盘价，并与持仓涨跌用同一个对比价。
+    落库的重算不打开它，避免把盘中价写成当天净值。
+    """
     if not transactions:
         return []
     end = end or date.today()
     first = min(t["occurred_at"] for t in transactions).date() - timedelta(days=7)
     tickers = sorted({t["ticker_code"] for t in transactions if not is_cash_ticker(t["ticker_code"])})
-    closes = {t: DatedSeries(points) for t, points in repo.close_prices_between(tickers, first, end).items()}
+    close_points = repo.close_prices_between(tickers, first, end)
+    closes = {t: DatedSeries(points) for t, points in close_points.items()}
     fx_rows = repo.fx_rates_between(first, end)
     live_fx = market.get_fx_rates()
     pricing = PricingContext(
@@ -768,18 +853,29 @@ def _nav_points(transactions: list[dict], *, end: date | None = None) -> list[Na
         fx={currency: DatedSeries(points) for currency, points in fx_rows.items()},
         fallback_fx=live_fx.as_dict(),
     )
-    return compute_nav_series(transactions, pricing, end=end, is_cash=is_cash_ticker)
+    overrides = None
+    if live_overlay:
+        overrides = _read_price_overrides(tickers, close_points, end, datetime.now(ZoneInfo("Asia/Shanghai")))
+    return compute_nav_series(
+        transactions, pricing, end=end, is_cash=is_cash_ticker, price_overrides=overrides,
+    )
 
 
 def stats(owner_id: str, portfolio_id: int, *, refresh: bool = False) -> dict:
     portfolio = _portfolio(owner_id, portfolio_id)
     if refresh:
         recompute_nav(portfolio_id)
-    series = repo.nav_series(portfolio_id)
+    transactions = repo.transactions_in_order(portfolio_id)
+    computed = datetime.now(timezone.utc)
+    series = []
+    for point in _nav_points(transactions, live_overlay=True):
+        row = point.as_row()
+        row["computed_at"] = computed
+        series.append(row)
     overview = holdings_overview(owner_id, portfolio_id, refresh_live=True)
     return _stats_payload(
         portfolio, series, Decimal(overview["summary"]["total_market_value_cny"]),
-        dividends=_dividends(repo.transactions_in_order(portfolio_id), overview),
+        dividends=_dividends(transactions, overview), overview=overview,
     )
 
 
@@ -789,14 +885,14 @@ def all_stats(owner_id: str) -> dict:
     transactions: list[dict] = []
     for portfolio in portfolios:
         transactions.extend(repo.transactions_in_order(int(portfolio["id"])))
-    series = [p.as_row() for p in _nav_points(transactions)]
+    series = [p.as_row() for p in _nav_points(transactions, live_overlay=True)]
     now = datetime.now(timezone.utc)
     for row in series:
         row["computed_at"] = now
     overview = all_holdings_overview(owner_id, refresh_live=True)
     return _stats_payload(
         _aggregate_payload(portfolios), series, Decimal(overview["summary"]["total_market_value_cny"]),
-        dividends=_dividends(transactions, overview),
+        dividends=_dividends(transactions, overview), overview=overview,
     )
 
 
@@ -870,7 +966,36 @@ def _dividends(transactions: list[dict], overview: dict) -> dict:
     return summary
 
 
-def _stats_payload(portfolio: dict, series: list[dict], total_value_live: Decimal, *, dividends: dict | None = None) -> dict:
+def _nav_quote_stamp(overview: dict | None) -> tuple[str, datetime | None]:
+    """组合净值用了任一持仓的实时价则取最新行情时刻，否则视为收盘价。"""
+    stamps: list[datetime] = []
+    for holding in (overview or {}).get("holdings") or []:
+        if not isinstance(holding, dict) or holding.get("price_source") != "live":
+            continue
+        stamp = holding.get("price_as_of")
+        if isinstance(stamp, datetime):
+            stamps.append(stamp)
+        elif isinstance(stamp, str) and stamp:
+            try:
+                stamps.append(datetime.fromisoformat(stamp))
+            except ValueError:
+                continue
+    if not stamps:
+        return "close", None
+    latest = max(stamps)
+    if latest.tzinfo is None:
+        latest = latest.replace(tzinfo=ZoneInfo("Asia/Shanghai"))
+    return "live", latest.astimezone(ZoneInfo("Asia/Shanghai"))
+
+
+def _stats_payload(
+    portfolio: dict,
+    series: list[dict],
+    total_value_live: Decimal,
+    *,
+    dividends: dict | None = None,
+    overview: dict | None = None,
+) -> dict:
     latest = series[-1] if series else None
     previous = series[-2] if len(series) >= 2 else None
     nav_now = Decimal(latest["nav"]) if latest else None
@@ -888,6 +1013,7 @@ def _stats_payload(portfolio: dict, series: list[dict], total_value_live: Decima
             flows.append((row["nav_date"], -flow))
     live_xirr = xirr(flows + [(date.today(), total_value_live)]) if flows else None
     ytd = _year_to_date(series, nav_now, total_value_live)
+    as_of_source, as_of_at = _nav_quote_stamp(overview)
 
     # 波动率 / 夏普：日收益率来自每日净值；无风险利率取 10 年期国债收益率
     risk_free = market.get_risk_free_rate()
@@ -903,6 +1029,8 @@ def _stats_payload(portfolio: dict, series: list[dict], total_value_live: Decima
             "previous": _q(nav_prev, Q4),
             "growth_rate": _q(growth, Q6),
             "as_of": latest["nav_date"] if latest else None,
+            "as_of_source": as_of_source,
+            "as_of_at": as_of_at,
             "previous_date": previous["nav_date"] if previous else None,
             "computed_at": latest["computed_at"] if latest else None,
             "year_start": _q(ytd["start_nav"], Q4),

@@ -117,6 +117,8 @@ class AccessTokenTests(unittest.TestCase):
         self.assertTrue(is_user_office_path("/api/documents/read"))
         self.assertTrue(is_user_office_path("/mcp/mindmaps"))
         self.assertTrue(is_user_office_path("/api/mindmaps/add-node"))
+        self.assertTrue(is_user_office_path("/mcp/project-plans"))
+        self.assertTrue(is_user_office_path("/api/project-plans/add-task"))
         self.assertFalse(is_sheet_path("/mcp/documents"))
         self.assertFalse(is_sheet_path("/mcp"))
         token = "ab" * 16
@@ -239,6 +241,18 @@ class SheetWriteTests(unittest.TestCase):
         self.assertEqual(style["ht"], 2)
         removed = office_sheets.unmerge_cells("年度预算", "销售表", "Q1", "A1", "B1")
         self.assertEqual(removed["removed"], 1)
+
+    def test_encrypted_sheet_is_rejected(self):
+        created = office_sheets.create_spreadsheet("年度预算", "机密表", "Q1")
+        self.assertTrue(created["ok"])
+        secret = next(item for item in self.api.docs.values() if item["name"] == "机密表")
+        secret["locked"] = True
+        secret["encrypted"] = True
+        secret["content"] = {"format": "youju-sheet-encrypted-v1"}
+        with self.assertRaises(SpreadsheetServiceError) as ctx:
+            office_sheets.read_spreadsheet("年度预算", "机密表", "Q1")
+        self.assertEqual(ctx.exception.status, 403)
+        self.assertIn("已加密", str(ctx.exception))
 
     def test_sheet_write_requires_login_email(self):
         self.api.me = lambda: {"id": "u1"}

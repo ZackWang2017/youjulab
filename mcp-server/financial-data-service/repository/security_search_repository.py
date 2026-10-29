@@ -29,8 +29,8 @@ def search_securities(text: str, *, limit: int) -> list[dict]:
     like = f"%{_escape_like(text)}%"
     prefix = f"{_escape_like(text)}%"
     type_marks = ", ".join("%s" for _ in _SEARCHABLE_TYPES)
-    code_checks = " OR ".join("ticker_code LIKE %s" for _ in codes) or "0"
-    exact_order = " OR ".join("ticker_code LIKE %s" for _ in codes) or "0"
+    code_checks = " OR ".join("ticker_code LIKE %s" for _ in codes) or "FALSE"
+    exact_order = " OR ".join("ticker_code LIKE %s" for _ in codes) or "FALSE"
     sql = f"""
         SELECT ticker_code, name, security_type
         FROM securities

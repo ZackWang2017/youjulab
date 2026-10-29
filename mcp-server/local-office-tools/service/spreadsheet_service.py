@@ -285,6 +285,8 @@ def _ensure_table(api, project_id: str, name: str, create: bool) -> tuple[dict, 
     asset = api.get_asset(found["id"])
     if asset.get("kind") != "sheet":
         raise ValueError(f"「{name}」不是表格，不能用本接口访问。")
+    if asset.get("locked") or (asset.get("encrypted") and not isinstance((asset.get("content") or {}).get("sheets"), dict)):
+        raise SpreadsheetServiceError(403, "表格已加密，请先在编辑器中解锁。")
     return asset, created
 
 
