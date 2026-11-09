@@ -30,9 +30,10 @@ export interface PortfolioRef {
   portfolio_names?: string[];
 }
 
-export type PriceSource = 'live' | 'cache_today' | 'cache_last' | 'cash' | 'none';
+export type PriceSource = 'live' | 'cache_today' | 'cache_last' | 'cash' | 'none' | 'manual';
 
 export interface Holding {
+  asset_type?: 'fixed_income' | 'fund' | null;
   id: number;
   ticker_code: string;
   stock_code: string;
@@ -111,6 +112,8 @@ export interface NavPoint {
   daily_return: string | null;
   total_value_cny: string;
   net_flow_cny: string;
+  /** 截至当日的净投入（累计投入 − 累计取出），旧服务端可能没有 */
+  net_invested_cny?: string;
   xirr: string | null;
 }
 
@@ -176,7 +179,7 @@ export interface ScheduledTask {
   running: boolean;
 }
 
-export type HoldingAction = 'add' | 'reduce' | 'close' | 'deposit' | 'withdraw' | 'dividend';
+export type HoldingAction = 'add' | 'reduce' | 'close' | 'deposit' | 'withdraw' | 'dividend' | 'valuation';
 
 /** 分红统计：按来源标的分组，yield_rate = 今年分红 / 当前持仓成本。 */
 export interface DividendItem {
@@ -197,6 +200,9 @@ export interface DividendSummary {
 }
 
 export interface BuyBody {
+  asset_type?: 'fixed_income' | 'fund';
+  currency?: string;
+  amount?: string;
   ticker_code: string;
   name?: string;
   price?: string;
@@ -208,6 +214,7 @@ export interface BuyBody {
 }
 
 export interface TransactionBody {
+  amount?: string;
   action: HoldingAction;
   price?: string;
   shares: string;

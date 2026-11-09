@@ -282,7 +282,7 @@ function buildDayContentEl(markdown: string): HTMLElement {
 export function mountCalendar(
   container: HTMLElement,
   changed: () => void,
-  onDirty: (content: unknown) => void,
+  onDirty: (assetId: string, content: unknown) => void,
 ): EditorAdapter {
   let revision = 0;
   let assetId = '';
@@ -298,7 +298,7 @@ export function mountCalendar(
   const emitDirty = () => {
     if (loading || !assetId) return;
     revision += 1;
-    onDirty(snapshotContent());
+    onDirty(assetId, snapshotContent());
     changed();
   };
 
@@ -493,14 +493,9 @@ export function mountCalendar(
     headerToolbar: {
       left: 'prev,next today',
       center: 'title',
-      right: 'todos,monthlyManage dayGridMonth,dayGridWeek,dayGridDay,listWeek',
+      right: 'monthlyManage dayGridMonth,dayGridWeek,dayGridDay,listWeek',
     },
     customButtons: {
-      todos: {
-        text: '待办事项',
-        hint: 'Markdown 待办，勾选完成',
-        click: () => openTodos(),
-      },
       monthlyManage: {
         text: '月度事件',
         hint: '按月添加、编辑、删除月度事件',
@@ -608,6 +603,7 @@ export function mountCalendar(
   }
 
   return {
+    openTodos,
     async load(asset) {
       // 待办窗口独立挂在 body；先持久化并关闭旧窗口，避免其状态串到新日历资产。
       closeTodoList();

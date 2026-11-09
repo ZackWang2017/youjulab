@@ -1,0 +1,5 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>有据 · 在线管理</title><link rel="stylesheet" href="/static/style.css"><script src="/static/admin.js" defer></script></head>
+<body><header class="top"><img src="/static/logo.png" alt="有据" width="30" height="30"><a href="/admin" class="brand">有据 <span>在线管理</span></a>{% if request.session.get('admin') %}<nav class="admin-nav"><a href="/admin">版本发布</a><a href="/admin/backups">客户端备份</a></nav><form action="/admin/logout" method="post"><input type="hidden" name="csrf" value="{{ csrf }}"><button>退出管理</button></form>{% endif %}</header>
+<main>{% if error %}<div class="error" role="alert">{{ error }}</div>{% endif %}{% block content %}{% endblock %}</main></body></html>

@@ -5,6 +5,8 @@ import {
 } from 'pdfjs-dist/legacy/build/pdf.mjs';
 import { EventBus, PDFLinkService, PDFViewer, ScrollMode } from 'pdfjs-dist/legacy/web/pdf_viewer.mjs';
 import { Editor, Mark } from '@tiptap/core';
+import { TextSelection } from '@tiptap/pm/state';
+import { notebookPositionPatch, restoreNotebookPosition } from './notebook-position';
 import Link from '@tiptap/extension-link';
 import StarterKit from '@tiptap/starter-kit';
 import { createIcons, icons } from 'lucide';
@@ -20,15 +22,22 @@ import { openOutlineDialog } from './outline-dialog';
 import { matchTemplateOutline, outlineToTiptap, type PdfOutlineItem } from './outline';
 import { bindPdfShots } from './shots';
 import { openPdfSummaryDialog } from './summary-dialog';
+import { openPdfSelectionTranslationDialog, openPdfTranslationDialog } from './translation-dialog';
 import { circleBullet, collapsibleListItem, pdfIndentedParagraph, pdfNotebookTab } from '../rich-text-lists';
-import type { PdfFileOptions, PdfFileProgress } from '../../office-client/client';
+import { pdfFileRequest, type PdfFileOptions, type PdfFileProgress } from '../../office-client/client';
+import { assetIndexExtensions } from '../../asset-index';
 import { openTemplateDialog, type OutlineTemplateRecord } from './template-dialog';
+import {
+  annotationPdfBoxes, highlightInsertContent, pointInPdfBoxes, quadsToBoxes, textCoveredByHighlight, textItemsInBoxes, type PixelBox,
+} from './highlight-note';
 
 GlobalWorkerOptions.workerSrc = worker;
 
 const MIN_ZOOM = 0.25;
 const MAX_ZOOM = 5;
-const MAX_PDF = 30 * 1024 * 1024;
+const MAX_PDF = 200 * 1024 * 1024;
+/** 超过这个大小就按页拉取，不再把整份文件放进内存。 */
+const RANGE_OPEN_BYTES = 30 * 1024 * 1024;
 /** 与 office-backend PdfAnnotBody / pdf_annot 对齐；前端先按行合并再截断。 */
 const MAX_ANNOT_BOXES = 200;
 const EMPTY_NOTEBOOK = { type: 'doc', content: [{ type: 'paragraph' }] };
@@ -104,7 +113,8 @@ function mergeSelectionBoxes(boxes: number[][], yTol = 3, xGap = 6): number[][] 
 }
 
 type AnnotKind = 'highlight' | 'text';
-type LiveAnnot = { xref: number; markXref?: number; kind: AnnotKind; page: number; boxes: number[][]; content: string; aiAsk?: boolean };
+type LiveAnnot = { xref: number; markXref?: number; kind: AnnotKind; page: number; boxes: number[][]; content: string; quote?: string; aiAsk?: boolean };
+type FileHighlight = { page: number; xref: number; boxes: number[][]; title: string };
 type PaneId = 'main' | 'copy';
 type Viewport = {
   width: number;
@@ -133,12 +143,26 @@ type PdfAssetViewState = {
   splitRatio?: number;
   notebookOpen?: boolean;
   notebookWidth?: number;
+  translationWidth?: number;
   notebookScrollTop?: number;
   generatedOutline?: PdfOutlineItem[];
   readingHistory?: Array<{ page: number; scrollTop: number }>;
   readingHistoryIndex?: number;
   copyReadingHistory?: Array<{ page: number; scrollTop: number }>;
   copyReadingHistoryIndex?: number;
+};
+
+type PdfTranslationPage = {
+  source: string;
+  translation: string;
+  content?: unknown;
+  translatedAt: string;
+  modelName?: string;
+};
+
+type PdfTranslation = {
+  format: 'pdf-translation-v1';
+  pages: Record<string, PdfTranslationPage>;
 };
 
 function xrefOf(id: string) {
@@ -177,6 +201,19 @@ function cloneBuffer(data: ArrayBuffer) {
   return data.slice(0);
 }
 
+type PdfIndexStatus = {
+  status: string;
+  phase?: string;
+  page_count?: number;
+  chunk_count?: number;
+  progress_done?: number;
+  progress_total?: number;
+  batch_size?: number;
+  error?: string;
+  empty?: boolean;
+  asset_status?: string;
+};
+
 function formatBytes(value: number) {
   if (value < 1024) return `${value} B`;
   if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
@@ -204,6 +241,7 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
   onUpdateAnnot: (xref: number, content: string) => Promise<{ revision?: number } | void>;
   onDeleteAnnot: (xref: number) => Promise<{ deleted?: number[]; revision?: number } | void>;
   saveNotebook: (content: unknown, revision: number) => Promise<number>;
+  saveTranslation: (content: PdfTranslation, revision: number) => Promise<number>;
   userName: () => string;
   modelName: () => string;
   askAi: (body: {
@@ -216,16 +254,21 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
   }, onEvent: (event: Record<string, any>) => void) => Promise<void>;
   generateOutline: (onEvent: (event: Record<string, any>) => void) => Promise<void>;
   generateSummary: (body: { selection: string; page: number }, onEvent: (event: Record<string, any>) => void) => Promise<void>;
+  translatePage: (page: number, onEvent: (event: Record<string, any>) => void) => Promise<void>;
+  translateSelection: (body: { selection: string; page: number }, onEvent: (event: Record<string, any>) => void) => Promise<void>;
   listOutlineTemplates: () => Promise<{ id: string; name: string }[]>;
   loadOutlineTemplate: (id: string) => Promise<OutlineTemplateRecord>;
   saveOutlineTemplate: (name: string, doc: unknown) => Promise<OutlineTemplateRecord>;
   updateOutlineTemplate: (id: string, name: string, doc: unknown, revision: number) => Promise<OutlineTemplateRecord>;
+  indexStatus: (id: string) => Promise<PdfIndexStatus>;
 }): EditorAdapter {
   let pdf: PDFDocumentProxy | undefined;
   let copyPdf: PDFDocumentProxy | undefined;
   let loadingTask: PDFDocumentLoadingTask | undefined;
   let copyLoadingTask: PDFDocumentLoadingTask | undefined;
   let fileBytes: ArrayBuffer | null = null;
+  /** 大文件不保留字节，对照视图用同一地址按页拉取。 */
+  let rangeSource: { url: string; headers: Record<string, string>; length: number } | null = null;
   let filename = '';
   let documentId = '';
   let loadToken = 0;
@@ -253,9 +296,25 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
   let notebookSaveTimer: ReturnType<typeof setTimeout> | undefined;
   let selected: Context | null = null;
   let selectionVersion = 0;
+  let selectionTranslationEnabled = false;
+  let selectionTranslationBusy = false;
+  let selectionTranslationTarget: { page: number; text: string } | null = null;
   let busy = false;
+  /** 当前这次打开要等首页画出来才收起进度条。 */
+  let readingDoc: PDFDocumentProxy | null = null;
+  let readingClosed = false;
+  let indexWatch = 0;
   let outlineBusy = false;
   let summaryBusy = false;
+  let translationBusy = false;
+  let translationOpen = false;
+  let translation: PdfTranslation = { format: 'pdf-translation-v1', pages: {} };
+  let translationEditor: Editor | null = null;
+  let translationEditorPage = 0;
+  let translationEditorLoading = false;
+  let translationPending: PdfTranslation | null = null;
+  let translationSaving: Promise<void> = Promise.resolve();
+  let translationSaveTimer: ReturnType<typeof setTimeout> | undefined;
   let generatedOutline: PdfOutlineItem[] = [];
   type ReadingHistory = { entries: Array<{ page: number; scrollTop: number }>; index: number };
   const readingHistories: Record<PaneId, ReadingHistory> = {
@@ -274,6 +333,7 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
   let pendingSplit: boolean | null = null;
   let activeId: PaneId = 'main';
   let liveAnnots: LiveAnnot[] = [];
+  let fileHighlights: FileHighlight[] = [];
 
   const stage = container.querySelector<HTMLElement>('.pdf-stage')!;
   const mainRoot = container.querySelector<HTMLElement>('.pdf-pane[data-pane="main"]')!;
@@ -298,10 +358,15 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
   const downloadMeta = downloadOverlay.querySelector<HTMLElement>('[data-pdf-download-meta]')!;
   const downloadBar = downloadOverlay.querySelector<HTMLElement>('[data-pdf-download-bar]')!;
   const counter = container.querySelector<HTMLElement>('[data-page]')!;
+  const indexLine = document.createElement('span');
+  indexLine.className = 'pdf-index-status';
+  indexLine.hidden = true;
+  indexLine.setAttribute('role', 'status');
+  indexLine.setAttribute('aria-live', 'polite');
+  mainRoot.append(indexLine);
   const notebookToggle = container.querySelector<HTMLButtonElement>('[data-pdf-notebook]')!;
   const outlineToggle = container.querySelector<HTMLButtonElement>('[data-pdf-outline]')!;
   const templateButton = container.querySelector<HTMLButtonElement>('[data-pdf-template]')!;
-  container.querySelector<HTMLButtonElement>('[data-pdf-note-command="quote"]')?.remove();
   const summaryToggle = document.createElement('button');
   summaryToggle.type = 'button';
   summaryToggle.className = 'pdf-summary-toggle';
@@ -321,6 +386,17 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
   notebookSplit.hidden = true;
   notebookPanel.insertAdjacentElement('afterend', notebookSplit);
   const input = container.querySelector<HTMLInputElement>('input[type="file"]')!;
+  // 带 hidden 或放在 [hidden] 的 #pdf 里时，浏览器会直接忽略 click()，文件框不会出现。
+  input.id = 'pdf-file-input';
+  input.hidden = false;
+  input.style.position = 'fixed';
+  input.style.left = '0';
+  input.style.top = '0';
+  input.style.width = '1px';
+  input.style.height = '1px';
+  input.style.opacity = '0.01';
+  input.style.pointerEvents = 'none';
+  document.body.append(input);
   const pageInput = container.querySelector<HTMLInputElement>('[data-page-input]')!;
   const total = container.querySelector<HTMLElement>('[data-page-total]')!;
   const prev = container.querySelector<HTMLButtonElement>('[data-prev]')!;
@@ -331,6 +407,54 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
   const fitWidth = container.querySelector<HTMLButtonElement>('[data-fit-width]')!;
   const splitBtn = container.querySelector<HTMLButtonElement>('[data-split-view]')!;
   const askAiBtn = container.querySelector<HTMLButtonElement>('[data-ask-ai]')!;
+  // 术语维护已下线；工具栏仅保留会作用于当前 PDF 的能力。
+  container.querySelector<HTMLElement>('[data-pdf-terms]')?.remove();
+  const shotButton = container.querySelector<HTMLButtonElement>('[data-pdf-shot]')!;
+  shotButton.innerHTML = '<i data-lucide="scan-line"></i><span>截图</span>';
+  const translationToggle = document.createElement('button');
+  translationToggle.type = 'button';
+  translationToggle.className = 'pdf-translation-toggle';
+  translationToggle.dataset.pdfTranslation = '';
+  translationToggle.title = '打开英中对照翻译';
+  translationToggle.setAttribute('aria-label', '英中对照翻译');
+  translationToggle.setAttribute('aria-pressed', 'false');
+  translationToggle.innerHTML = '<i data-lucide="languages"></i><span>翻译</span>';
+  askAiBtn.insertAdjacentElement('afterend', translationToggle);
+  const selectionTranslationToggle = document.createElement('button');
+  selectionTranslationToggle.type = 'button';
+  selectionTranslationToggle.className = 'pdf-selection-translation-toggle';
+  selectionTranslationToggle.title = '开启后，选中 PDF 文字可点击“译”进行翻译';
+  selectionTranslationToggle.setAttribute('aria-label', '划词翻译');
+  selectionTranslationToggle.setAttribute('role', 'switch');
+  selectionTranslationToggle.setAttribute('aria-checked', 'false');
+  selectionTranslationToggle.innerHTML = '<i data-lucide="text-select"></i><span>划词</span><i class="pdf-toggle-knob" aria-hidden="true"></i>';
+  translationToggle.insertAdjacentElement('afterend', selectionTranslationToggle);
+  const selectionTranslationAction = document.createElement('button');
+  selectionTranslationAction.type = 'button';
+  selectionTranslationAction.className = 'pdf-selection-translate-action';
+  selectionTranslationAction.title = '翻译选中文本';
+  selectionTranslationAction.setAttribute('aria-label', '翻译选中文本');
+  selectionTranslationAction.textContent = '译';
+  selectionTranslationAction.hidden = true;
+  document.body.append(selectionTranslationAction);
+  const translationPanel = document.createElement('aside');
+  translationPanel.className = 'pdf-translation-panel';
+  translationPanel.hidden = true;
+  translationPanel.innerHTML = '<div class="pdf-translation-workspace-toolbar" role="toolbar" aria-label="译文工具"><button type="button" class="pdf-translate-page" data-translate-page title="翻译当前页"><i data-lucide="languages"></i><span>翻译此页</span></button><i class="pdf-translation-toolbar-divider" aria-hidden="true"></i><button type="button" data-translation-command="bold" title="加粗" aria-label="加粗"><i data-lucide="bold"></i></button><button type="button" data-translation-command="italic" title="斜体" aria-label="斜体"><i data-lucide="italic"></i></button><button type="button" data-translation-command="heading" title="标题" aria-label="标题"><i data-lucide="heading-3"></i></button><button type="button" data-translation-command="bulletList" title="无序列表" aria-label="无序列表"><i data-lucide="list"></i></button><button type="button" data-translation-command="orderedList" title="编号列表" aria-label="编号列表"><i data-lucide="list-ordered"></i></button></div><div class="pdf-translation-head"><strong data-translation-page>译文</strong><span data-translation-meta></span></div><p class="pdf-translation-empty" data-translation-empty>此页尚未翻译。点击工具栏“翻译此页”生成专业中文译文。</p><div class="pdf-translation-content" data-translation-content></div>';
+  stage.append(translationPanel);
+  const translationSplit = document.createElement('div');
+  translationSplit.className = 'pdf-translation-split';
+  translationSplit.setAttribute('role', 'separator');
+  translationSplit.setAttribute('aria-orientation', 'vertical');
+  translationSplit.setAttribute('aria-label', '调整译文区域宽度');
+  translationSplit.tabIndex = 0;
+  translationSplit.hidden = true;
+  stage.insertBefore(translationSplit, translationPanel);
+  const translatePageButton = translationPanel.querySelector<HTMLButtonElement>('[data-translate-page]')!;
+  const translationPageLabel = translationPanel.querySelector<HTMLElement>('[data-translation-page]')!;
+  const translationMeta = translationPanel.querySelector<HTMLElement>('[data-translation-meta]')!;
+  const translationContent = translationPanel.querySelector<HTMLElement>('[data-translation-content]')!;
+  const translationEmpty = translationPanel.querySelector<HTMLElement>('[data-translation-empty]')!;
   const createReadingHistoryToolbar = (pane: PaneId, root: HTMLElement) => {
     const toolbar = document.createElement('div');
     toolbar.className = 'pdf-reading-history';
@@ -351,7 +475,9 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
   const error = (detail: string) => window.dispatchEvent(new CustomEvent('office-error', { detail }));
   const MIN_PANE = 120;
   const MIN_NOTEBOOK_WIDTH = 240;
+  const MIN_TRANSLATION_WIDTH = 320;
   let notebookWidth = 360;
+  let translationWidth = 460;
   let splitRatio = 0.5;
   let notebookScrollTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -472,6 +598,51 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
     }
   });
 
+  function clampTranslationWidth(width: number) {
+    const max = Math.max(MIN_TRANSLATION_WIDTH, Math.min(860, (stage.clientWidth || 1000) * 0.7));
+    return Math.min(max, Math.max(MIN_TRANSLATION_WIDTH, width));
+  }
+  function applyTranslationWidth(width: number, save = false) {
+    translationWidth = clampTranslationWidth(width);
+    stage.style.setProperty('--pdf-translation-width', `${Math.round(translationWidth)}px`);
+    translationSplit.setAttribute('aria-valuemin', String(MIN_TRANSLATION_WIDTH));
+    translationSplit.setAttribute('aria-valuemax', String(Math.round(Math.max(MIN_TRANSLATION_WIDTH, Math.min(860, (stage.clientWidth || 1000) * 0.7)))));
+    translationSplit.setAttribute('aria-valuenow', String(Math.round(translationWidth)));
+    if (save) persistPdfViewState({ translationWidth });
+  }
+  applyTranslationWidth(translationWidth);
+  let draggingTranslation = false;
+  translationSplit.addEventListener('pointerdown', event => {
+    if (translationPanel.hidden || event.button !== 0) return;
+    event.preventDefault();
+    draggingTranslation = true;
+    container.classList.add('resizing-translation');
+    try { translationSplit.setPointerCapture(event.pointerId); } catch { /* ignore */ }
+  });
+  const onTranslationMove = (event: PointerEvent) => {
+    if (!draggingTranslation || translationPanel.hidden) return;
+    const rect = stage.getBoundingClientRect();
+    if (!(rect.width > 0)) return;
+    applyTranslationWidth(rect.right - event.clientX, true);
+  };
+  translationSplit.addEventListener('pointermove', onTranslationMove);
+  window.addEventListener('pointermove', onTranslationMove);
+  const stopTranslationDrag = () => {
+    if (!draggingTranslation) return;
+    draggingTranslation = false;
+    container.classList.remove('resizing-translation');
+    refreshSplitPanes();
+  };
+  translationSplit.addEventListener('pointerup', stopTranslationDrag);
+  translationSplit.addEventListener('pointercancel', stopTranslationDrag);
+  window.addEventListener('pointerup', stopTranslationDrag);
+  translationSplit.addEventListener('keydown', event => {
+    if (translationPanel.hidden || (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight')) return;
+    event.preventDefault();
+    applyTranslationWidth(translationWidth + (event.key === 'ArrowLeft' ? 1 : -1) * (event.shiftKey ? 32 : 16), true);
+    refreshSplitPanes();
+  });
+
   const main = createPane('main', mainRoot, mainScroller);
   const copy = createPane('copy', copyRoot, copyScroller);
   const panes = () => (split ? [main, copy] : [main]);
@@ -501,6 +672,8 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
   function clearSelection() {
     selectionVersion++;
     selected = null;
+    selectionTranslationTarget = null;
+    selectionTranslationAction.hidden = true;
     changed();
   }
   function fitToWidth(pane = active()) {
@@ -528,6 +701,10 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
     if (command === 'heading3') chain.toggleHeading({ level: 3 }).run();
     if (command === 'heading4') chain.toggleHeading({ level: 4 }).run();
     if (command === 'heading5') chain.toggleHeading({ level: 5 }).run();
+    if (command === 'paragraph') {
+      if (notebookEditor.isActive('blockquote')) chain.toggleBlockquote();
+      chain.setParagraph().run();
+    }
     if (command === 'bullet') chain.toggleBulletList().run();
     if (command === 'ordered') chain.toggleOrderedList().run();
     if (command === 'quote') chain.toggleBlockquote().run();
@@ -616,6 +793,7 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
         collapsibleListItem,
         pdfIndentedParagraph,
         pdfNotebookTab,
+        ...assetIndexExtensions(),
       ],
       content: notebookContent as any,
       editable: Boolean(documentId),
@@ -635,45 +813,34 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
       onUpdate: ({ editor }) => {
         if (!notebookLoading) queueNotebookSave(editor.getJSON());
       },
+      onFocus: ({ editor }) => {
+        notebookInsertAt = editor.state.selection.from;
+      },
+      onBlur: ({ editor }) => {
+        notebookInsertAt = editor.state.selection.from;
+      },
       onSelectionUpdate: ({ editor }) => {
         if (editor.isFocused) notebookInsertAt = editor.state.selection.from;
       },
     });
   }
+  let notebookRestoring = false;
+  let cancelNotebookRestore: (() => void) | undefined;
   function restoreNotebookScroll(id = documentId) {
+    cancelNotebookRestore?.();
     const top = Number(pdfViewState(id).notebookScrollTop);
-    const scrollTop = Number.isFinite(top) && top >= 0 ? top : 0;
     const gen = ++notebookRestoreGen;
-    const apply = (attempt: number) => {
-      if (gen !== notebookRestoreGen || id !== documentId) return;
-      if (notebookPanel.hidden) {
-        notebookLoading = false;
-        return;
-      }
-      notebookEditorHost.scrollTop = scrollTop;
-      const applied = notebookEditorHost.scrollTop;
-      const room = notebookEditorHost.scrollHeight - notebookEditorHost.clientHeight;
-      if (applied + 1 < scrollTop && room > applied + 1 && attempt < 6) {
-        requestAnimationFrame(() => apply(attempt + 1));
-        return;
-      }
-      // 编辑器换内容后还会再滚回顶部，多等一拍再放开滚动记录。
-      setTimeout(() => {
-        if (gen !== notebookRestoreGen || id !== documentId) return;
-        if (!notebookPanel.hidden && notebookEditorHost.scrollTop + 1 < scrollTop) {
-          notebookEditorHost.scrollTop = scrollTop;
-        }
-        notebookLoading = false;
-      }, 80);
-    };
-    requestAnimationFrame(() => apply(0));
+    notebookRestoring = true;
+    cancelNotebookRestore = restoreNotebookPosition(notebookEditorHost, top,
+      () => gen === notebookRestoreGen && id === documentId && !notebookPanel.hidden,
+      () => { notebookRestoring = false; });
   }
   function rememberNotebookUi() {
     if (!documentId || notebookLoading) return;
     persistPdfViewState({
       notebookOpen: !notebookPanel.hidden,
       notebookWidth,
-      notebookScrollTop: notebookEditorHost.scrollTop,
+      ...notebookPositionPatch(notebookEditorHost, !notebookPanel.hidden && !container.hidden && !notebookRestoring),
       splitRatio,
     });
   }
@@ -688,10 +855,16 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
     if (open) applyNotebookWidth(notebookWidth);
     if (save) persistPdfViewState({ notebookOpen: open });
     if (open) restoreNotebookScroll();
-    else notebookLoading = false;
+    else {
+      cancelNotebookRestore?.();
+      notebookRestoring = false;
+      notebookLoading = false;
+    }
     requestAnimationFrame(() => refreshSplitPanes());
   }
   function loadNotebook(content: unknown, revision: number) {
+    cancelNotebookRestore?.();
+    notebookRestoring = false;
     notebookRestoreGen += 1;
     notebookLoading = true;
     notebookContent = notebookDocument(content);
@@ -706,9 +879,10 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
       notebookEditor.commands.setContent(notebookContent as any);
       notebookEditor.setEditable(Boolean(documentId));
     }
+    notebookLoading = false;
   }
   notebookEditorHost.addEventListener('scroll', () => {
-    if (!documentId || notebookPanel.hidden || notebookLoading) {
+    if (!documentId || notebookPanel.hidden || container.hidden || notebookLoading || notebookRestoring) {
       clearTimeout(notebookScrollTimer);
       notebookScrollTimer = undefined;
       return;
@@ -718,9 +892,17 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
     clearTimeout(notebookScrollTimer);
     notebookScrollTimer = setTimeout(() => {
       notebookScrollTimer = undefined;
-      if (id === documentId) persistPdfViewState({ notebookScrollTop: scrollTop }, id);
+      if (id === documentId && !notebookRestoring) persistPdfViewState({ notebookScrollTop: scrollTop }, id);
     }, 120);
   }, { passive: true });
+  const stopNotebookRestore = () => {
+    if (!notebookRestoring) return;
+    cancelNotebookRestore?.();
+    notebookRestoring = false;
+  };
+  notebookEditorHost.addEventListener('wheel', stopNotebookRestore, { passive: true });
+  notebookEditorHost.addEventListener('touchstart', stopNotebookRestore, { passive: true });
+  notebookEditorHost.addEventListener('keydown', stopNotebookRestore);
   function appendOutline(outline: PdfOutlineItem[]) {
     generatedOutline = outline;
     persistPdfViewState({ generatedOutline });
@@ -800,6 +982,183 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
       onFinish: () => { summaryBusy = false; controls(); },
     });
   }
+  function translationDocument(content: unknown): PdfTranslation {
+    const raw = content && typeof content === 'object' && !Array.isArray(content)
+      ? (content as { translation?: unknown }).translation
+      : null;
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { format: 'pdf-translation-v1', pages: {} };
+    const pages = (raw as { pages?: unknown }).pages;
+    if (!pages || typeof pages !== 'object' || Array.isArray(pages)) return { format: 'pdf-translation-v1', pages: {} };
+    const clean: Record<string, PdfTranslationPage> = {};
+    for (const [key, value] of Object.entries(pages)) {
+      const item = value as Partial<PdfTranslationPage>;
+      if (!Number.isInteger(Number(key)) || Number(key) < 1 || !item || typeof item.source !== 'string' || typeof item.translation !== 'string') continue;
+      clean[key] = {
+        source: item.source,
+        translation: item.translation,
+        content: item.content && typeof item.content === 'object' && !Array.isArray(item.content) ? item.content : undefined,
+        translatedAt: typeof item.translatedAt === 'string' ? item.translatedAt : '',
+        modelName: typeof item.modelName === 'string' ? item.modelName : undefined,
+      };
+    }
+    return { format: 'pdf-translation-v1', pages: clean };
+  }
+  function translationContentDocument(text: string) {
+    const lines = text.replace(/\r\n?/g, '\n').split('\n');
+    return {
+      type: 'doc',
+      content: lines.map(line => ({ type: 'paragraph', content: line ? [{ type: 'text', text: line }] : [] })),
+    };
+  }
+  function flushTranslationSave() {
+    clearTimeout(translationSaveTimer);
+    translationSaveTimer = undefined;
+    const pending = translationPending;
+    if (!pending) return translationSaving;
+    translationPending = null;
+    translationSaving = translationSaving.then(async () => {
+      try {
+        const revision = await hooks.saveTranslation(pending, assetRevision);
+        assetRevision = revision;
+        window.dispatchEvent(new CustomEvent('office-saved'));
+      } catch (err) {
+        translationPending = pending;
+        window.dispatchEvent(new CustomEvent('office-error', {
+          detail: `PDF 译文保存失败：${err instanceof Error ? err.message : String(err)}`,
+        }));
+      } finally {
+        controls();
+      }
+    });
+    return translationSaving;
+  }
+  function queueTranslationSave() {
+    translationPending = translation;
+    clearTimeout(translationSaveTimer);
+    translationSaveTimer = setTimeout(() => {
+      translationSaveTimer = undefined;
+      void flushTranslationSave();
+    }, 700);
+    controls();
+  }
+  function ensureTranslationEditor() {
+    if (translationEditor) return;
+    translationEditor = new Editor({
+      element: translationContent,
+      extensions: [StarterKit, Link.configure({ openOnClick: false, autolink: true, defaultProtocol: 'https' }), ...assetIndexExtensions()],
+      content: EMPTY_NOTEBOOK,
+      editable: false,
+      onUpdate: ({ editor }) => {
+        if (translationEditorLoading) return;
+        const page = translationEditorPage;
+        const current = translation.pages[String(page)];
+        if (!current) return;
+        const content = editor.getJSON();
+        translation = {
+          format: 'pdf-translation-v1',
+          pages: {
+            ...translation.pages,
+            [String(page)]: { ...current, translation: editor.getText(), content },
+          },
+        };
+        queueTranslationSave();
+      },
+    });
+  }
+  function renderTranslationPage(page = main.viewer.currentPageNumber || 1) {
+    translationPageLabel.textContent = `第 ${page} 页译文`;
+    const item = translation.pages[String(page)];
+    ensureTranslationEditor();
+    const content = item?.content || translationContentDocument(item?.translation || '');
+    translationEditorLoading = true;
+    translationEditorPage = page;
+    translationEditor!.commands.setContent(content, { emitUpdate: false });
+    translationEditorLoading = false;
+    translationEditor!.setEditable(Boolean(item) && !translationBusy);
+    translationContent.hidden = !item;
+    translationEmpty.hidden = Boolean(item);
+    translationMeta.textContent = item?.translatedAt ? `已译 · ${item.modelName || '模型'}` : '';
+    translatePageButton.disabled = busy || translationBusy || !main.ready || !documentId;
+    translatePageButton.querySelector('span')!.textContent = translationBusy ? '翻译中…' : '翻译此页';
+  }
+  async function setTranslationOpen(open: boolean) {
+    if (open === translationOpen && translationPanel.hidden === !open) return;
+    if (open) {
+      await flushNotebookSave();
+      if (split) await setSplit(false);
+      if (!notebookPanel.hidden) setNotebookOpen(false);
+    }
+    translationOpen = open;
+    translationPanel.hidden = !open;
+    translationSplit.hidden = !open;
+    stage.classList.toggle('is-translation-open', open);
+    translationToggle.setAttribute('aria-pressed', open ? 'true' : 'false');
+    translationToggle.title = open ? '关闭英中对照翻译' : '打开英中对照翻译';
+    if (open) renderTranslationPage();
+    requestAnimationFrame(() => refreshSplitPanes());
+    if (!open) void flushTranslationSave();
+  }
+  async function translateCurrentPage() {
+    const page = main.viewer.currentPageNumber || 1;
+    if (!documentId || !main.ready || translationBusy) return;
+    if (translation.pages[String(page)] && !window.confirm('此页已有译文。重新翻译将替换当前页已有译文，是否继续？')) return;
+    await flushNotebookSave();
+    await flushTranslationSave();
+    translationBusy = true;
+    renderTranslationPage(page);
+    openPdfTranslationDialog({
+      anchor: translationPanel,
+      run: onEvent => hooks.translatePage(page, onEvent),
+      onDone: async result => {
+        translation = {
+          format: 'pdf-translation-v1',
+          pages: {
+            ...translation.pages,
+            [String(result.page)]: {
+              source: result.source,
+              translation: result.translation,
+              content: translationContentDocument(result.translation),
+              translatedAt: new Date().toISOString(),
+              modelName: result.modelName,
+            },
+          },
+        };
+        const revision = await hooks.saveTranslation(translation, assetRevision);
+        assetRevision = revision;
+        renderTranslationPage(result.page);
+        window.dispatchEvent(new CustomEvent('office-saved'));
+      },
+      onFinish: () => { translationBusy = false; renderTranslationPage(page); controls(); },
+    });
+  }
+  function setSelectionTranslationEnabled(enabled: boolean) {
+    selectionTranslationEnabled = enabled;
+    selectionTranslationToggle.setAttribute('aria-checked', enabled ? 'true' : 'false');
+    selectionTranslationToggle.title = enabled
+      ? '划词翻译已开启：选中 PDF 文字后点击“译”'
+      : '开启后，选中 PDF 文字可点击“译”进行翻译';
+    if (!enabled) {
+      selectionTranslationTarget = null;
+      selectionTranslationAction.hidden = true;
+    } else {
+      scheduleCapture();
+    }
+  }
+  function translateSelection() {
+    const target = selectionTranslationTarget;
+    if (!target || selectionTranslationBusy || !documentId || !main.ready) return;
+    selectionTranslationBusy = true;
+    selectionTranslationAction.hidden = true;
+    controls();
+    openPdfSelectionTranslationDialog({
+      source: target.text,
+      run: onEvent => hooks.translateSelection({ selection: target.text, page: target.page }, onEvent),
+      onFinish: () => {
+        selectionTranslationBusy = false;
+        controls();
+      },
+    });
+  }
   function controls() {
     const pane = active();
     const current = pane.viewer.currentPageNumber || 1;
@@ -812,7 +1171,7 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
     pageInput.value = String(current);
     total.textContent = '/ ' + count;
     counter.textContent = busy
-      ? (downloadOverlay.hidden ? '正在打开…' : downloadTitle.textContent || '正在下载…')
+      ? (downloadOverlay.hidden ? '正在读取…' : downloadTitle.textContent || '正在读取…')
       : filename || '未打开文件';
     counter.title = filename;
     zoomLabel.textContent = Math.round(scale * 100) + '%';
@@ -821,11 +1180,13 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
     fitWidth.disabled = busy || !pane.ready;
     annotateButtons.forEach(button => { button.disabled = busy || !main.ready || !documentId; });
     askAiBtn.disabled = busy || !main.ready || !documentId;
+    translationToggle.disabled = busy || !main.ready || !documentId;
+    selectionTranslationToggle.disabled = busy || selectionTranslationBusy || !main.ready || !documentId;
     notebookToggle.disabled = busy || !documentId;
     outlineToggle.disabled = busy || outlineBusy || !main.ready || !documentId;
     templateButton.disabled = busy || !documentId;
     summaryToggle.disabled = busy || summaryBusy || !main.ready || !documentId || !notebookEditor;
-    splitBtn.disabled = busy || !main.ready || !documentId || !fileBytes;
+    splitBtn.disabled = busy || !main.ready || !documentId || (!fileBytes && !rangeSource);
     splitBtn.setAttribute('aria-pressed', split ? 'true' : 'false');
     splitBtn.textContent = split ? '关闭浏览' : '复制浏览';
     splitBtn.title = split ? '关闭左侧对照窗格' : '左右对照同一份 PDF';
@@ -916,8 +1277,10 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
     const state = pdfViewState(id);
     const storedRatio = Number(state.splitRatio);
     const storedWidth = Number(state.notebookWidth);
+    const storedTranslationWidth = Number(state.translationWidth);
     splitRatio = Number.isFinite(storedRatio) && storedRatio > 0 && storedRatio < 1 ? storedRatio : 0.5;
     notebookWidth = Number.isFinite(storedWidth) && storedWidth >= MIN_NOTEBOOK_WIDTH ? storedWidth : 360;
+    translationWidth = Number.isFinite(storedTranslationWidth) && storedTranslationWidth >= MIN_TRANSLATION_WIDTH ? storedTranslationWidth : 460;
     generatedOutline = Array.isArray(state.generatedOutline)
       ? state.generatedOutline.filter((item): item is PdfOutlineItem => Boolean(item)
         && typeof item.id === 'string'
@@ -944,6 +1307,7 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
     updateReadingHistoryControls();
     applySplitRatio(splitRatio);
     applyNotebookWidth(notebookWidth);
+    applyTranslationWidth(translationWidth);
     setNotebookOpen(state.notebookOpen === true, false);
   }
   function scaleOf(pane: Pane) {
@@ -1025,8 +1389,12 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
       }
       controls();
     });
-    pane.eventBus.on('pagechanging', () => {
+    pane.eventBus.on('pagechanging', ({ pageNumber }: { pageNumber?: number }) => {
       if (active() === pane) { clearSelection(); controls(); }
+      // PDF.js 在派发事件时 currentPageNumber 仍可能是前一页，必须使用事件页码。
+      if (pane.id === 'main' && translationOpen) {
+        renderTranslationPage(Number.isInteger(pageNumber) ? pageNumber : pane.viewer.currentPageNumber || 1);
+      }
       rememberView();
       requestAnimationFrame(() => recordReadingPosition(pane));
     });
@@ -1036,11 +1404,33 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
     });
     pane.eventBus.on('pagerendered', ({ error: renderError }: { error?: Error }) => {
       if (renderError) error('PDF 页面渲染失败：' + renderError.message);
+      if (pane.id === 'main' && readingDoc && pane.viewer.pdfDocument === readingDoc) showReading(null, true);
     });
     pane.eventBus.on('annotationlayerrendered', ({ source }: { source: { div: HTMLElement } }) => {
       void bindAnnotUi(source.div, pane).catch(e => error(String(e)));
       paintLive(source.div, Number(source.div.dataset.pageNumber), pane);
     });
+    pane.pages.addEventListener('pointerdown', event => {
+      if (event.button > 0 || event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return;
+      const target = event.target instanceof Element ? event.target : null;
+      if (target?.closest('.pdf-live-note, .pdf-note-badge, .textAnnotation, .pdf-notebook-panel')) return;
+      const pageDiv = target?.closest<HTMLElement>('.page') ?? null;
+      if (!pageDiv || !pane.pages.contains(pageDiv)) return;
+      const hit = highlightAtClick(pageDiv, pane, event.clientX, event.clientY, target);
+      if (!hit) return;
+      const caret = notebookCaret();
+      if (caret === null) return;
+      event.preventDefault();
+      event.stopPropagation();
+      setActive(pane.id);
+      if (hit.text.trim()) {
+        insertHighlightAtCursor(hit.text, caret);
+        return;
+      }
+      void textFromPdfItems(hit.pageNumber, hit.boxes).then(text => {
+        insertHighlightAtCursor(text, caret);
+      }).catch(() => {});
+    }, true);
     pane.scroller.addEventListener('pointerdown', () => setActive(pane.id));
     pane.scroller.addEventListener('focusin', () => setActive(pane.id));
     pane.scroller.addEventListener('mouseup', scheduleCapture);
@@ -1088,8 +1478,10 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
     const snap = readDomSelection();
     if (!snap) {
       if (!window.getSelection()?.toString().trim()) clearSelection();
+      else selectionTranslationAction.hidden = true;
       return;
     }
+    showSelectionTranslationAction(snap);
     selectionVersion++;
     const version = selectionVersion;
     selected = {
@@ -1113,6 +1505,23 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
   function scheduleCapture() {
     requestAnimationFrame(() => { void captureSelection().catch(e => error(String(e))); });
   }
+  function showSelectionTranslationAction(snap: { page: number; text: string; anchor?: DOMRect }) {
+    if (!selectionTranslationEnabled || selectionTranslationBusy || !documentId || !snap.anchor) {
+      selectionTranslationAction.hidden = true;
+      return;
+    }
+    selectionTranslationTarget = { page: snap.page, text: snap.text.trim() };
+    if (!selectionTranslationTarget.text) {
+      selectionTranslationAction.hidden = true;
+      return;
+    }
+    const width = 30;
+    const left = Math.max(8, Math.min(window.innerWidth - width - 8, snap.anchor.right + 8));
+    const top = Math.max(8, Math.min(window.innerHeight - 36, snap.anchor.top - 2));
+    selectionTranslationAction.style.left = `${left}px`;
+    selectionTranslationAction.style.top = `${top}px`;
+    selectionTranslationAction.hidden = false;
+  }
   function readDomSelection() {
     const selection = window.getSelection();
     if (!selection?.rangeCount || !selection.toString().trim()) return null;
@@ -1133,21 +1542,26 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
     if (!layer || !layer.contains(selection.anchorNode) || !layer.contains(selection.focusNode)) return null;
     const bounds = layer.getBoundingClientRect();
     const viewport = pageView.viewport as Viewport;
-    const boxes = mergeSelectionBoxes(
-      Array.from(selection.getRangeAt(0).getClientRects())
+    const rects = Array.from(selection.getRangeAt(0).getClientRects())
         .filter(rect => rect.width > 0 && rect.height > 0)
-        .map(rect => {
+    const boxes = mergeSelectionBoxes(
+      rects.map(rect => {
           const a = viewport.convertToPdfPoint(rect.left - bounds.left, rect.top - bounds.top);
           const b = viewport.convertToPdfPoint(rect.right - bounds.left, rect.bottom - bounds.top);
           return [Math.min(a[0], b[0]), Math.min(a[1], b[1]), Math.max(a[0], b[0]), Math.max(a[1], b[1])];
-        }),
+      }),
     );
     if (!boxes.length) return null;
-    return { page: number, boxes, text: selection.toString() };
+    return { page: number, boxes, text: selection.toString(), anchor: rects[rects.length - 1] };
   }
   container.addEventListener('keydown', e => {
     if (!active().ready || busy || !(e.ctrlKey || e.metaKey)) return;
     if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+    if (e.key.toLowerCase() === 's' && translationOpen) {
+      e.preventDefault();
+      void flushTranslationSave();
+      return;
+    }
     if (e.key === '=' || e.key === '+') { e.preventDefault(); zoomTo(active().viewer.currentScale * 1.1); }
     if (e.key === '-') { e.preventDefault(); zoomTo(active().viewer.currentScale / 1.1); }
     if (e.key === '0') { e.preventDefault(); fitToWidth(); }
@@ -1198,6 +1612,202 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
       }
     }
   }
+  function quadsFrom(section: HTMLElement): PixelBox[] {
+    const sectionBox = section.getBoundingClientRect();
+    const quads = [...section.querySelectorAll('clipPath rect')].map(rect => ({
+      x: Number(rect.getAttribute('x')) || 0,
+      y: Number(rect.getAttribute('y')) || 0,
+      width: Number(rect.getAttribute('width')) || 0,
+      height: Number(rect.getAttribute('height')) || 0,
+    }));
+    return quadsToBoxes(sectionBox, quads);
+  }
+  function pageHighlightText(pageDiv: HTMLElement, anchor: HTMLElement) {
+    const xref = Number(anchor.dataset.xref || anchor.dataset.annotationId?.replace(/R$/, '') || 0);
+    const live = liveAnnots.find(item => item.xref === xref && item.kind === 'highlight');
+    if (live?.quote) return live.quote;
+    const marks = xref
+      ? [...pageDiv.querySelectorAll<HTMLElement>(`.pdf-highlight-mark[data-xref="${xref}"]`)]
+      : [];
+    const quote = anchor.dataset.quote || marks.find(node => node.dataset.quote)?.dataset.quote;
+    if (quote?.trim()) return quote;
+    const rects = (marks.length
+      ? marks.map(node => node.getBoundingClientRect())
+      : quadsFrom(anchor.closest<HTMLElement>('.highlightAnnotation') || anchor)
+    ).map(box => ({
+      left: box.left - 3,
+      top: box.top - 3,
+      right: box.right + 3,
+      bottom: box.bottom + 3,
+      width: box.width + 6,
+      height: box.height + 6,
+    }));
+    const layer = pageDiv.querySelector<HTMLElement>('.textLayer');
+    if (!layer) return '';
+    const spans = [...layer.querySelectorAll<HTMLElement>('span')].flatMap(span => {
+      if (span.classList.contains('markedContent') || span.querySelector('span')) return [];
+      return [{
+        text: span.textContent || '',
+        box: span.getBoundingClientRect(),
+        rtl: getComputedStyle(span).direction === 'rtl',
+      }];
+    });
+    return textCoveredByHighlight(spans, rects);
+  }
+  function highlightTextAt(pageDiv: HTMLElement, mark: HTMLElement, x: number, y: number) {
+    const covered = pageHighlightText(pageDiv, mark);
+    if (covered.trim()) return covered;
+    const span = document.elementsFromPoint(x, y).find((node): node is HTMLElement => (
+      node instanceof HTMLElement
+      && node.tagName === 'SPAN'
+      && !node.classList.contains('markedContent')
+      && !!node.closest('.textLayer')
+    ));
+    return span?.textContent?.trim() || '';
+  }
+  function notebookCaret() {
+    if (notebookPanel.hidden) return null;
+    ensureNotebookEditor();
+    const editor = notebookEditor;
+    if (!editor || editor.isDestroyed) return null;
+    if (editor.isFocused) return editor.state.selection.from;
+    if (notebookInsertAt !== null) return notebookInsertAt;
+    return editor.state.selection.from;
+  }
+  function insertHighlightAtCursor(text: string, caret: number) {
+    const editor = notebookEditor;
+    const content = highlightInsertContent(text);
+    if (!content || !editor || editor.isDestroyed) return;
+    const doc = editor.state.doc;
+    const limit = Math.max(1, doc.content.size - 1);
+    const clamped = Math.min(Math.max(1, caret), limit);
+    let position = clamped;
+    try {
+      position = TextSelection.near(doc.resolve(clamped)).from;
+    } catch { /* 夹紧后的位置 */ }
+    const before = doc.textContent;
+    try {
+      editor.chain().insertContentAt(position, content, { updateSelection: true }).run();
+    } catch { /* 下面改用纯文本 */ }
+    if (editor.state.doc.textContent === before) {
+      const plain = text.replace(/\s+/g, ' ').trim();
+      if (!plain) return;
+      try {
+        editor.view.dispatch(editor.state.tr.insertText(plain, position).scrollIntoView());
+      } catch {
+        return;
+      }
+    }
+    if (editor.state.doc.textContent === before) return;
+    notebookInsertAt = editor.state.selection.from;
+    try {
+      editor.chain().setTextSelection(notebookInsertAt).scrollIntoView().run();
+    } catch { /* 文字已经写入 */ }
+    queueNotebookSave(editor.getJSON());
+  }
+  function highlightUnderPoint(pageDiv: HTMLElement, x: number, y: number) {
+    let best: HTMLElement | null = null;
+    let bestArea = Infinity;
+    for (const mark of pageDiv.querySelectorAll<HTMLElement>('.pdf-highlight-mark, .highlightAnnotation, .pdf-live-highlight')) {
+      const box = mark.getBoundingClientRect();
+      if (box.width < 1 || box.height < 1) continue;
+      if (x < box.left || x > box.right || y < box.top || y > box.bottom) continue;
+      const area = box.width * box.height;
+      if (area < bestArea) {
+        best = mark;
+        bestArea = area;
+      }
+    }
+    return best;
+  }
+  function clientToPdf(pageDiv: HTMLElement, pane: Pane, clientX: number, clientY: number) {
+    const pageNumber = Number(pageDiv.dataset.pageNumber);
+    const pageView = pane.viewer.getPageView(pageNumber - 1);
+    const viewport = pageView?.viewport as Viewport | undefined;
+    const layer = pageDiv.querySelector<HTMLElement>('.textLayer') || pageDiv;
+    if (!viewport || !pageNumber) return null;
+    const bounds = layer.getBoundingClientRect();
+    const [x, y] = viewport.convertToPdfPoint(clientX - bounds.left, clientY - bounds.top);
+    return { pageNumber, viewport, bounds, x, y, layer };
+  }
+  function pdfBoxesToClient(viewport: Viewport, bounds: DOMRect, boxes: number[][]): PixelBox[] {
+    return boxes.flatMap(box => {
+      const a = viewport.convertToViewportPoint(box[0], box[1]);
+      const b = viewport.convertToViewportPoint(box[2], box[3]);
+      const left = bounds.left + Math.min(a[0], b[0]);
+      const top = bounds.top + Math.min(a[1], b[1]);
+      const right = bounds.left + Math.max(a[0], b[0]);
+      const bottom = bounds.top + Math.max(a[1], b[1]);
+      const width = right - left;
+      const height = bottom - top;
+      if (width < 0.5 || height < 0.5) return [];
+      return [{ left, top, right, bottom, width, height }];
+    });
+  }
+  function textFromClientRects(layer: HTMLElement | null, rects: PixelBox[]) {
+    if (!layer || !rects.length) return '';
+    const expanded = rects.map(box => ({
+      left: box.left - 3,
+      top: box.top - 3,
+      right: box.right + 3,
+      bottom: box.bottom + 3,
+      width: box.width + 6,
+      height: box.height + 6,
+    }));
+    const spans = [...layer.querySelectorAll<HTMLElement>('span')].flatMap(span => {
+      if (span.classList.contains('markedContent') || span.querySelector('span')) return [];
+      return [{
+        text: span.textContent || '',
+        box: span.getBoundingClientRect(),
+        rtl: getComputedStyle(span).direction === 'rtl',
+      }];
+    });
+    return textCoveredByHighlight(spans, expanded);
+  }
+  function highlightAtClick(pageDiv: HTMLElement, pane: Pane, clientX: number, clientY: number, target: Element | null) {
+    const point = clientToPdf(pageDiv, pane, clientX, clientY);
+    if (point) {
+      const hits: Array<{ area: number; quote: string; boxes: number[][] }> = [];
+      const consider = (boxes: number[][], quote: string) => {
+        if (!boxes.length || !pointInPdfBoxes(point.x, point.y, boxes)) return;
+        const area = boxes.reduce((sum, box) => sum + Math.abs(box[2] - box[0]) * Math.abs(box[3] - box[1]), 0);
+        hits.push({ area, quote, boxes });
+      };
+      for (const annot of liveAnnots) {
+        if (annot.page !== point.pageNumber) continue;
+        consider(annot.boxes, annot.kind === 'highlight' ? (annot.quote || '') : '');
+      }
+      for (const annot of fileHighlights) {
+        if (annot.page !== point.pageNumber) continue;
+        consider(annot.boxes, '');
+      }
+      hits.sort((a, b) => Number(Boolean(b.quote)) - Number(Boolean(a.quote)) || (a.area - b.area));
+      const best = hits[0];
+      if (best) {
+        const text = best.quote.trim() || textFromClientRects(point.layer, pdfBoxesToClient(point.viewport, point.bounds, best.boxes));
+        return { pageNumber: point.pageNumber, boxes: best.boxes, text };
+      }
+    }
+    const mark = target?.closest<HTMLElement>('.pdf-highlight-mark, .highlightAnnotation, .pdf-live-highlight')
+      || highlightUnderPoint(pageDiv, clientX, clientY);
+    if (!mark || !pageDiv.contains(mark)) return null;
+    return {
+      pageNumber: point?.pageNumber || Number(pageDiv.dataset.pageNumber) || 0,
+      boxes: [],
+      text: highlightTextAt(pageDiv, mark, clientX, clientY),
+    };
+  }
+  async function textFromPdfItems(pageNumber: number, boxes: number[][]) {
+    if (!pdf || !pageNumber || !boxes.length) return '';
+    const page = await pdf.getPage(pageNumber);
+    const content = await page.getTextContent();
+    const items = content.items.flatMap(item => {
+      if (!('str' in item) || !item.str || !item.transform) return [];
+      const height = item.height || Math.abs(item.transform[3]) || 8;
+      return [{ str: item.str, x: item.transform[4], y: item.transform[5], width: item.width || 0, height }];
+    });
+    return textItemsInBoxes(items, boxes);
+  }
   function paintLive(pageDiv: HTMLElement, pageNumber: number, pane: Pane) {
     if (!pageNumber) return;
     pageDiv.querySelectorAll('.pdf-live-annot').forEach(node => node.remove());
@@ -1217,11 +1827,12 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
           mark.type = 'button';
           mark.className = 'pdf-live-annot pdf-live-highlight pdf-highlight-mark';
           mark.dataset.xref = String(annot.xref);
-          mark.title = '删除高亮';
-          mark.setAttribute('aria-label', '删除高亮');
+          if (annot.quote) mark.dataset.quote = annot.quote;
+          mark.title = '插入到笔记光标处，右键删除';
+          mark.setAttribute('aria-label', '把高亮文字插入笔记');
           Object.assign(mark.style, boxStyle(viewport, box));
           mark.addEventListener('mousedown', e => e.preventDefault());
-          mark.addEventListener('click', open);
+          mark.addEventListener('contextmenu', open);
           pageDiv.append(mark);
         });
         continue;
@@ -1259,6 +1870,7 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
     const ids = [...new Set(xrefs.filter(xref => Number.isInteger(xref) && xref > 0))];
     if (!ids.length) return;
     liveAnnots = liveAnnots.filter(item => !ids.includes(item.xref) && !(item.markXref && ids.includes(item.markXref)));
+    fileHighlights = fileHighlights.filter(item => !ids.includes(item.xref));
     for (const pane of panes()) {
       for (const xref of ids) {
         pane.pages.querySelectorAll(`[data-xref="${xref}"], [data-annotation-id="${xref}R"]`).forEach(node => node.remove());
@@ -1266,6 +1878,7 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
     }
   }
   async function createAnnot(kind: AnnotKind, target: NonNullable<ReturnType<typeof selectionBoxes>>, content: string) {
+    const quote = kind === 'highlight' ? String(selected?.selection?.text || '').trim() : '';
     await withBusy(async () => {
       const result = await hooks.onAnnotate({ kind, page: target.page, boxes: target.boxes, content });
       if (!result?.xref) return;
@@ -1274,6 +1887,7 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
         xref: result.xref,
         markXref: result.mark_xref && result.mark_xref > 0 ? result.mark_xref : undefined,
         kind, page: target.page, boxes: target.boxes, content,
+        quote: quote || undefined,
         aiAsk: isAiAskContent(content),
       });
       paintLiveEverywhere(target.page);
@@ -1498,6 +2112,24 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
       if (typeof item.contents === 'string' && item.contents.trim()) return item.contents;
       return item.contentsObj?.str || '';
     };
+    const highlightMeta = meta as Array<{
+      id?: string; subtype?: string; annotationType?: number;
+      quadPoints?: ArrayLike<number>; rect?: number[];
+      title?: string; titleObj?: { str?: string };
+    }>;
+    const highlightIds = new Set(
+      [...layer.querySelectorAll<HTMLElement>('.highlightAnnotation')].map(node => node.dataset.annotationId || ''),
+    );
+    fileHighlights = fileHighlights.filter(item => item.page !== pageNumber);
+    for (const item of highlightMeta) {
+      const id = String(item.id || '');
+      const isHighlight = item.subtype === 'Highlight' || item.annotationType === 9 || highlightIds.has(id);
+      if (!isHighlight) continue;
+      const boxes = annotationPdfBoxes(item.quadPoints, item.rect);
+      if (!boxes.length) continue;
+      const title = (typeof item.title === 'string' && item.title) || item.titleObj?.str || '';
+      fileHighlights.push({ page: pageNumber, xref: xrefOf(id) || 0, boxes, title });
+    }
     layer.querySelectorAll<HTMLElement>('[data-annotation-id]').forEach(section => {
       if (section.classList.contains('popupAnnotation')) return;
       const id = section.dataset.annotationId;
@@ -1526,11 +2158,18 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
         section.addEventListener('click', open, true);
         return;
       }
-      if (titleOf(id) === 'office-text-mark') return;
+      if (titleOf(id) === 'office-text-mark') {
+        section.classList.add('pdf-highlight-mark');
+        section.dataset.pdfHighlightAction = '1';
+        section.title = '插入到笔记光标处';
+        return;
+      }
+      if (section.dataset.pdfHighlightAction === '1') return;
+      section.dataset.pdfHighlightAction = '1';
       section.classList.add('pdf-highlight-mark');
-      section.title = '删除高亮';
-      section.setAttribute('aria-label', '删除高亮');
-      section.addEventListener('click', open, true);
+      section.title = '插入到笔记光标处，右键删除';
+      section.setAttribute('aria-label', '把高亮文字插入笔记');
+      section.addEventListener('contextmenu', open, true);
     });
     layoutNoteBadges(pageDiv);
   }
@@ -1545,12 +2184,31 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
     await previous?.destroy();
   }
 
-  async function openCopy() {
-    if (!fileBytes) return;
-    const task = getDocument({
-      data: new Uint8Array(cloneBuffer(fileBytes)),
-      cMapUrl: '/pdfjs/cmaps/', cMapPacked: true, standardFontDataUrl: '/pdfjs/standard_fonts/', wasmUrl: '/pdfjs/wasm/',
+  function pdfjsOptions(extra: Record<string, unknown>) {
+    return {
+      cMapUrl: '/pdfjs/cmaps/',
+      cMapPacked: true,
+      standardFontDataUrl: '/pdfjs/standard_fonts/',
+      wasmUrl: '/pdfjs/wasm/',
+      ...extra,
+    };
+  }
+  function rangeOptions(source: NonNullable<typeof rangeSource>) {
+    return pdfjsOptions({
+      url: source.url,
+      httpHeaders: source.headers,
+      length: source.length,
+      disableAutoFetch: true,
+      disableStream: true,
+      rangeChunkSize: 65536,
     });
+  }
+  async function openCopy() {
+    const source = rangeSource;
+    if (!fileBytes && !source) return;
+    const task = source
+      ? getDocument(rangeOptions(source))
+      : getDocument(pdfjsOptions({ data: new Uint8Array(cloneBuffer(fileBytes!)) }));
     const previous = copyLoadingTask;
     copyLoadingTask = task;
     copy.ready = false;
@@ -1612,8 +2270,36 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
     controls();
   }
 
-  function setDownloadProgress(progress: PdfFileProgress | null, label?: string) {
+  function beginReading() {
+    readingClosed = false;
+  }
+
+  function showReading(progress?: PdfFileProgress | null, done = false, label = '正在读取 PDF', detail?: string) {
+    if (done) {
+      readingDoc = null;
+      setDownloadProgress(null);
+      return;
+    }
+    if (readingClosed) return;
+    const total = progress?.total ?? null;
+    const loaded = progress?.loaded ?? 0;
+    const known = Boolean(total && total > 0 && loaded > 0);
+    const complete = Boolean(known && loaded >= (total as number));
+    if (!known || (complete && !detail)) {
+      setDownloadProgress(
+        { loaded: 0, total: null, source: progress?.source || 'network' },
+        label,
+        detail || (complete ? '正在解析首页…' : '正在读取…'),
+      );
+      return;
+    }
+    setDownloadProgress({ loaded, total, source: progress!.source }, label, detail);
+  }
+
+  function setDownloadProgress(progress: PdfFileProgress | null, label?: string, detail?: string) {
     if (!progress) {
+      readingClosed = true;
+      readingDoc = null;
       downloadOverlay.hidden = true;
       downloadOverlay.classList.remove('is-indeterminate');
       downloadBar.style.width = '0%';
@@ -1622,23 +2308,105 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
       return;
     }
     downloadOverlay.hidden = false;
-    downloadTitle.textContent = '正在打开 PDF';
-    if (label) downloadTitle.textContent = label;
+    downloadTitle.textContent = label || '正在读取 PDF';
     const total = progress.total;
     const ratio = total && total > 0 ? Math.min(1, progress.loaded / total) : null;
     if (ratio === null) {
       downloadOverlay.classList.add('is-indeterminate');
       downloadBar.style.width = '';
-      downloadMeta.textContent = progress.loaded > 0
+      downloadMeta.textContent = detail || (progress.loaded > 0
         ? `已接收 ${formatBytes(progress.loaded)}`
-        : '连接服务器…';
+        : '正在读取…');
     } else {
       downloadOverlay.classList.remove('is-indeterminate');
       downloadBar.style.transform = '';
       downloadBar.style.width = `${Math.round(ratio * 100)}%`;
-      downloadMeta.textContent = `${formatBytes(progress.loaded)} / ${formatBytes(total!)}（${Math.round(ratio * 100)}%）`;
+      downloadMeta.textContent = detail || `${formatBytes(progress.loaded)} / ${formatBytes(total!)}（${Math.round(ratio * 100)}%）`;
     }
     controls();
+  }
+
+  function indexStatusText(status: PdfIndexStatus, active: boolean) {
+    if (status.status === 'failed') {
+      const done = status.progress_done || 0;
+      const total = status.progress_total || 0;
+      const where = total > 0 ? `（已完成 ${done}/${total} 段）` : '';
+      return `索引失败${where}：${status.error || '请稍后重试'}`;
+    }
+    const pending = status.status === 'indexing';
+    if (!pending) {
+      if (!active || status.status !== 'ready') return '';
+      if (status.empty) return `索引完成：${status.error || '未提取到可检索文本'}`;
+      return `索引完成：${status.page_count || 0} 页，${status.chunk_count || 0} 段`;
+    }
+    if ((status.phase || '') !== 'embedding' || !(status.progress_total || 0)) {
+      const pages = status.page_count || 0;
+      return pages > 0 ? `正在提取文本，已解析 ${pages} 页` : '正在提取文本…';
+    }
+    const batchSize = status.batch_size || 256;
+    const total = status.progress_total || 0;
+    const done = status.progress_done || 0;
+    const batches = Math.max(1, Math.ceil(total / batchSize));
+    const finished = Math.floor(done / batchSize);
+    const current = Math.min(batches, finished + (done < total ? 1 : 0));
+    const pages = status.page_count || 0;
+    const pageText = pages > 0 ? `已解析 ${pages} 页` : '';
+    return `${pageText}${pageText ? '，' : ''}正在建立索引：第 ${current}/${batches} 批，已完成 ${done}/${total} 段`;
+  }
+
+  function stopIndexWatch() {
+    indexWatch += 1;
+    indexLine.hidden = true;
+    indexLine.textContent = '';
+    indexLine.classList.remove('is-failed');
+  }
+
+  async function watchIndex(id: string, token: number) {
+    const gen = ++indexWatch;
+    let sawWork = false;
+    let waitingChecks = 0;
+    for (;;) {
+      if (gen !== indexWatch || token !== loadToken || documentId !== id) return;
+      let status: PdfIndexStatus;
+      try {
+        status = await hooks.indexStatus(id);
+      } catch {
+        if (gen === indexWatch) indexLine.hidden = true;
+        return;
+      }
+      if (gen !== indexWatch || token !== loadToken || documentId !== id) return;
+      const pending = status.status === 'indexing';
+      if (pending) sawWork = true;
+      const text = indexStatusText(status, sawWork);
+      indexLine.classList.toggle('is-failed', status.status === 'failed');
+      if (text) {
+        indexLine.hidden = false;
+        indexLine.textContent = text;
+      } else {
+        indexLine.hidden = true;
+        indexLine.textContent = '';
+      }
+      // Legacy asset metadata can remain pending after restart without any index job.
+      // Briefly allow a newly submitted worker to start, without claiming it is extracting.
+      if (status.status === 'missing' && status.asset_status === 'pending' && waitingChecks++ < 10) {
+        await new Promise(resolve => window.setTimeout(resolve, 1200));
+        continue;
+      }
+      if (!pending) {
+        if (status.status === 'ready' && sawWork) {
+          window.setTimeout(() => {
+            if (gen !== indexWatch) return;
+            indexLine.hidden = true;
+          }, 5000);
+        }
+        return;
+      }
+      await new Promise(resolve => window.setTimeout(resolve, 1200));
+    }
+  }
+
+  function followIndex(id: string, token: number) {
+    void watchIndex(id, token);
   }
 
   function fingerprint(id: string, data: ArrayBuffer) {
@@ -1672,8 +2440,28 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
     pdf = undefined;
     loadingTask = undefined;
     fileBytes = null;
+    rangeSource = null;
     openedFingerprint = '';
     main.ready = false;
+  }
+
+  async function releaseOpenDocument() {
+    // 小文件留在内存里，回来不用重新解析。大文件没有整份字节，必须先销毁，否则阅读器会继续画旧页。
+    if (documentId && pdf && loadingTask && fileBytes) parkCurrentPdf();
+    const task = loadingTask && !isParkedTask(loadingTask) ? loadingTask : undefined;
+    pdf = undefined;
+    loadingTask = undefined;
+    fileBytes = null;
+    rangeSource = null;
+    openedFingerprint = '';
+    main.ready = false;
+    readingDoc = null;
+    try { main.linkService.setDocument(null as never); } catch { /* 无文档 */ }
+    try { main.viewer.setDocument(null as never); } catch { /* 无文档 */ }
+    if (task) {
+      try { await task.destroy(); } catch { /* 已释放 */ }
+    }
+    main.pages.replaceChildren();
   }
 
   async function evictParkedPdfs(keepId?: string) {
@@ -1697,13 +2485,14 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
     opening = true;
     openingToken = token;
     input.disabled = true;
-    liveAnnots = [];
+    liveAnnots = []; fileHighlights = [];
     clearSelection();
     selected = null;
     documentId = session.id;
     filename = session.name;
     assetRevision = session.revision;
     fileBytes = cloneBuffer(session.bytes);
+    rangeSource = null;
     pdf = session.pdf;
     loadingTask = session.task;
     openedFingerprint = session.fingerprint;
@@ -1723,23 +2512,37 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
     if (token !== loadToken) return;
     const fp = fingerprint(id, data);
     // 仅当页面已真正渲染就绪时跳过；否则缓存命中会短路导致白屏。
-    if (bufferReady(fp) && documentId === id) return;
+    if (bufferReady(fp) && documentId === id) {
+      showReading(null, true);
+      return;
+    }
     // 本地缓存和网络会各打开一次。第二次 setDocument 会把阅读位置重置到第 1 页。
     if (inflightOpen?.fp === fp) {
       const opened = await inflightOpen.promise;
       if (token !== loadToken) return;
-      if (opened && documentId === id && openedFingerprint === fp) return;
+      if (opened && documentId === id && openedFingerprint === fp) {
+        if (main.ready) showReading(null, true);
+        else if (pdf) readingDoc = pdf;
+        return;
+      }
     }
     let finishOpen!: (opened: boolean) => void;
     const promise = new Promise<boolean>(resolve => { finishOpen = resolve; });
     inflightOpen = { fp, promise };
-    busy = true; opening = true; openingToken = token; input.disabled = true; liveAnnots = []; clearSelection(); controls();
+    busy = true; opening = true; openingToken = token; input.disabled = true; liveAnnots = []; fileHighlights = []; clearSelection(); controls();
+    showReading(null);
     let task: PDFDocumentLoadingTask | undefined;
     try {
       // PDF.js 可能转移/改写缓冲；fileBytes 另存一份给对照窗格。
       fileBytes = cloneBuffer(data);
-      task = getDocument({ data: new Uint8Array(cloneBuffer(data)),
-        cMapUrl: '/pdfjs/cmaps/', cMapPacked: true, standardFontDataUrl: '/pdfjs/standard_fonts/', wasmUrl: '/pdfjs/wasm/' });
+      rangeSource = null;
+      task = getDocument(pdfjsOptions({ data: new Uint8Array(cloneBuffer(data)) }));
+      task.onProgress = (progress: { loaded?: number; total?: number }) => {
+        if (token !== loadToken) return;
+        const loaded = Number(progress?.loaded) || 0;
+        const total = Number(progress?.total) || 0;
+        showReading(total > 0 ? { loaded, total, source: 'network' } : null);
+      };
       const loaded = await task.promise;
       if (token !== loadToken) {
         await task.destroy();
@@ -1758,6 +2561,8 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
       empty.remove();
       viewEpoch += 1;
       main.linkService.setDocument(loaded);
+      readingDoc = loaded;
+      showReading(null);
       main.viewer.setDocument(loaded);
       // 上一个文档若已挂入 parked，勿 destroy；否则才释放。
       if (previous && !isParkedTask(previous)) await previous.destroy();
@@ -1781,9 +2586,109 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
         restoringView = false;
       }
       fileBytes = null;
+      rangeSource = null;
       openedFingerprint = '';
       if (task && task !== loadingTask && !isParkedTask(task)) await task.destroy();
       error('PDF 打开失败：' + String(e));
+      showReading(null, true);
+      finishOpen(false);
+    } finally {
+      if (inflightOpen?.promise === promise) inflightOpen = null;
+      if (token === loadToken) {
+        busy = false; input.disabled = false; input.value = ''; controls();
+      }
+    }
+  }
+  async function openRange(id: string, name: string, revision: number, length: number, token: number) {
+    if (token !== loadToken) return;
+    const fp = `${id}:range:${revision}:${length}`;
+    if (bufferReady(fp) && documentId === id) {
+      showReading(null, true);
+      return;
+    }
+    if (inflightOpen?.fp === fp) {
+      const opened = await inflightOpen.promise;
+      if (token !== loadToken) return;
+      if (opened && documentId === id && openedFingerprint === fp) {
+        if (main.ready) showReading(null, true);
+        else if (pdf) readingDoc = pdf;
+        return;
+      }
+    }
+    let finishOpen!: (opened: boolean) => void;
+    const promise = new Promise<boolean>(resolve => { finishOpen = resolve; });
+    inflightOpen = { fp, promise };
+    busy = true; opening = true; openingToken = token; input.disabled = true; liveAnnots = []; fileHighlights = []; clearSelection(); controls();
+    beginReading();
+    showReading(
+      length > 0 ? { loaded: 0, total: length, source: 'network' } : null,
+      false,
+      '正在打开页面',
+      '按页读取，当前页显示后即可阅读',
+    );
+    const source = { ...pdfFileRequest(id, revision), length };
+    rangeSource = source;
+    fileBytes = null;
+    let task: PDFDocumentLoadingTask | undefined;
+    try {
+      task = getDocument(rangeOptions(source));
+      task.onProgress = (progress: { loaded?: number; total?: number }) => {
+        if (token !== loadToken) return;
+        const loaded = Number(progress?.loaded) || 0;
+        const total = Number(progress?.total) || length;
+        const percent = total > 0 ? Math.min(100, Math.round((loaded / total) * 100)) : 0;
+        showReading(
+          total > 0 ? { loaded, total, source: 'network' } : null,
+          false,
+          '正在打开页面',
+          total > 0
+            ? `已获取 ${formatBytes(loaded)} / ${formatBytes(total)}（${percent}%），按页读取，当前页显示后即可阅读`
+            : undefined,
+        );
+      };
+      const loaded = await task.promise;
+      if (token !== loadToken) {
+        await task.destroy();
+        if (rangeSource?.url === source.url) rangeSource = null;
+        if (openingToken === token) {
+          opening = false;
+          restoringView = false;
+        }
+        finishOpen(false);
+        return;
+      }
+      main.ready = false;
+      const previous = loadingTask;
+      loadingTask = task; pdf = loaded;
+      filename = name; documentId = id;
+      openedFingerprint = fp;
+      empty.remove();
+      viewEpoch += 1;
+      main.linkService.setDocument(loaded);
+      readingDoc = loaded;
+      showReading(null);
+      main.viewer.setDocument(loaded);
+      if (previous && !isParkedTask(previous)) await previous.destroy();
+      finishOpen(true);
+    } catch (e) {
+      if (token !== loadToken) {
+        if (openingToken === token) {
+          opening = false;
+          restoringView = false;
+        }
+        finishOpen(false);
+        return;
+      }
+      if (openingToken === token) {
+        opening = false;
+        restoringView = false;
+      }
+      fileBytes = null;
+      rangeSource = null;
+      openedFingerprint = '';
+      if (task && task !== loadingTask && !isParkedTask(task)) await task.destroy();
+      error('PDF 打开失败：' + String(e));
+      showReading(null, true);
       finishOpen(false);
     } finally {
       if (inflightOpen?.promise === promise) inflightOpen = null;
@@ -1793,22 +2698,36 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
     }
   }
   async function showEmpty(id = '', name = '') {
-    parkCurrentPdf();
-    main.ready = false; pdf = undefined; fileBytes = null; filename = name; documentId = id; selected = null; liveAnnots = [];
-    openedFingerprint = '';
+    await releaseOpenDocument();
+    filename = name; documentId = id; selected = null; liveAnnots = []; fileHighlights = [];
     setDownloadProgress(null);
-    const previous = loadingTask; loadingTask = undefined;
-    try { main.viewer.setDocument(null as never); } catch { /* viewer 无文档 */ }
+    stopIndexWatch();
     if (!empty.isConnected) main.scroller.prepend(empty);
-    if (previous && !isParkedTask(previous)) await previous.destroy();
     controls(); changed();
   }
+  window.addEventListener('office-pdf-upload', (event: Event) => {
+    const detail = (event as CustomEvent<PdfFileProgress>).detail;
+    if (!detail) return;
+    beginReading();
+    const total = detail.total;
+    const loaded = detail.loaded;
+    const percent = total && total > 0 ? Math.round((loaded / total) * 100) : 0;
+    const text = total && total > 0
+      ? `已发送 ${formatBytes(loaded)} / ${formatBytes(total)}（${percent}%）`
+      : `已发送 ${formatBytes(loaded)}`;
+    showReading(detail, false, '正在上传 PDF', text);
+  });
   input.onchange = async () => {
     const file = input.files?.[0];
     input.value = '';
     if (!file) return;
-    if (file.size > MAX_PDF) { error('MVP 支持 30 MB 以内的 PDF。'); return; }
-    try { await hooks.onPickFile(file); } catch (e) { error(e instanceof Error ? e.message : String(e)); }
+    if (file.size > MAX_PDF) { error('PDF 不能超过 200 MB。'); return; }
+    beginReading();
+    showReading(null, false, '正在准备上传', '等待发送文件…');
+    try { await hooks.onPickFile(file); } catch (e) {
+      showReading(null, true);
+      error(e instanceof Error ? e.message : String(e));
+    }
   };
   function goTo(number: number) {
     const pane = active();
@@ -1873,6 +2792,25 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
   fitWidth.onclick = () => fitToWidth();
   splitBtn.onclick = () => { void setSplit(!split); };
   notebookToggle.onclick = () => setNotebookOpen(notebookPanel.hidden);
+  translationToggle.onclick = () => { void setTranslationOpen(translationPanel.hidden); };
+  selectionTranslationToggle.onclick = () => setSelectionTranslationEnabled(!selectionTranslationEnabled);
+  selectionTranslationAction.addEventListener('mousedown', event => event.preventDefault());
+  selectionTranslationAction.onclick = () => translateSelection();
+  translatePageButton.onclick = () => { void translateCurrentPage(); };
+  translationPanel.querySelectorAll<HTMLButtonElement>('[data-translation-command]').forEach(button => {
+    button.addEventListener('mousedown', event => event.preventDefault());
+    button.onclick = () => {
+      if (!translationEditor || !translationEditor.isEditable) return;
+      const chain = translationEditor.chain().focus();
+      switch (button.dataset.translationCommand) {
+        case 'bold': chain.toggleBold().run(); break;
+        case 'italic': chain.toggleItalic().run(); break;
+        case 'heading': chain.toggleHeading({ level: 3 }).run(); break;
+        case 'bulletList': chain.toggleBulletList().run(); break;
+        case 'orderedList': chain.toggleOrderedList().run(); break;
+      }
+    };
+  });
   outlineToggle.onclick = () => {
     if (outlineBusy || !documentId) return;
     outlineBusy = true;
@@ -1913,6 +2851,7 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
   pageLinkButton.addEventListener('mousedown', event => event.preventDefault());
   pageLinkButton.onclick = openNotebookPageLinkDialog;
   window.addEventListener('pagehide', () => {
+    void flushTranslationSave();
     rememberView(true);
     rememberNotebookUi();
   });
@@ -1938,12 +2877,14 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
     persist: async () => {
       if (notebookEditor) queueNotebookSave(notebookEditor.getJSON());
       await flushNotebookSave();
+      await flushTranslationSave();
       rememberView(true);
       rememberNotebookUi();
     },
     async load(asset) {
       const token = ++loadToken;
       await flushNotebookSave();
+      await flushTranslationSave();
       if (token !== loadToken) return;
       rememberView(true);
       rememberNotebookUi();
@@ -1952,53 +2893,78 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
       if (split) await setSplit(false, 'main', false);
       if (!asset.id) {
         documentId = '';
+        translationEditorPage = 0;
         loadNotebook(EMPTY_NOTEBOOK, 0);
+        translation = { format: 'pdf-translation-v1', pages: {} };
+        await setTranslationOpen(false);
         setNotebookOpen(false, false);
         await showEmpty();
         return;
       }
       const fileName = asset.filename || `${asset.name}.pdf`;
+      if (documentId !== asset.id) {
+        translationEditorPage = 0;
+      }
       const sameReady = documentId === asset.id
         && assetRevision === asset.revision
         && !!pdf
+        && main.viewer.pdfDocument === pdf
         && main.ready
+        && openedFingerprint.startsWith(`${asset.id}:`)
         && (pdf.numPages || 0) > 0;
       if (sameReady) {
         filename = asset.name;
         loadNotebook(asset.content, asset.revision);
+        translation = translationDocument(asset.content);
+        if (translationOpen) renderTranslationPage();
         restoreAssetUi(asset.id);
+        showReading(null, true);
+        followIndex(asset.id, token);
         return;
+      }
+      if (documentId && documentId !== asset.id) {
+        await releaseOpenDocument();
+        if (token !== loadToken) return;
       }
       const parked = parkedPdfs.get(asset.id);
       if (parked && parked.revision === asset.revision) {
-        if (documentId && documentId !== asset.id) parkCurrentPdf();
+        documentId = asset.id;
         loadNotebook(asset.content, asset.revision);
+        translation = translationDocument(asset.content);
+        if (translationOpen) renderTranslationPage();
         restoreAssetUi(asset.id);
         await whenVisible();
         if (token !== loadToken) return;
         await activateParkedPdf(parked, token);
+        followIndex(asset.id, token);
         return;
-      }
-      if (documentId && documentId !== asset.id) {
-        parkCurrentPdf();
-        try { main.viewer.setDocument(null as never); } catch { /* viewer 无文档 */ }
       }
       documentId = asset.id;
       filename = asset.name;
       assetRevision = asset.revision;
       loadNotebook(asset.content, asset.revision);
+      translation = translationDocument(asset.content);
+      if (translationOpen) renderTranslationPage();
       restoreAssetUi(asset.id);
+      followIndex(asset.id, token);
       busy = true;
-      setDownloadProgress({ loaded: 0, total: asset.size || null, source: 'network' }, '正在准备 PDF');
+      beginReading();
+      showReading(null);
       try {
         await whenVisible();
         if (token !== loadToken) return;
+        const size = asset.size || 0;
+        if (size > RANGE_OPEN_BYTES) {
+          showReading(null);
+          await openRange(asset.id, fileName, asset.revision, size, token);
+          return;
+        }
         const data = await hooks.fetchFile(asset.id, {
           revision: asset.revision,
           expectedSize: asset.size,
           onProgress: progress => {
             if (token !== loadToken) return;
-            setDownloadProgress(progress);
+            showReading(progress);
           },
         });
         if (token !== loadToken) return;
@@ -2006,19 +2972,13 @@ export function mountPdf(container: HTMLElement, changed: () => void, hooks: {
           await showEmpty(asset.id, asset.name);
           return;
         }
-        setDownloadProgress({
-          loaded: data.byteLength,
-          total: data.byteLength,
-          source: 'cache',
-        }, '正在解析 PDF');
+        showReading(null);
         await openBuffer(asset.id, fileName, data, token);
       } catch (e) {
         if (token !== loadToken) return;
-        setDownloadProgress(null);
+        showReading(null, true);
         error(e instanceof Error ? e.message : String(e));
         await showEmpty(asset.id, asset.name);
-      } finally {
-        if (token === loadToken) setDownloadProgress(null);
       }
     },
   };

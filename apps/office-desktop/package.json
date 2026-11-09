@@ -6,15 +6,18 @@
   "main": "main.mjs",
   "scripts": {
     "start": "electron .",
+    "test": "node --test tests/*.test.mjs",
     "dev": "electron . --dev",
     "build:sidecar": "bash sidecar/build.sh",
-    "build:mcp-sidecar": "bash mcp-sidecar/build.sh",
-    "build:services": "npm run build:sidecar && npm run build:mcp-sidecar",
+    "build:services": "npm run build:sidecar",
     "build:desktop": "npm --prefix ../office-copilot-web run build && npm run build:services && npm run pack:mac",
-    "pack": "electron-builder --dir",
-    "pack:mac": "electron-builder --mac --dir",
-    "dist": "electron-builder --mac --win",
-    "dist:mac": "electron-builder --mac dmg",
+    "rebuild:install:mac": "bash scripts/rebuild-install-mac.sh",
+    "pack": "electron-builder --config electron-builder.config.cjs --dir",
+    "pack:mac": "electron-builder --config electron-builder.config.cjs --mac --dir",
+    "dist": "electron-builder --config electron-builder.config.cjs --mac --win",
+    "dist:mac": "electron-builder --config electron-builder.config.cjs --mac dmg",
+    "dist:win": "electron-builder --config electron-builder.config.cjs --win nsis --x64",
+    "build:windows": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows.ps1",
     "dist:mac:full": "npm run build:services && npm run dist:mac"
   },
   "build": {
@@ -27,9 +30,19 @@
     "icon": "build/icon.png",
     "files": [
       "main.mjs",
+      "service-processes.mjs",
+      "remote-config.mjs",
+      "backup-session.mjs",
+      "backup-transfer.mjs",
+      "service-url.cjs",
+      "background.mjs",
+      "update-policy.mjs",
+      "update-controller.mjs",
+      "update-window/**/*",
       "preload.cjs",
       "package.json",
-      "build/icon.png"
+      "build/icon.png",
+      "build/icon.ico"
     ],
     "extraResources": [
       {
@@ -39,13 +52,6 @@
       {
         "from": "sidecar/dist/youju-office-backend",
         "to": "sidecar/youju-office-backend",
-        "filter": [
-          "**/*"
-        ]
-      },
-      {
-        "from": "mcp-sidecar/dist/youju-mcp-server",
-        "to": "mcp-sidecar/youju-mcp-server",
         "filter": [
           "**/*"
         ]
@@ -63,12 +69,28 @@
     "win": {
       "icon": "build/icon.ico",
       "target": [
-        "nsis"
-      ]
+        { "target": "nsis", "arch": ["x64"] }
+      ],
+      "artifactName": "youjulab-${version}-win-${arch}-setup.${ext}",
+      "verifyUpdateCodeSignature": false
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "有据 youjulab",
+      "runAfterFinish": true,
+      "deleteAppDataOnUninstall": false
     }
   },
   "devDependencies": {
     "electron": "^33.2.0",
     "electron-builder": "^25.1.8"
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.11",
+    "semver": "^7.8.6"
   }
 }

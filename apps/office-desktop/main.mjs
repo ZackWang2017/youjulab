@@ -1,5 +1,11 @@
-import { app, BrowserWindow, dialog, ipcMain, nativeImage, safeStorage } from 'electron';
-import { execFile, spawn } from 'node:child_process';
+import { app, BrowserWindow, dialog, ipcMain, nativeImage, safeStorage, Tray, Menu, shell } from 'electron';
+import { execFile } from 'node:child_process';
+import { ServiceProcesses } from './service-processes.mjs';
+import { DEFAULT_REMOTE, remoteAddress, savedRemoteAddress } from './remote-config.mjs';
+import { BackupSession, backupUserKey } from './backup-session.mjs';
+import { createBackgroundTray, hideOnClose } from './background.mjs';
+import { UpdateController } from './update-controller.mjs';
+import { fileDigest, remoteBackupList, uploadBackup, downloadBackup, chooseBackup } from './backup-transfer.mjs';
 import { randomBytes } from 'node:crypto';
 import { promisify } from 'node:util';
 import fs from 'node:fs';
@@ -9,6 +15,11 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const isDev = process.argv.includes('--dev') || !app.isPackaged;
+// Keep development and installed builds on the same stable OS user-data directory.
+app.setPath('userData', path.join(app.getPath('appData'), 'youjulab-desktop'));
+const singleInstance = app.requestSingleInstanceLock();
+const exitOnly = process.argv.includes('--quit');
+if (!singleInstance || exitOnly) app.quit();
 
 function appIcon() {
   const candidates = [
@@ -24,17 +35,32 @@ function appIcon() {
 }
 
 let mainWindow = null;
+let tray = null;
+let updateController = null;
+let openingWindow = null;
 let backend = null;
 let backendPort = 0;
-let mcp = null;
-let mcpPort = 0;
 let backupTimer = null;
+const serviceProcesses = new ServiceProcesses();
+let stoppingServices = null;
+let quitRequested = false;
+let quitReady = false;
+let startupGeneration = 0;
 
 const execFileAsync = promisify(execFile);
 
-const DEFAULT_REMOTE = 'http://127.0.0.1:8000';
-const DEFAULT_MCP_PORT = 8000;
-const BACKUP_VERSION = 1;
+/** 固定本机 office-backend 端口，保证打包态同源，localStorage（上次页面）才能跨重启保留。 */
+const DEFAULT_OFFICE_PORT = 8100;
+const BACKUP_VERSION = 2;
+const backupSession = new BackupSession(() => readConfig().remoteBaseUrl);
+let backupBusy = false;
+let restoreBusy = false;
+let backupProgress = null;
+
+function emitBackupProgress(progress) {
+  backupProgress = { userKey: backupSession.identity ? backupUserKey(backupSession.identity) : '', progress };
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('youju:backup-progress', progress);
+}
 /** repo = 与开发 .env 共用仓库 data/；userData = 独立副本（外发安装包默认）。 */
 
 function findRepoRoot() {
@@ -83,6 +109,12 @@ function backupDirectory(config = readConfig()) {
   return path.resolve(String(config.backupDir || backupPaths().defaultDir));
 }
 
+function backupPreferences(identity, config = readConfig()) {
+  const saved = config.backupUsers?.[backupUserKey(identity)];
+  return { directory: saved?.directory || backupDirectory(config),
+    enabled: saved?.enabled ?? (config.backupEnabled !== false) };
+}
+
 function repoDataPaths() {
   if (!repoRoot) return null;
   const local = path.join(repoRoot, 'data', 'office-local');
@@ -113,18 +145,13 @@ function normalizeDataMode(value) {
   return 'userData';
 }
 
-function normalizeMcpPort(value) {
+function normalizeOfficePort(value) {
   const port = Number(value);
-  return Number.isInteger(port) && port >= 1024 && port <= 65535 ? port : DEFAULT_MCP_PORT;
+  return Number.isInteger(port) && port >= 1024 && port <= 65535 ? port : DEFAULT_OFFICE_PORT;
 }
 
 function newServiceSecret() {
   return randomBytes(32).toString('base64url');
-}
-
-function normalizeServiceSecret(value) {
-  const secret = String(value || '').trim();
-  return secret.length >= 32 ? secret : newServiceSecret();
 }
 
 /** 从仓库 .env 读取单项（打包态找不到仓库时返回空）。 */
@@ -180,40 +207,43 @@ function readConfig() {
   try {
     const saved = JSON.parse(fs.readFileSync(paths.config, 'utf8'));
     return {
-      remoteBaseUrl: String(saved.remoteBaseUrl || DEFAULT_REMOTE).replace(/\/$/, ''),
+      remoteBaseUrl: savedRemoteAddress(saved),
+      remoteServiceVersion: 1,
+      deviceId: /^[a-f0-9]{32}$/.test(saved.deviceId || '') ? saved.deviceId : randomBytes(16).toString('hex'),
       pdfDir: String(saved.pdfDir || ''),
       dataMode: normalizeDataMode(saved.dataMode),
       // 仅主进程读取此字段；密码密文不会经 publicConfig 发送到渲染进程。
       lastLoginEmail: String(saved.lastLoginEmail || '').trim().toLowerCase(),
       autoLogin: Boolean(saved.autoLogin),
       autoLoginPassword: String(saved.autoLoginPassword || ''),
-      mcpPort: normalizeMcpPort(saved.mcpPort),
-      mcpAccessToken: normalizeServiceSecret(saved.mcpAccessToken),
-      mcpJwtSecret: normalizeServiceSecret(saved.mcpJwtSecret),
+      officePort: normalizeOfficePort(saved.officePort),
       backupDir: String(saved.backupDir || ''),
       backupEnabled: saved.backupEnabled !== false,
       backupIdentity: saved.backupIdentity && typeof saved.backupIdentity === 'object'
         ? { email: String(saved.backupIdentity.email || '').trim().toLowerCase(), accountId: String(saved.backupIdentity.accountId || '') }
         : (saved.backupCredential?.email ? { email: String(saved.backupCredential.email).trim().toLowerCase(), accountId: '' } : null),
       lastBackupAt: String(saved.lastBackupAt || ''),
+      backupTimes: saved.backupTimes && typeof saved.backupTimes === 'object' ? saved.backupTimes : {},
+      backupUsers: saved.backupUsers && typeof saved.backupUsers === 'object' ? saved.backupUsers : {},
       // 仅主进程使用；不进入 publicConfig。
       modelCredentialsKey: String(saved.modelCredentialsKey || '').trim(),
     };
   } catch {
     return {
       remoteBaseUrl: DEFAULT_REMOTE,
+      deviceId: randomBytes(16).toString('hex'),
       pdfDir: '',
       dataMode: defaultDataMode(),
       lastLoginEmail: '',
       autoLogin: false,
       autoLoginPassword: '',
-      mcpPort: DEFAULT_MCP_PORT,
-      mcpAccessToken: newServiceSecret(),
-      mcpJwtSecret: newServiceSecret(),
+      officePort: DEFAULT_OFFICE_PORT,
       backupDir: '',
       backupEnabled: true,
       backupIdentity: null,
       lastBackupAt: '',
+      backupTimes: {},
+      backupUsers: {},
       modelCredentialsKey: '',
     };
   }
@@ -237,21 +267,22 @@ function writeConfig(config) {
   const paths = userDataPaths();
   const prev = readConfig();
   const next = {
-    remoteBaseUrl: String((config?.remoteBaseUrl ?? prev.remoteBaseUrl) || DEFAULT_REMOTE).replace(/\/$/, '') || DEFAULT_REMOTE,
+    remoteBaseUrl: remoteAddress(config?.remoteBaseUrl ?? prev.remoteBaseUrl),
+    remoteServiceVersion: 1,
+    deviceId: config?.deviceId ?? prev.deviceId,
     pdfDir: String(config?.pdfDir ?? prev.pdfDir ?? ''),
     dataMode: normalizeDataMode(config?.dataMode ?? prev.dataMode),
     lastLoginEmail: String(config?.lastLoginEmail ?? prev.lastLoginEmail ?? '').trim().toLowerCase(),
     autoLogin: Boolean(config?.autoLogin ?? prev.autoLogin),
     // 只由 saveLoginPreference 写入；普通设置保存始终沿用已有密文。
     autoLoginPassword: String(config?.autoLoginPassword ?? prev.autoLoginPassword ?? ''),
-    mcpPort: normalizeMcpPort(config?.mcpPort ?? prev.mcpPort),
-    // 仅 Electron 主进程写入；不会透传给渲染进程或前端配置界面。
-    mcpAccessToken: normalizeServiceSecret(config?.mcpAccessToken ?? prev.mcpAccessToken),
-    mcpJwtSecret: normalizeServiceSecret(config?.mcpJwtSecret ?? prev.mcpJwtSecret),
+    officePort: normalizeOfficePort(config?.officePort ?? prev.officePort),
     backupDir: String(config?.backupDir ?? prev.backupDir ?? '').trim(),
     backupEnabled: config?.backupEnabled !== false,
     backupIdentity: config?.backupIdentity ?? prev.backupIdentity ?? null,
     lastBackupAt: String(config?.lastBackupAt ?? prev.lastBackupAt ?? ''),
+    backupTimes: config?.backupTimes ?? prev.backupTimes ?? {},
+    backupUsers: config?.backupUsers ?? prev.backupUsers ?? {},
     modelCredentialsKey: String(config?.modelCredentialsKey ?? prev.modelCredentialsKey ?? '').trim(),
   };
   fs.mkdirSync(paths.root, { recursive: true });
@@ -309,103 +340,164 @@ function backupStamp(now = new Date()) {
 
 function backupFilename(kind = 'scheduled') {
   const suffix = kind === 'pre-restore' ? '-恢复前' : '';
-  return `youjulab-backup-${backupStamp()}${suffix}${process.platform === 'win32' ? '.zip' : '.tar.gz'}`;
+  return `youjulab-backup-${backupStamp()}-${randomBytes(4).toString('hex')}${suffix}${process.platform === 'win32' ? '.zip' : '.tar.gz'}`;
 }
 
-async function sqliteSnapshot(source, target) {
-  if (!fs.existsSync(source)) return false;
-  fs.mkdirSync(path.dirname(target), { recursive: true });
-  // sqlite .backup 会处理 WAL，避免直接复制活跃数据库导致快照不一致。
-  await execFileAsync('sqlite3', [source, `.backup '${target.replace(/'/g, "''")}'`]);
-  return true;
+async function userBackupCommand(operation, data, identity, directory) {
+  const params = [operation, '--office', data.sqlite, '--vectors', data.vectors,
+    '--files', data.files, '--email', identity.email, '--account-id', identity.id, '--directory', directory];
+  const sidecar = resolveSidecarBinary();
+  const command = sidecar || resolvePython();
+  const args = sidecar ? ['--user-backup', ...params]
+    : [path.join(repoRoot, 'apps', 'office-backend', 'user_backup.py'), ...params];
+  const result = await execFileAsync(command, args, { timeout: 600000 });
+  return JSON.parse(result.stdout);
 }
 
-function sqlQuote(value) {
-  return `'${String(value ?? '').replace(/'/g, "''")}'`;
+function userBackupDirectory(identity) {
+  return path.join(backupPreferences(identity).directory, backupUserKey(identity));
 }
 
-async function currentAccountSnapshot(database, accountId) {
-  if (!accountId || !fs.existsSync(database)) return null;
-  const sql = `SELECT id, email, password_hash, os_username, created_at FROM accounts WHERE id = ${sqlQuote(accountId)} LIMIT 1;`;
-  const { stdout } = await execFileAsync('sqlite3', ['-json', database, sql]);
-  const rows = JSON.parse(stdout || '[]');
-  return rows[0] || null;
-}
 
-async function restoreCurrentAccount(database, account) {
-  if (!account?.id || !account?.email || !account?.password_hash) return;
-  const sql = `INSERT OR REPLACE INTO accounts (id, email, password_hash, os_username, created_at) VALUES (${sqlQuote(account.id)}, ${sqlQuote(account.email)}, ${sqlQuote(account.password_hash)}, ${sqlQuote(account.os_username)}, ${sqlQuote(account.created_at)});`;
-  await execFileAsync('sqlite3', [database, sql]);
+async function backupArchiveCommand(flag, source, target) {
+  const sidecar = resolveSidecarBinary();
+  const args = sidecar ? [flag, source, target]
+    : [path.join(repoRoot, 'apps', 'office-backend', 'desktop_data.py'), flag, source, target];
+  await execFileAsync(sidecar || resolvePython(), args, { timeout: 600000 });
 }
 
 async function archiveDirectory(source, target) {
-  if (process.platform === 'win32') {
-    await execFileAsync('powershell.exe', ['-NoProfile', '-Command', `Compress-Archive -Path '${source.replace(/'/g, "''")}\\*' -DestinationPath '${target.replace(/'/g, "''")}' -Force`]);
-    return;
-  }
-  await execFileAsync('tar', ['-czf', target, '-C', source, '.']);
+  await backupArchiveCommand('--archive-backup', source, target);
 }
 
 async function extractArchive(source, target) {
-  fs.mkdirSync(target, { recursive: true });
-  if (process.platform === 'win32') {
-    await execFileAsync('powershell.exe', ['-NoProfile', '-Command', `Expand-Archive -Path '${source.replace(/'/g, "''")}' -DestinationPath '${target.replace(/'/g, "''")}' -Force`]);
-    return;
-  }
-  await execFileAsync('tar', ['-xzf', source, '-C', target]);
+  await backupArchiveCommand('--extract-backup', source, target);
 }
 
 function clearDir(directory) {
   fs.rmSync(directory, { recursive: true, force: true });
-  fs.mkdirSync(directory, { recursive: true });
+  fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
 }
 
-async function createBackup(kind = 'scheduled', report = () => {}) {
-  const config = readConfig();
-  const identity = config.backupIdentity;
-  if (!identity?.email) throw new Error('请先成功登录一次，再启用数据备份。');
-  const data = resolveDataPaths(config);
-  const destination = backupDirectory(config);
-  const work = backupPaths().work;
-  const stage = path.join(work, `stage-${backupStamp()}`);
+function adminBase() {
+  const metadata = JSON.parse(fs.readFileSync(path.join(__dirname, 'package.json'), 'utf8'));
+  return metadata.adminBaseUrl || metadata.releaseBaseUrl
+    || (isDev ? process.env.YOUJU_ADMIN_BASE_URL || readRepoDotEnv('YOUJU_ADMIN_BASE_URL') : '') || '';
+}
+
+async function catalog(identity, operation, record = {}) {
+  const data = resolveDataPaths();
+  const payload = { ...record, userKey: backupUserKey(identity), deviceId: readConfig().deviceId };
+  const args = ['--database', data.sqlite, '--operation', operation, '--payload', JSON.stringify(payload)];
+  const sidecar = resolveSidecarBinary();
+  const result = await execFileAsync(sidecar || resolvePython(), sidecar ? ['--backup-catalog', ...args]
+    : [path.join(repoRoot, 'apps', 'office-backend', 'backup_catalog.py'), ...args], { timeout: 60000 });
+  return JSON.parse(result.stdout);
+}
+
+async function syncBackupRecords(identity, report = () => {}) {
+  let records = await catalog(identity, 'list');
+  // Index existing local archives once, without uploading or rewriting legacy archives.
+  const directory = userBackupDirectory(identity);
+  if (fs.existsSync(directory)) {
+    const known = new Set(records.filter(r => ['local','synced','remote','upload_failed'].includes(r.state)).map(r => r.name));
+    const files = fs.readdirSync(directory).filter(n => n.startsWith('youjulab-backup-')
+      && /\\.(zip|tar\\.gz)$/.test(n) && !known.has(n)).sort();
+    for (const name of files) {
+      try {
+        const old = await readBackupRecord(path.join(directory, name));
+        if (old.email !== identity.email || old.accountId !== identity.id || old.server !== identity.server) continue;
+        const digest = await fileDigest(old.path);
+        const row = old.backupId && old.clientVersion
+          ? { ...old, id: old.backupId, version: old.clientVersion, legacy: false }
+          : { ...old, ...await catalog(identity, 'reserve', { id: 'legacy-' + randomBytes(16).toString('hex') }), legacy: true };
+        await catalog(identity, 'save', { ...row, ...digest, state: 'local', remote: false });
+      } catch { /* Invalid or foreign archives are not offered for restore. */ }
+    }
+  }
+  let warning = '';
+  if (adminBase()) {
+    report({ phase: 'checking-remote', percent: 8, message: '正在核对服务器备份版本…' });
+    try {
+      const remote = await remoteBackupList(adminBase(), backupSession.token, readConfig().deviceId);
+      records = await catalog(identity, 'list');
+      for (const row of remote) {
+        if (row.device_id !== readConfig().deviceId) throw new Error('服务器返回了其他设备的备份记录。');
+        const local = records.find(r => r.id === row.id);
+        if (local && (local.version !== row.client_version || local.sha256 !== row.sha256 || local.size !== row.size)) {
+          throw new Error('本地记录与服务器校验值不一致，请联系管理员。');
+        }
+        await catalog(identity, 'save', { ...local, id: row.id, name: row.name, version: row.client_version,
+          createdAt: row.created_at, kind: row.kind, size: row.size, sha256: row.sha256,
+          remote: true, state: local?.path && fs.existsSync(local.path) ? 'synced' : 'remote' });
+      }
+    } catch (error) { warning = '暂时无法核对服务器备份：' + String(error.message || error); }
+  } else { warning = '尚未配置在线管理地址，目前仅使用本地备份。'; }
+  records = (await catalog(identity, 'list')).filter(r => ['local','synced','remote','upload_failed'].includes(r.state));
+  return { records, warning };
+}
+
+async function syncOneBackup(identity, record, report = () => {}) {
+  if (record.legacy) throw new Error('旧备份保留为本地历史记录，请新建一次备份后上传。');
+  const actual = await fileDigest(record.path);
+  if (actual.sha256 !== record.sha256 || actual.size !== record.size) throw new Error('本地备份文件已变化，请重新创建备份。');
+  await uploadBackup(adminBase(), backupSession.token, record, percent => report({
+    phase: 'uploading', percent: 72 + percent * .26, message: '本地备份已保存，正在上传服务器（' + Math.round(percent) + '%）…' }));
+  return catalog(identity, 'save', { ...record, state: 'synced', remote: true, uploadError: '' });
+}
+
+async function createBackup(kind = 'scheduled', report = emitBackupProgress, identity = null) {
+  if (backupBusy || (restoreBusy && kind !== 'pre-restore')) throw new Error('备份或恢复正在进行，请稍候。');
+  identity ||= await backupSession.current();
+  if (backupBusy || (restoreBusy && kind !== 'pre-restore')) throw new Error('备份或恢复正在进行，请稍候。');
+  backupBusy = true;
+  const data = resolveDataPaths();
+  const stage = path.join(backupPaths().work, 'stage-' + randomBytes(12).toString('hex'));
+  const destination = userBackupDirectory(identity);
   const archive = path.join(destination, backupFilename(kind));
-  fs.mkdirSync(destination, { recursive: true });
-  clearDir(stage);
+  let record, localSaved = false;
   try {
-    report({ phase: 'preparing', percent: 8, message: '正在准备备份…' });
-    const dataDir = path.join(stage, 'data');
-    fs.mkdirSync(dataDir, { recursive: true });
-    report({ phase: 'office', percent: 22, message: '正在备份办公数据…' });
-    const files = {
-      office: await sqliteSnapshot(data.sqlite, path.join(dataDir, 'office.sqlite')),
-      vectors: false,
-      finance: false,
-    };
-    report({ phase: 'vectors', percent: 42, message: '正在备份 PDF 索引…' });
-    files.vectors = await sqliteSnapshot(data.vectors, path.join(dataDir, 'office-vectors.sqlite'));
-    report({ phase: 'finance', percent: 60, message: '正在备份持仓数据…' });
-    files.finance = await sqliteSnapshot(data.finance, path.join(dataDir, 'finresearch.sqlite'));
-    report({ phase: 'files', percent: 76, message: '正在整理 PDF 文件…' });
-    if (fs.existsSync(data.files)) fs.cpSync(data.files, path.join(dataDir, 'office-files'), { recursive: true, force: true });
-    const manifest = {
-      version: BACKUP_VERSION,
-      createdAt: new Date().toISOString(),
-      kind,
-      account: { email: identity.email, accountId: identity.accountId || '' },
-      files,
-    };
+    await syncBackupRecords(identity, report);
+    record = await catalog(identity, 'reserve', { id: randomBytes(16).toString('hex'),
+      name: path.basename(archive), path: archive, createdAt: new Date().toISOString(), kind });
+    fs.mkdirSync(destination, { recursive: true, mode: 0o700 });
+    clearDir(stage);
+    report({ phase: 'office', percent: 15, message: '正在整理当前账号的本地数据、PDF 和索引…' });
+    const result = await userBackupCommand('export', data, identity, path.join(stage, 'data'));
+    const manifest = { version: BACKUP_VERSION, scope: 'local-user', createdAt: record.createdAt,
+      kind, server: identity.server, account: { email: identity.email, accountId: identity.id },
+      localUserId: result.localUserId, backupId: record.id, deviceId: record.deviceId, clientVersion: record.version };
     fs.writeFileSync(path.join(stage, 'manifest.json'), JSON.stringify(manifest, null, 2));
-    report({ phase: 'archiving', percent: 90, message: '正在压缩备份文件…' });
+    report({ phase: 'archiving', percent: 45, message: '正在压缩备份并保存到本地目录…' });
     await archiveDirectory(stage, archive);
-    writeConfig({ ...config, lastBackupAt: manifest.createdAt });
-    const result = { id: path.basename(archive), name: path.basename(archive), createdAt: manifest.createdAt, kind, path: archive };
-    report({ phase: 'done', percent: 100, message: '备份完成。' });
-    return result;
+    fs.chmodSync(archive, 0o600);
+    const current = await backupSession.current();
+    if (backupUserKey(current) !== backupUserKey(identity)) throw new Error('账号已切换，本次备份已取消。');
+    report({ phase: 'verifying-local', percent: 65, message: '本地文件已保存，正在计算文件校验值…' });
+    localSaved = true;
+    record = await catalog(identity, 'save', { ...record, ...await fileDigest(archive), state: 'local', remote: false });
+    const latest = readConfig();
+    writeConfig({ ...latest, backupTimes: { ...latest.backupTimes, [backupUserKey(identity)]: record.createdAt } });
+    let warning = '';
+    try {
+      record = await syncOneBackup(identity, record, report);
+    } catch (error) {
+      warning = '本地备份已成功保存，但上传尚未完成。' + String(error.message || error);
+      record = await catalog(identity, 'save', { ...record, state: 'upload_failed', uploadError: warning });
+    }
+    report({ phase: warning ? 'warning' : 'done', percent: 100,
+      message: warning || '备份完成：本地与服务器均已保存。' });
+    return { ...record, warning };
   } catch (error) {
-    report({ phase: 'error', percent: 0, message: error instanceof Error ? error.message : String(error) });
+    if (!localSaved) {
+      fs.rmSync(archive, { force: true });
+      if (record) await catalog(identity, 'save', { ...record, state: 'failed' }).catch(() => {});
+    }
+    report({ phase: 'error', percent: 0, message: String(error?.message || error) });
     throw error;
   } finally {
     fs.rmSync(stage, { recursive: true, force: true });
+    backupBusy = false;
   }
 }
 
@@ -415,36 +507,18 @@ async function readBackupRecord(file) {
   try {
     await extractArchive(file, stage);
     const manifest = JSON.parse(fs.readFileSync(path.join(stage, 'manifest.json'), 'utf8'));
-    if (manifest?.version !== BACKUP_VERSION || !manifest?.account?.email) throw new Error('不是有效的有据数据备份。');
-    return { id: path.basename(file), name: path.basename(file), createdAt: String(manifest.createdAt || ''), kind: String(manifest.kind || 'scheduled'), email: String(manifest.account.email || ''), path: file };
+    if (manifest?.version !== BACKUP_VERSION || manifest.scope !== 'local-user' || !manifest?.account?.email) throw new Error('不是用户隔离备份。');
+    return { id: path.basename(file), name: path.basename(file), createdAt: String(manifest.createdAt || ''), kind: String(manifest.kind || 'scheduled'), email: String(manifest.account.email || ''), accountId: String(manifest.account.accountId || ''), server: String(manifest.server || ''), path: file, backupId: manifest.backupId, clientVersion: manifest.clientVersion };
   } finally {
     fs.rmSync(stage, { recursive: true, force: true });
   }
 }
 
-async function listBackups(email = '') {
-  const directory = backupDirectory();
-  if (!fs.existsSync(directory)) return [];
-  const requested = String(email || '').trim().toLowerCase();
-  const entries = fs.readdirSync(directory, { withFileTypes: true })
-    .filter(entry => entry.isFile() && entry.name.startsWith('youjulab-backup-') && (entry.name.endsWith('.tar.gz') || entry.name.endsWith('.zip')))
-    .map(entry => path.join(directory, entry.name));
-  const records = [];
-  for (const file of entries) {
-    try {
-      const record = await readBackupRecord(file);
-      if (!requested || record.email === requested) records.push(record);
-    } catch {
-      // 无法读取的手工文件不作为可恢复记录展示。
-    }
-  }
-  return records.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-}
-
 function scheduleBackups() {
   if (backupTimer) clearTimeout(backupTimer);
   const config = readConfig();
-  if (config.backupEnabled === false || !config.backupIdentity?.email || !config.backupDir) return;
+  const identity = backupSession.identity;
+  if (!identity || !backupSession.token || !backupPreferences(identity, config).enabled) return;
   const now = new Date();
   const next = new Date(now);
   next.setSeconds(0, 0);
@@ -458,42 +532,65 @@ function scheduleBackups() {
   }, Math.max(1_000, next.getTime() - Date.now()));
 }
 
-async function restoreBackup(value) {
-  const id = path.basename(String(value?.id || ''));
-  const email = String(value?.email || '').trim().toLowerCase();
-  const accountId = String(value?.accountId || '');
-  const records = await listBackups(email);
-  const record = records.find(item => item.id === id);
-  if (!record) throw new Error('找不到可恢复的备份记录。');
-  const work = backupPaths().work;
-  const stage = path.join(work, `restore-${randomBytes(8).toString('hex')}`);
+async function restoreBackup(value, report = () => {}) {
+  if (backupBusy || restoreBusy) throw new Error('备份或恢复正在进行，请稍候。');
+  report({ phase: 'authenticating', percent: 2, message: '正在验证当前账号…' });
+  const identity = await backupSession.current();
+  const confirmed = await backupSession.verify(String(value?.token || ''));
+  if (confirmed.id !== identity.id || confirmed.email !== identity.email || confirmed.server !== identity.server) {
+    throw new Error('恢复验证账号与当前登录账号不一致。');
+  }
+  const status = await syncBackupRecords(identity, report);
+  if (value?.id === 'latest' && adminBase() && status.warning) {
+    throw new Error('暂时无法确认服务器最新备份，请联网后重试；也可以明确选择一份本地历史备份。');
+  }
+  let record = chooseBackup(status.records, String(value?.id || 'latest'));
+  const stage = path.join(backupPaths().work, 'restore-' + randomBytes(12).toString('hex'));
+  if (restoreBusy || backupBusy) throw new Error('备份或恢复正在进行，请稍候。');
+  restoreBusy = true;
   try {
+    report({ phase: 'checking-local', percent: 15, message: '正在核对本地备份文件是否完整…' });
+    let usable = false;
+    if (record.path && fs.existsSync(record.path)) {
+      const digest = await fileDigest(record.path);
+      usable = digest.sha256 === record.sha256 && digest.size === record.size;
+    }
+    if (!usable) {
+      if (!record.remote) throw new Error('本地备份缺失或损坏，且没有服务器副本，已停止恢复。');
+      const directory = userBackupDirectory(identity);
+      fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+      const target = path.join(directory, record.name);
+      report({ phase: 'downloading', percent: 20, message: '本地没有完整的所选版本，正在从服务器下载…' });
+      await downloadBackup(adminBase(), backupSession.token, record, target, percent => report({
+        phase: 'downloading', percent: 20 + percent * .3, message: '正在下载并校验服务器备份（' + Math.round(percent) + '%）…' }));
+      record = await catalog(identity, 'save', { ...record, path: target, state: 'synced' });
+    } else {
+      report({ phase: 'using-local', percent: 50, message: '本地备份已通过校验，将直接使用，无需重复下载。' });
+    }
+    report({ phase: 'extracting', percent: 55, message: '正在解压并核对备份归属…' });
     await extractArchive(record.path, stage);
     const manifest = JSON.parse(fs.readFileSync(path.join(stage, 'manifest.json'), 'utf8'));
-    if (manifest?.account?.email !== email || (manifest?.account?.accountId && manifest.account.accountId !== accountId)) {
-      throw new Error('当前账号与该备份不一致，无法恢复。');
+    if (manifest.version !== BACKUP_VERSION || manifest.scope !== 'local-user'
+      || manifest.account.email !== identity.email || manifest.account.accountId !== identity.id
+      || manifest.server !== identity.server) throw new Error('备份不属于当前登录用户。');
+    if (!record.legacy && (manifest.backupId !== record.id || manifest.clientVersion !== record.version || manifest.deviceId !== readConfig().deviceId)) {
+      throw new Error('备份内容与本地记录不一致，已停止恢复。');
     }
-    const data = resolveDataPaths(readConfig());
-    const currentAccount = await currentAccountSnapshot(data.finance, accountId);
-    if (!currentAccount) throw new Error('未找到当前已验证账号，无法安全恢复。');
-    await createBackup('pre-restore');
-    stopServices();
-    const source = path.join(stage, 'data');
-    for (const name of ['office.sqlite', 'office-vectors.sqlite', 'finresearch.sqlite']) {
-      const from = path.join(source, name);
-      const to = name === 'office.sqlite' ? data.sqlite : name === 'office-vectors.sqlite' ? data.vectors : data.finance;
-      if (!fs.existsSync(from)) throw new Error(`备份缺少 ${name}。`);
-      fs.mkdirSync(path.dirname(to), { recursive: true });
-      fs.copyFileSync(from, to);
-      for (const suffix of ['-wal', '-shm']) fs.rmSync(`${to}${suffix}`, { force: true });
-    }
-    // 持仓库包含账号表。保留当前账户记录，避免恢复旧备份后密码被回滚。
-    await restoreCurrentAccount(data.finance, currentAccount);
-    fs.rmSync(data.files, { recursive: true, force: true });
-    if (fs.existsSync(path.join(source, 'office-files'))) fs.cpSync(path.join(source, 'office-files'), data.files, { recursive: true, force: true });
+    report({ phase: 'pre-restore', percent: 62, message: '正在保存恢复前备份，保障当前数据可回退…' });
+    await createBackup('pre-restore', progress => report({ ...progress, percent: 62 + progress.percent * .2,
+      message: '恢复前保护：' + progress.message }), identity);
+    const current = await backupSession.current();
+    if (backupUserKey(current) !== backupUserKey(identity)) throw new Error('账号已切换，本次恢复已取消。');
+    backupBusy = true;
+    report({ phase: 'restoring', percent: 85, message: '正在停止本地服务并恢复当前账号数据，其他账号不受影响…' });
+    await stopServices();
+    await userBackupCommand('restore', resolveDataPaths(), identity, path.join(stage, 'data'));
+    report({ phase: 'done', percent: 100, message: '恢复完成，应用即将重新启动。' });
     return { ok: true, restartRequired: true };
   } finally {
     fs.rmSync(stage, { recursive: true, force: true });
+    backupBusy = false;
+    restoreBusy = false;
   }
 }
 
@@ -589,16 +686,17 @@ function pickPort() {
   });
 }
 
-/** 打包进 Resources 的 PyInstaller onedir 可执行文件。 */
+/** 打包进 Resources 的 PyInstaller onedir 可执行文件。开发态（--dev）默认跳过，直接跑仓库源码。 */
 function resolveSidecarBinary() {
   if (process.env.YOUJU_SIDECAR) {
     const explicit = path.resolve(process.env.YOUJU_SIDECAR);
     if (fs.existsSync(explicit)) return explicit;
   }
+  // 纯壳开发：改 Python 立刻生效；需要验证 sidecar 时设 YOUJU_USE_SIDECAR=1
+  if (isDev && process.env.YOUJU_USE_SIDECAR !== '1') return null;
   const name = process.platform === 'win32' ? 'youju-office-backend.exe' : 'youju-office-backend';
   const candidates = [
     path.join(process.resourcesPath || '', 'sidecar', 'youju-office-backend', name),
-    // 开发时直接跑已构建的 sidecar
     path.join(__dirname, 'sidecar', 'dist', 'youju-office-backend', name),
   ];
   for (const candidate of candidates) {
@@ -607,26 +705,11 @@ function resolveSidecarBinary() {
   return null;
 }
 
-function resolveMcpSidecarBinary() {
-  if (process.env.YOUJU_MCP_SIDECAR) {
-    const explicit = path.resolve(process.env.YOUJU_MCP_SIDECAR);
-    if (fs.existsSync(explicit)) return explicit;
-  }
-  const name = process.platform === 'win32' ? 'youju-mcp-server.exe' : 'youju-mcp-server';
-  const candidates = [
-    path.join(process.resourcesPath || '', 'mcp-sidecar', 'youju-mcp-server', name),
-    path.join(__dirname, 'mcp-sidecar', 'dist', 'youju-mcp-server', name),
-  ];
-  for (const candidate of candidates) {
-    if (fs.existsSync(candidate)) return candidate;
-  }
-  return null;
-}
 
 function resolvePython() {
   if (process.env.YOUJU_PYTHON) return process.env.YOUJU_PYTHON;
   if (repoRoot) {
-    const venvPy = path.join(repoRoot, '.venv', 'bin', process.platform === 'win32' ? 'python.exe' : 'python');
+    const venvPy = path.join(repoRoot, '.venv', process.platform === 'win32' ? 'Scripts' : 'bin', process.platform === 'win32' ? 'python.exe' : 'python');
     if (fs.existsSync(venvPy)) return venvPy;
   }
   return process.platform === 'win32' ? 'python' : 'python3';
@@ -644,64 +727,18 @@ function webDistDir() {
   return '';
 }
 
-function startMcp(port, officePort, config) {
-  const data = resolveDataPaths(config);
-  fs.mkdirSync(path.dirname(data.finance), { recursive: true });
-  const env = {
-    ...process.env,
-    FINANCE_MCP_TRANSPORT: 'http',
-    FINANCE_MCP_HOST: '127.0.0.1',
-    FINANCE_MCP_PORT: String(port),
-    OFFICE_API_URL: `http://127.0.0.1:${officePort}`,
-    MCP_ACCESS_TOKEN: config.mcpAccessToken,
-    ACCOUNT_JWT_SECRET: config.mcpJwtSecret,
-    MCP_DESKTOP: '1',
-    FINANCE_STORE: 'sqlite',
-    FINANCE_SQLITE_PATH: data.finance,
-  };
-  const sidecar = resolveMcpSidecarBinary();
-  let command;
-  let args;
-  let cwd;
-  if (sidecar) {
-    console.log(`[youju] mcp=sidecar ${sidecar}`);
-    command = sidecar;
-    args = [];
-    cwd = path.dirname(sidecar);
-  } else {
-    if (!repoRoot) {
-      throw new Error('未找到 MCP Python sidecar，也找不到仓库。请先运行 npm run build:mcp-sidecar，或设置 YOUJU_REPO_ROOT / YOUJU_PYTHON。');
-    }
-    command = resolvePython();
-    args = [path.join(repoRoot, 'mcp-server', 'server.py')];
-    cwd = repoRoot;
-    console.log(`[youju] mcp=python ${command}`);
-  }
-  mcp = spawn(command, args, {
-    cwd,
-    env,
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  mcp.stdout?.on('data', chunk => process.stdout.write(`[mcp-server] ${chunk}`));
-  mcp.stderr?.on('data', chunk => process.stderr.write(`[mcp-server] ${chunk}`));
-  mcp.on('exit', code => {
-    console.error(`mcp-server exited: ${code}`);
-    mcp = null;
-  });
-  return mcp;
-}
 
-async function selectMcpPort(config) {
-  const requested = normalizeMcpPort(config.mcpPort);
+async function selectOfficePort(config) {
+  const requested = normalizeOfficePort(config.officePort);
   if (await portAvailable(requested)) return requested;
   const fallback = await pickPort();
-  console.warn(`[youju] MCP port ${requested} is occupied, using ${fallback}`);
-  writeConfig({ ...config, mcpPort: fallback });
-  config.mcpPort = fallback;
+  console.warn(`[youju] office port ${requested} is occupied, using ${fallback}`);
+  writeConfig({ ...config, officePort: fallback });
+  config.officePort = fallback;
   return fallback;
 }
 
-function startBackend(port, config, localMcpBase) {
+function startBackend(port, config) {
   const data = resolveDataPaths(config);
   fs.mkdirSync(path.dirname(data.sqlite), { recursive: true });
   fs.mkdirSync(path.dirname(data.vectors), { recursive: true });
@@ -720,12 +757,11 @@ function startBackend(port, config, localMcpBase) {
     OFFICE_API_HOST: '127.0.0.1',
     OFFICE_API_PORT: String(port),
     OFFICE_DESKTOP: '1',
+    OFFICE_DESKTOP_CONFIG: userDataPaths().config,
     LLM_CONFIG_SET: llmMode,
     OFFICE_MODEL_CREDENTIALS_KEY: modelKey,
-    // 桌面版的账户、持仓和行情服务都由同一 MCP 子进程提供，不能回落到历史默认的 8000。
-    MCP_REMOTE_BASE_URL: localMcpBase,
-    MCP_LOCAL_BASE_URL: localMcpBase,
-    MCP_ACCESS_TOKEN: config.mcpAccessToken,
+    MCP_REMOTE_BASE_URL: config.remoteBaseUrl,
+    MCP_LOCAL_BASE_URL: config.remoteBaseUrl,
   };
   if (webDist) env.OFFICE_WEB_DIST = webDist;
 
@@ -751,16 +787,17 @@ function startBackend(port, config, localMcpBase) {
   }
   console.log(`[youju] dataMode=${data.mode} sqlite=${data.sqlite}`);
 
-  backend = spawn(command, args, {
+  backend = serviceProcesses.spawn(command, args, {
     cwd,
     env,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   backend.stdout?.on('data', chunk => process.stdout.write(`[office-backend] ${chunk}`));
   backend.stderr?.on('data', chunk => process.stderr.write(`[office-backend] ${chunk}`));
+  const child = backend;
   backend.on('exit', code => {
     console.error(`office-backend exited: ${code}`);
-    backend = null;
+    if (backend === child) backend = null;
   });
   return backend;
 }
@@ -770,7 +807,7 @@ ipcMain.on('youju:office-api-base', event => {
   event.returnValue = backendPort ? `http://127.0.0.1:${backendPort}` : '';
 });
 ipcMain.on('youju:mcp-api-base', event => {
-  event.returnValue = mcpPort ? `http://127.0.0.1:${mcpPort}` : '';
+  event.returnValue = readConfig().remoteBaseUrl;
 });
 ipcMain.handle('youju:get-config', () => {
   const config = readConfig();
@@ -779,64 +816,89 @@ ipcMain.handle('youju:get-config', () => {
 ipcMain.handle('youju:set-config', (_event, config) => writeConfig(config));
 ipcMain.handle('youju:get-login-preference', () => loginPreference());
 ipcMain.handle('youju:save-login-preference', (_event, preference) => saveLoginPreference(preference));
-ipcMain.handle('youju:backup-status', async (_event, email) => ({
-  directory: backupDirectory(),
-  enabled: readConfig().backupEnabled !== false,
-  lastBackupAt: String(readConfig().lastBackupAt || ''),
-  records: await listBackups(email),
-}));
-ipcMain.handle('youju:set-backup-directory', (_event, directory) => {
+ipcMain.handle('youju:set-backup-session', async (_event, token) => {
+  backupSession.set(token);
+  if (token) await backupSession.current();
+  scheduleBackups();
+});
+ipcMain.handle('youju:backup-status', async () => {
+  const identity = await backupSession.current();
+  const preferences = backupPreferences(identity);
+  const status = await syncBackupRecords(identity);
+  return { directory: preferences.directory, enabled: preferences.enabled,
+    lastBackupAt: String(readConfig().backupTimes[backupUserKey(identity)] || ''),
+    records: status.records.map(row => ({...row,localAvailable: Boolean(row.path && fs.existsSync(row.path))})), warning: status.warning,
+    progress: backupProgress?.userKey === backupUserKey(identity) ? backupProgress.progress : null };
+});
+ipcMain.handle('youju:set-backup-directory', async (_event, directory) => {
+  const identity = await backupSession.current();
   const value = String(directory || '').trim();
   if (!value) throw new Error('请填写数据备份目录。');
-  const next = writeConfig({ ...readConfig(), backupDir: path.resolve(value) });
+  const config = readConfig();
+  const next = writeConfig({ ...config, backupUsers: { ...config.backupUsers,
+    [backupUserKey(identity)]: { ...backupPreferences(identity), directory: path.resolve(value) } } });
   scheduleBackups();
   return next;
 });
-ipcMain.handle('youju:set-backup-schedule-enabled', (_event, enabled) => {
-  const next = writeConfig({ ...readConfig(), backupEnabled: Boolean(enabled) });
+ipcMain.handle('youju:set-backup-schedule-enabled', async (_event, enabled) => {
+  const identity = await backupSession.current();
+  const config = readConfig();
+  const next = writeConfig({ ...config, backupUsers: { ...config.backupUsers,
+    [backupUserKey(identity)]: { ...backupPreferences(identity), enabled: Boolean(enabled) } } });
   scheduleBackups();
   return next;
 });
-ipcMain.handle('youju:create-backup', async event => createBackup('manual', progress => {
-  if (!event.sender.isDestroyed()) event.sender.send('youju:backup-progress', progress);
-}));
-ipcMain.handle('youju:restore-backup', async (_event, value) => restoreBackup(value));
+ipcMain.handle('youju:create-backup', async () => createBackup('manual'));
+ipcMain.handle('youju:retry-backup-upload', async (_event, id) => {
+  if (backupBusy || restoreBusy) throw new Error('已有备份操作正在进行，请稍候。');
+  const identity = await backupSession.current();
+  const record = (await catalog(identity,'list')).find(row => row.id === id);
+  if (!record) throw new Error('未找到当前账号的本地备份。');
+  if (backupBusy || restoreBusy) throw new Error('已有备份操作正在进行，请稍候。');
+  backupBusy = true;
+  try {
+    const result = await syncOneBackup(identity,record,emitBackupProgress);
+    emitBackupProgress({phase:'done',percent:100,message:'上传成功，本地与服务器备份已一致。'});
+    return result;
+  } catch(error) {
+    emitBackupProgress({phase:'error',percent:0,message:'上传未完成，本地文件仍保留。'+String(error.message || error)});
+    throw error;
+  } finally { backupBusy = false; }
+});
+ipcMain.handle('youju:restore-backup', async (_event, value) => {
+  try { return await restoreBackup(value,emitBackupProgress); }
+  catch(error) {
+    emitBackupProgress({phase:'error',percent:0,message:String(error.message || error)});
+    throw error;
+  }
+});
 ipcMain.handle('youju:quit-after-restore', () => {
   // 恢复会替换正在使用的 SQLite 文件；由新进程重新启动全部本地服务。
   app.relaunch();
   app.quit();
 });
 
-async function checkUpdate(remoteBase) {
-  try {
-    const res = await fetch(`${remoteBase}/version.json`);
-    if (!res.ok) return;
-    const data = await res.json();
-    const remote = String(data.version || '');
-    if (remote && remote !== app.getVersion()) {
-      await dialog.showMessageBox({
-        type: 'info',
-        title: '发现新版本',
-        message: `远程版本 ${remote}，当前 ${app.getVersion()}。请到发布页下载更新。`,
-      });
-    }
-  } catch {
-    // 远程不可达时不打断启动。
-  }
-}
 
 async function createWindow() {
-  // 首次启动及旧版配置迁移时写入 MCP 端口与本机服务密钥；不会动业务数据。
+  if (stoppingServices) await stoppingServices;
+  if (quitRequested) return;
+  const generation = ++startupGeneration;
+  const waitForService = async (port, name) => {
+    try { await waitHealth(port, name); }
+    catch (error) {
+      if (generation !== startupGeneration || quitRequested) return false;
+      throw error;
+    }
+    return generation === startupGeneration && !quitRequested;
+  };
+  // Persist the remote server address without modifying business data.
   writeConfig(readConfig());
   let config = readConfig();
 
-  backendPort = await pickPort();
-  mcpPort = await selectMcpPort(config);
-  const localMcpBase = `http://127.0.0.1:${mcpPort}`;
-  startMcp(mcpPort, backendPort, config);
-  await waitHealth(mcpPort, 'mcp-server');
-  startBackend(backendPort, config, localMcpBase);
-  await waitHealth(backendPort, 'office-backend');
+  backendPort = await selectOfficePort(config);
+  if (generation !== startupGeneration || quitRequested) return;
+  startBackend(backendPort, config);
+  if (!await waitForService(backendPort, 'office-backend')) return;
   scheduleBackups();
 
   const icon = appIcon();
@@ -844,6 +906,7 @@ async function createWindow() {
     width: 1280,
     height: 860,
     show: false,
+    autoHideMenuBar: true,
     ...(icon ? { icon } : {}),
     webPreferences: {
       // CJS preload：Electron sandbox 下 ESM preload 可能静默失败，导致 youju 未注入。
@@ -853,53 +916,123 @@ async function createWindow() {
       sandbox: false,
     },
   });
+  hideOnClose(mainWindow, () => quitRequested || quitReady || !tray);
+  mainWindow.on('closed', () => { mainWindow = null; });
   if (icon && process.platform === 'darwin' && app.dock) {
     app.dock.setIcon(icon);
   }
-  mainWindow.once('ready-to-show', () => mainWindow?.show());
-
-  void checkUpdate(readConfig().remoteBaseUrl);
+  mainWindow.once('ready-to-show', () => {
+    if (!updateController?.hidden) mainWindow?.show();
+    if (updateController?.finished && !updateController.window?.isDestroyed()) updateController.window?.destroy();
+  });
   if (isDev) {
     process.env.OFFICE_API_PORT = String(backendPort);
     await mainWindow.loadURL(`http://127.0.0.1:5173/?officePort=${backendPort}`);
   } else {
+    // 旧版首页没有 no-cache，会被磁盘缓存沿用旧 CSP / 旧脚本；本机服务清缓存几乎无代价。
+    await mainWindow.webContents.session.clearCache().catch(() => {});
     // 与 office-backend 同源 HTTP，才能直连远程 mcp（file:// 会被 CSP 拦截）。
     await mainWindow.loadURL(`http://127.0.0.1:${backendPort}/`);
   }
 }
 
 function stopServices() {
+  if (stoppingServices) return stoppingServices;
+  startupGeneration++;
   if (backupTimer) {
     clearTimeout(backupTimer);
     backupTimer = null;
   }
-  if (backend) {
-    backend.kill('SIGTERM');
+  stoppingServices = serviceProcesses.stopAll().then(() => {
     backend = null;
-  }
-  if (mcp) {
-    mcp.kill('SIGTERM');
-    mcp = null;
-  }
-  backendPort = 0;
-  mcpPort = 0;
+    backendPort = 0;
+  }).finally(() => { stoppingServices = null; });
+  return stoppingServices;
 }
 
-app.whenReady().then(() => createWindow().catch(err => {
+async function openApplication() {
+  if (openingWindow || quitRequested) return openingWindow;
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show(); mainWindow.focus();
+    return;
+  }
+  if (updateController?.show()) return;
+  openingWindow = (async () => {
+    let config = {};
+    try { config = JSON.parse(fs.readFileSync(path.join(__dirname, 'package.json'), 'utf8')); }
+    catch { console.info('[youju] release endpoint not configured; update check disabled'); }
+    updateController = new UpdateController({ app, BrowserWindow, ipcMain, shell, directory: __dirname,
+      base: config.releaseBaseUrl || '', stopServices, beforeInstall: () => {} });
+    await updateController.run();
+    if (!quitRequested) await createWindow();
+  })().finally(() => { openingWindow = null; });
+  return openingWindow;
+}
+
+function showApplication() {
+  if (!app.isReady() || quitRequested) return;
+  // Check visible windows first, including a startup update gate still in flight.
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show(); mainWindow.focus();
+  } else if (!updateController?.show()) {
+    void openApplication().catch(error => dialog.showErrorBox('打开失败', String(error.message || error)));
+  }
+}
+
+app.whenReady().then(async () => {
+  if (!singleInstance || exitOnly) return;
+  if (process.platform === 'win32') {
+    app.setAppUserModelId('com.youjulab.desktop');
+    if (app.isPackaged) app.setJumpList([{ type: 'tasks', items: [{ type: 'task', title: '退出程序',
+      description: '退出有据及本地后台服务', program: process.execPath, args: '--quit',
+      iconPath: process.execPath, iconIndex: 0 }] }]);
+  }
+  const image = appIcon();
+  if (!image) throw new Error('找不到程序图标，无法创建后台托盘入口。');
+  tray = createBackgroundTray({ Tray, Menu,
+    image: image.resize({ width: process.platform === 'darwin' ? 18 : 24, height: process.platform === 'darwin' ? 18 : 24 }),
+    show: showApplication, quit: () => app.quit() });
+  if (process.platform === 'win32') Menu.setApplicationMenu(null);
+  else if (process.platform === 'darwin') Menu.setApplicationMenu(Menu.buildFromTemplate([
+    { label: '有据', submenu: [{ role: 'about' }, { type: 'separator' }, { role: 'hide' }, { role: 'hideOthers' }, { role: 'unhide' }] },
+    { role: 'editMenu' }, { role: 'windowMenu' },
+  ]));
+  await openApplication();
+}).catch(err => {
   console.error(err);
   dialog.showErrorBox('youjulab 启动失败', String(err?.message || err));
   app.quit();
-}));
+});
 
 app.on('window-all-closed', () => {
-  stopServices();
-  if (process.platform !== 'darwin') app.quit();
+  // Closing a window is not quitting. Keep Office and scheduled backups alive.
+  if (quitRequested || quitReady) return;
+  if (!tray) app.quit();
 });
 
-app.on('before-quit', () => stopServices());
-
-app.on('activate', () => {
-  if (BrowserWindow.getAllWindows().length === 0) {
-    void createWindow();
-  }
+app.on('before-quit', event => {
+  if (quitReady) return;
+  event.preventDefault();
+  if (quitRequested) return;
+  quitRequested = true;
+  updateController?.closeForQuit();
+  void stopServices().then(() => {
+    quitReady = true;
+    tray?.destroy();
+    tray = null;
+    app.quit();
+  }).catch(error => {
+    quitRequested = false;
+    console.error('[youju] service shutdown failed', error);
+    dialog.showErrorBox('退出失败', '后台服务未能全部停止，请重试退出。\n' + String(error?.message || error));
+  });
 });
+
+process.once('SIGINT', () => app.quit());
+process.once('SIGTERM', () => app.quit());
+process.once('exit', () => serviceProcesses.forceStopSync());
+
+app.on('activate', showApplication);
+app.on('second-instance', (_event, argv) => { if (argv.includes('--quit')) app.quit(); else showApplication(); });

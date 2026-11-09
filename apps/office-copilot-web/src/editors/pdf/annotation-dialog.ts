@@ -2,6 +2,7 @@ import { Editor } from '@tiptap/core';
 import Link from '@tiptap/extension-link';
 import StarterKit from '@tiptap/starter-kit';
 import { createIcons, icons } from 'lucide';
+import { assetIndexExtensions } from '../../asset-index';
 import { circleBullet, fourLevelBulletTab } from '../rich-text-lists';
 
 const RICH_NOTE_PREFIX = '[[office-pdf-note:v1]]';
@@ -78,7 +79,7 @@ export function openPdfAnnotationDialog(args: {
     let settled = false;
     const editor = new Editor({
       element: editorHost,
-      extensions: [StarterKit.configure({ bulletList: false }), Link.configure({ openOnClick: !editing, autolink: true, defaultProtocol: 'https' }), circleBullet, fourLevelBulletTab],
+      extensions: [StarterKit.configure({ bulletList: false }), Link.configure({ openOnClick: !editing, autolink: true, defaultProtocol: 'https' }), circleBullet, fourLevelBulletTab, ...assetIndexExtensions()],
       content: noteDocument(original), editable: editing, onUpdate: () => { dirty = true; },
     });
     const onKeydown = (event: KeyboardEvent) => {

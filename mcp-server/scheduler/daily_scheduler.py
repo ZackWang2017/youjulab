@@ -4,6 +4,8 @@
   - 任务声明「每天几点跑」（本地时区），默认只在工作日触发；
   - 同一天同一任务只成功一次，运行记录落库（重启不重复跑）；
   - 服务在触发时间之后才启动时自动补跑当天任务；
+  - 错过的交易日（当晚服务没开、机器睡眠、跨周末）在下次运行时补跑最近一个应执行日，
+    收盘价同步与净值重算本身会补齐中间缺口；
   - 任务可声明依赖（例如先同步收盘价再算净值），依赖当天成功后才会执行；
   - 失败后间隔一段时间自动重试，也可以通过 REST 手动触发；
   - 任务函数是同步阻塞代码（psycopg / httpx），在线程里跑，不卡事件循环。
@@ -147,13 +149,19 @@ class DailyTaskScheduler:
 
     # ---- 触发判断 --------------------------------------------------------
 
+    def due_date(self, task: DailyTask, now: datetime | None = None) -> date:
+        """最近一个已到触发时间的执行日：今天过了触发时刻取今天，否则往前找上一个执行日。"""
+        now = now or self.now()
+        day = now.date()
+        if now.time() < task.at or (task.weekdays_only and day.weekday() >= 5):
+            day -= timedelta(days=1)
+            while task.weekdays_only and day.weekday() >= 5:
+                day -= timedelta(days=1)
+        return day
+
     def is_due(self, task: DailyTask, now: datetime | None = None) -> bool:
         now = now or self.now()
-        if task.weekdays_only and now.weekday() >= 5:
-            return False
-        if now.time() < task.at:
-            return False
-        today = now.date()
+        today = self.due_date(task, now)
         if task.name in self._running:
             return False
         for dep in task.depends_on:
@@ -218,7 +226,7 @@ class DailyTaskScheduler:
         results = []
         for task in list(self._tasks.values()):
             if self.is_due(task, now):
-                results.append(self.run_task(task.name, run_date=(now or self.now()).date()))
+                results.append(self.run_task(task.name, run_date=self.due_date(task, now)))
         return results
 
     async def loop(self, stop: asyncio.Event) -> None:

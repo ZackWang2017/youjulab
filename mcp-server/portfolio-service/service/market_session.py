@@ -72,12 +72,15 @@ def mark_price(
 ) -> tuple[Decimal | None, date | None, bool]:
     """返回 (价格, 价格所属交易日, 是否为交易时段内的实时价)。
 
-    交易时段用实时价。开盘前用行情昨收，不用盘前价，也不用盘中误写入的收盘。
+    交易时段用实时价。开盘前：沪深京/港股用行情昨收，避开集合竞价；美股不能照搬——
+    腾讯美股 ``prev_close`` 在下一交易日开盘前仍是「上一笔行情的昨收」，会比最近收盘再早一天，
+    因此优先用已入库收盘价，没有则用现价字段（收盘后到开盘前通常就是官方收盘）。
     收盘后：沪深京和港股的行情现价就是收盘价；美股盘后现价可能偏离官方收盘，优先用已入库的收盘价。
     """
     by_date = {day: price for day, price in (closes or [])}
     closed = last_closed_session_date(market, now)
     cached = by_date.get(closed)
+    market_code = (market or "").upper()
     if session_in_progress(market, now):
         if live is not None:
             return live, now.astimezone(exchange_zone(market)).date(), True
@@ -85,10 +88,17 @@ def mark_price(
             return cached, closed, False
         return prev_close, closed if prev_close is not None else None, False
     if after_bell(market, now):
-        if (market or "").upper() == "US" and cached is not None:
+        if market_code == "US" and cached is not None:
             return cached, closed, False
-        if (market or "").upper() != "US" and live is not None:
+        if market_code != "US" and live is not None:
             return live, closed, False
+        if cached is not None:
+            return cached, closed, False
+        if live is not None:
+            return live, closed, False
+        return prev_close, closed if prev_close is not None else None, False
+    # 开盘前 / 周末
+    if market_code == "US":
         if cached is not None:
             return cached, closed, False
         if live is not None:

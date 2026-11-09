@@ -1,6 +1,7 @@
 #pdf { position: relative; display: flex; flex-direction: column; min-height: 0; }
 #pdf .pdf-toolbar { flex-shrink: 0; height: auto; min-height: 52px; flex-wrap: wrap; gap: 6px; }
 #pdf .pdf-stage { position: relative; flex: 1; min-height: 0; display: flex; --pdf-copy-width: 50%; --pdf-notebook-width: 360px; }
+#pdf .pdf-notebook-panel .notebook-toolbar { flex-wrap: wrap; row-gap: 2px; }
 #pdf .pdf-notebook-panel {
   flex: 0 0 var(--pdf-notebook-width);
   min-width: 280px;
@@ -101,6 +102,41 @@
 #pdf .pdf-stage.is-split .pdf-pane[data-pane="main"] {
   flex: 1 1 auto;
 }
+#pdf .pdf-stage.is-translation-open .pdf-pane[data-pane="main"] { flex: 1 1 auto; }
+#pdf .pdf-stage.is-translation-open .pdf-translation-panel {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  flex: 0 0 var(--pdf-translation-width, 460px);
+  min-width: 320px;
+}
+#pdf .pdf-translation-panel {
+  position: relative;
+  min-height: 0;
+  overflow: hidden;
+  border-left: 1px solid #d9e1df;
+  background: #fff;
+  padding: 0 20px 20px;
+}
+#pdf .pdf-translation-split { position: relative; z-index: 6; flex: 0 0 8px; margin: 0; padding: 0; border: 0; background: transparent; cursor: col-resize; outline: none; touch-action: none; }
+#pdf .pdf-translation-split[hidden] { display: none !important; }
+#pdf .pdf-translation-split::after { position: absolute; top: 0; bottom: 0; left: 50%; width: 1px; transform: translateX(-50%); background: #d9e1df; content: ""; }
+#pdf .pdf-translation-split:hover::after, #pdf .pdf-translation-split:focus-visible::after, #pdf.resizing-translation .pdf-translation-split::after { width: 2px; background: #2f6fed; }
+#pdf .pdf-translation-workspace-toolbar { display: flex; align-items: center; gap: 2px; min-height: 40px; padding: 5px 0; border-bottom: 1px solid #e8ebed; background: #fff; }
+#pdf .pdf-translation-workspace-toolbar button:not(#sheet button) { width: 28px; min-width: 28px; min-height: 28px; padding: 0; border: 0; background: transparent; }
+#pdf .pdf-translation-workspace-toolbar button:not(#sheet button):hover:not(:disabled) { background: #edf5f3; color: #0f6f64; }
+#pdf .pdf-translation-workspace-toolbar button svg { width: 15px; height: 15px; }
+#pdf .pdf-translation-workspace-toolbar .pdf-translate-page:not(#sheet button) { width: auto; min-width: auto; padding: 0 7px; gap: 4px; font-size: 12px; }
+#pdf .pdf-translation-workspace-toolbar .pdf-translate-page svg { width: 15px; height: 15px; }
+#pdf .pdf-translation-toolbar-divider { width: 1px; height: 16px; margin: 0 3px; background: #dde4e2; }
+#pdf .pdf-translation-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin: 14px 0 10px; color: #263431; }
+#pdf .pdf-translation-head strong { font-size: 15px; }
+#pdf .pdf-translation-head span { color: #7b8884; font-size: 12px; white-space: nowrap; }
+#pdf .pdf-translation-empty { margin: 0; color: #788681; font-size: 13px; line-height: 1.7; }
+#pdf .pdf-translation-content { min-height: 0; overflow: auto; color: #293330; font-size: 14px; line-height: 1.8; outline: 0; }
+#pdf .pdf-translation-content .tiptap { min-height: 100%; outline: 0; }
+#pdf .pdf-translation-content .tiptap p { margin: 0 0 10px; }
+#pdf .pdf-translation-content .tiptap h3 { margin: 14px 0 8px; font-size: 16px; line-height: 1.45; }
+#pdf .pdf-translation-content .tiptap ul, #pdf .pdf-translation-content .tiptap ol { margin: 0 0 10px; padding-left: 1.45em; }
 #pdf .pdf-split {
   display: none;
   flex: 0 0 8px;
@@ -148,6 +184,27 @@
   touch-action: pan-x pan-y;
   outline: none;
 }
+#pdf .pdf-index-status {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  z-index: 6;
+  max-width: min(360px, calc(100% - 24px));
+  min-width: 0;
+  padding: 5px 9px;
+  border: 1px solid #dce5e1;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, .96);
+  box-shadow: 0 2px 8px rgba(25, 45, 35, .08);
+  font-size: 12px;
+  line-height: 1.4;
+  color: #3d5a52;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+  pointer-events: none;
+}
+#pdf .pdf-index-status.is-failed { color: #b42318; }
+#pdf .pdf-index-status[hidden] { display: none !important; }
 /* 仅盖住 #pdf 工作区并在其中居中，不挡表格/文档等其它页 */
 #pdf .pdf-download {
   position: absolute;
@@ -225,6 +282,23 @@
 #pdf .pdf-notebook-toggle[aria-pressed="true"] { background: #e7f4f2; border-color: #b7d8d2; color: #0f6f64; }
 #pdf .pdf-ask-ai { flex-shrink: 0; padding: 6px 8px; gap: 4px; font-size: 12px; }
 #pdf .pdf-ask-ai span { line-height: 1; }
+#pdf .pdf-translation-toggle { flex-shrink: 0; padding: 6px 8px; gap: 4px; font-size: 12px; }
+#pdf .pdf-translation-toggle[aria-pressed="true"] { background: #e7f4f2; border-color: #b7d8d2; color: #0f6f64; }
+#pdf .pdf-selection-translation-toggle { display: inline-flex; align-items: center; flex-shrink: 0; min-height: 30px; padding: 4px 6px 4px 8px; gap: 4px; font-size: 12px; }
+#pdf .pdf-selection-translation-toggle > svg { width: 14px; height: 14px; }
+#pdf .pdf-selection-translation-toggle .pdf-toggle-knob { position: relative; width: 22px; height: 12px; border-radius: 999px; background: #c8d1d2; transition: background .16s ease; }
+#pdf .pdf-selection-translation-toggle .pdf-toggle-knob::after { position: absolute; top: 2px; left: 2px; width: 8px; height: 8px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(25, 40, 42, .22); content: ""; transition: transform .16s ease; }
+#pdf .pdf-selection-translation-toggle[aria-checked="true"] { border-color: #b7d8d2; background: #e7f4f2; color: #0f6f64; }
+#pdf .pdf-selection-translation-toggle[aria-checked="true"] .pdf-toggle-knob { background: #168274; }
+#pdf .pdf-selection-translation-toggle[aria-checked="true"] .pdf-toggle-knob::after { transform: translateX(10px); }
+.pdf-selection-translate-action { position: fixed; z-index: 120; display: grid; place-items: center; width: 30px; min-width: 30px; height: 30px; min-height: 30px; padding: 0; border: 1px solid #147c6e; border-radius: 5px; background: #147c6e; color: #fff; box-shadow: 0 5px 14px rgba(11, 84, 74, .24); font-size: 14px; font-weight: 650; line-height: 1; }
+.pdf-selection-translate-action:hover { background: #0f6f64; border-color: #0f6f64; }
+.pdf-selection-translation-float { width: min(460px, calc(100vw - 24px)); }
+.pdf-selection-translation-source, .pdf-selection-translation-result { display: grid; gap: 6px; margin: 0; padding: 10px 11px; border: 1px solid #e1e8e6; border-radius: 5px; background: #f8fbfa; }
+.pdf-selection-translation-source strong, .pdf-selection-translation-result strong { color: #52706a; font-size: 12px; font-weight: 650; }
+.pdf-selection-translation-source p, .pdf-selection-translation-result p { max-height: 180px; margin: 0; overflow: auto; color: #2d3837; font-size: 13px; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; }
+.pdf-selection-translation-result { border-color: #cce3de; background: #fff; }
+.pdf-selection-translation-result p { max-height: min(36vh, 320px); font-size: 14px; line-height: 1.75; }
 #pdf .pdf-outline-toggle { flex-shrink: 0; min-width: 32px; padding: 6px 7px; color: #0f6f64; }
 #pdf .pdf-outline-toggle:hover:not(:disabled) { background: #e7f4f2; border-color: #b7d8d2; }
 #pdf .pdf-notebook-panel .notebook-toolbar [data-pdf-template] { color: #0f6f64; }
@@ -304,7 +378,8 @@ button.pdf-shot-resize:not(#sheet button):hover { background: transparent; }
 #pdf .pdf-live-note.pdf-ai-badge {
   border-color: #2f6fed; background: #dce9ff; color: #1d4fbf;
 }
-#pdf .annotationLayer { pointer-events: none; overflow: visible; }
+#pdf .annotationLayer { pointer-events: none; overflow: visible; z-index: 3; }
+#pdf .annotationLayer .highlightAnnotation { pointer-events: auto; cursor: pointer; }
 #pdf .annotationLayer .popupAnnotation,
 #pdf .annotationLayer .popup { display: none !important; }
 #pdf .annotationLayer .textAnnotation { pointer-events: auto; cursor: pointer; }

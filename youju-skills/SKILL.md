@@ -1,11 +1,11 @@
 ---
 name: youjulab
-description: Read and write youjulab spreadsheets, documents, mind maps, project plans, and native PDF outlines through mcp-server. Use MCP when available, otherwise the REST routes on the same process.
+description: Read and write youjulab spreadsheets, documents, mind maps, draw.io diagrams, project plans, and native PDF outlines through office-backend. Use MCP when available, otherwise the REST routes on the same process.
 ---
 
-# youjulab 表格、文档、导图与项目计划
+# youjulab 表格、文档、导图、绘图与项目计划
 
-用同一 mcp-server 进程读写办公表格、文档和思维导图。能连接 MCP 时用 MCP；只能发 HTTP 时用同路径的 REST。不要调用财务 `/mcp`（指标、报表、PDF 解析），也不要走 `/api/office` 选区 Agent。
+用桌面端 office-backend 进程读写办公表格、文档和思维导图。能连接 MCP 时用 MCP；只能发 HTTP 时用同路径的 REST。不要调用远程财务 `/mcp`（指标、报表、PDF 解析），也不要走 `/api/office` 选区 Agent。
 
 ## 连接
 
@@ -15,15 +15,57 @@ description: Read and write youjulab spreadsheets, documents, mind maps, project
 
 | 能力 | MCP | REST |
 | --- | --- | --- |
-| 表格 | `__MCP_BASE_URL__/mcp/sheets` | `POST __MCP_BASE_URL__/api/spreadsheets/{create,read,write,merge,unmerge,background,border,font}` |
-| 文档 | `__MCP_BASE_URL__/mcp/documents` | `POST __MCP_BASE_URL__/api/documents/{create,read,write,format}` |
-| PDF 大纲 | `__MCP_BASE_URL__/mcp/documents` | 仅 MCP：`generate_pdf_outline` |
-| 导图 | `__MCP_BASE_URL__/mcp/mindmaps` | `POST __MCP_BASE_URL__/api/mindmaps/{create,read,write,add-node,update-node,delete-node,move-node}` |
-| 项目计划 | `__MCP_BASE_URL__/mcp/project-plans` | `POST __MCP_BASE_URL__/api/project-plans/{create,read,add-task,update-task,move-task,delete-task}` |
+| 表格 | `__OFFICE_BASE_URL__/mcp/sheets` | `POST __OFFICE_BASE_URL__/api/spreadsheets/{create,read,write,merge,unmerge,background,border,font}` |
+| 文档 | `__OFFICE_BASE_URL__/mcp/documents` | `POST __OFFICE_BASE_URL__/api/documents/{create,read,write,format}` |
+| PDF 大纲 | `__OFFICE_BASE_URL__/mcp/documents` | 仅 MCP：`generate_pdf_outline` |
+| 导图 | `__OFFICE_BASE_URL__/mcp/mindmaps` | `POST __OFFICE_BASE_URL__/api/mindmaps/{create,read,write,add-node,update-node,delete-node,move-node}` |
+| draw.io 绘图 | `__OFFICE_BASE_URL__/mcp/diagrams` | `POST __OFFICE_BASE_URL__/api/diagrams/{create,read,write}` |
+| 项目计划 | `__OFFICE_BASE_URL__/mcp/project-plans` | `POST __OFFICE_BASE_URL__/api/project-plans/{create,read,add-task,update-task,move-task,delete-task}` |
 
-stdio 拉起的财务入口不含这些工具。财务地址 `__MCP_BASE_URL__/mcp` 不要混用。
+财务与资讯工具在远程 mcp-server，不含这些办公资产工具。不要把办公请求发到财务入口。
 
-输入一律用名称，不要用内部 ID。
+表格、文档、导图、项目计划按名称定位。绘图可按项目名与绘图名定位，也可使用工具返回的 `asset_id`；PDF 使用对应工具要求的 `document_id`。
+
+## draw.io 绘图
+
+这些工具操作的是资料库的「绘图」资产，不是「导图」或「研究图」。无需浏览器或 draw.io iframe 在线；重新打开资产即可看到保存结果，不会自动刷新用户正在编辑的画布。
+
+| 函数 | REST | 说明 |
+| --- | --- | --- |
+| create_diagram | POST /api/diagrams/create | 必填 `project_name`、`diagram_name`；项目若缺则创建。同名绘图返回冲突，不覆盖。`visibility` 为 project（默认）或 user。 |
+| read_diagram | POST /api/diagrams/read | 提供 `asset_id` 或 `project_name` + `diagram_name`。返回 revision、pages、节点与连线。`include_xml=true` 返回完整 XML。不会创建资产。 |
+| write_diagram | POST /api/diagrams/write | 必填 `expected_revision`，并按上述方式定位资产；使用 `graph` 或 `xml` 整图替换，不自动创建、追加或重试冲突。 |
+
+创建/更新时 `graph` 与 `xml` 互斥。创建时都省略表示空画布；更新空画布必须显式提供 `graph={"nodes":[],"edges":[]}`。
+
+`graph` 格式：
+
+```json
+{
+  "nodes": [
+    {"id":"revenue","text":"营业收入","shape":"rounded","x":60,"y":60,"width":180,"height":70,"fill":"#E9F3EE","stroke":"#679581"},
+    {"id":"profit","text":"经营利润","shape":"rectangle","x":340,"y":60}
+  ],
+  "edges": [{"id":"cost","source":"revenue","target":"profit","text":"扣除经营成本"}],
+  "layout": {"direction":"left-to-right"}
+}
+```
+
+节点 `id` 必填、稳定且唯一，禁止使用保留 ID 0、1。`text` 是纯文本。shape 支持 rectangle、rounded、ellipse、diamond、text；颜色使用 #RRGGBB。坐标和尺寸可省略；基础布局支持 left-to-right / top-to-bottom，不是复杂图形自动布局器。
+
+已有图形修改前先 `read_diagram(include_xml=true)`。pages/nodes/edges 是概览，不是可无损写回的 graph；不要据此重建已有复杂图形，否则会丢失页面、分组和人工排版。修改 XML 时保留稳定 ID、坐标、样式和其他未修改属性。
+
+原生 XML 支持 mxGraphModel 或 mxfile（含多页和受限解压）；最多 20 页、总计 5000 个单元，XML 不超过 2 MB。禁止 DTD/实体、脚本、危险 HTML/链接、图片和内嵌 stencil/外部资源样式。现有绘图含不支持元素时不要自动删除它们，向用户说明限制。
+
+整图覆盖须符合用户的修改意图。版本来自最近一次读取；409 时停止写入，重新读取并核对差异，不能仅换新版本号盲目覆盖。更新成功返回新 revision；保持资产原有名称与可见范围。
+
+```text
+create_diagram(project_name="公司研究", diagram_name="利润形成过程", graph={"nodes":[{"id":"revenue","text":"营业收入"},{"id":"profit","text":"经营利润"}],"edges":[{"source":"revenue","target":"profit","text":"扣除经营成本"}]})
+read_diagram(project_name="公司研究", diagram_name="利润形成过程", include_xml=true)
+write_diagram(asset_id="读取返回的 asset_id", expected_revision=0, xml="修改后的完整 XML")
+```
+
+REST 与 MCP 参数同名，认证复用本文件的 Bearer token。工具返回 `asset_id`、`revision`、页数、节点数和连线数；只在写入确认成功后告知用户已保存。
 
 ## 公告 PDF 大纲
 
@@ -213,7 +255,7 @@ stdio 拉起的财务入口不含这些工具。财务地址 `__MCP_BASE_URL__/m
 只能发 HTTP 时，把上面的函数名对应到 REST：create → `/create`，read → `/read`，write → `/write`，merge → `/merge`，unmerge → `/unmerge`，background → `/background`，border → `/border`，font → `/font`。
 
 ```
-POST __MCP_BASE_URL__/api/spreadsheets/write
+POST __OFFICE_BASE_URL__/api/spreadsheets/write
 Authorization: Bearer __ACCESS_TOKEN__
 Content-Type: application/json
 
@@ -356,7 +398,7 @@ move_project_plan_task(project_name="腾讯控股", plan_name="2026 年投研计
 ```
 
 ```
-POST __MCP_BASE_URL__/api/documents/write
+POST __OFFICE_BASE_URL__/api/documents/write
 Authorization: Bearer __ACCESS_TOKEN__
 Content-Type: application/json
 

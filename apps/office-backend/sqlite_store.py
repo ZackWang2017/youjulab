@@ -22,6 +22,7 @@ _TABLES = (
     "sheet_charts",
     "user_model_configs",
     "pdf_folders",
+    "document_folders",
 )
 
 _ATTR = {
@@ -35,6 +36,7 @@ _ATTR = {
     "sheet_charts": "_sheet_charts",
     "user_model_configs": "_user_model_configs",
     "pdf_folders": "_pdf_folders",
+    "document_folders": "_document_folders",
 }
 
 # 方法 → 可能改动的表；未列出的写操作仍全量落盘。
@@ -67,6 +69,7 @@ _METHOD_TABLES: dict[str, tuple[str, ...]] = {
     "update_sheet_chart": ("sheet_charts",),
     "delete_sheet_charts": ("sheet_charts",),
     "upsert_pdf_folder_store": ("pdf_folders",),
+    "upsert_document_folder_store": ("document_folders",),
     "reassign_owner": _TABLES,
 }
 
@@ -182,6 +185,7 @@ def _wrap_mutations(cls: type[SqliteStore]) -> type[SqliteStore]:
         "get_document_skill", "list_enabled_digest_jobs", "list_assistant_sessions",
         "get_assistant_session", "get_sheet_cache", "list_sheet_charts", "get_sheet_chart",
         "get_pdf_folder_store",
+        "get_document_folder_store",
     }
     for name in dir(MemoryStore):
         if name.startswith("_") or name in skip or name in reads:

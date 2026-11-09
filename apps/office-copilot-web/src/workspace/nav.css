@@ -180,20 +180,18 @@
   text-align: left;
 }
 
-.account-nav .tool-group > button#open-calc:not(#sheet button),
-.account-nav .tool-group > button#open-calendar:not(#sheet button),
-.account-nav .tool-group > button#open-notebook:not(#sheet button) {
+.account-nav .tool-group > button:not(#sheet button) {
   width: 28px;
   min-width: 28px;
   min-height: 28px;
+  height: 28px;
   padding: 3px;
 }
 
-.account-nav .tool-group > button#open-calc svg,
-.account-nav .tool-group > button#open-calendar svg,
-.account-nav .tool-group > button#open-notebook svg {
+.account-nav .tool-group > button svg {
   width: 18px;
   height: 18px;
+  flex-shrink: 0;
 }
 
 .workspace-nav button.recent-link:not(#sheet button):hover,
@@ -370,6 +368,7 @@
 #app:has(.asset-rail) > main > aside { grid-column: 3; grid-row: 1; }
 
 .asset-rail-brand {
+  flex-shrink: 0;
   width: 36px;
   height: 32px;
   margin: 0 auto 10px;
@@ -405,7 +404,32 @@
   display: flex;
   flex-direction: column;
   gap: 2px;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-width: none;
 }
+
+.asset-rail-library { display: flex; flex-direction: column; min-height: 0; }
+.asset-rail-items[hidden] { display: none; }
+.asset-rail-items::-webkit-scrollbar { display: none; }
+.asset-rail-items > button { flex-shrink: 0; }
+.asset-rail button.library-group-toggle:not(#sheet button) {
+  position: relative;
+  flex-shrink: 0;
+  margin-bottom: 4px;
+}
+.asset-rail button.library-group-toggle svg.library-group-caret {
+  position: absolute;
+  top: 3px;
+  right: -2px;
+  width: 10px;
+  height: 10px;
+  transition: transform .15s ease;
+}
+.asset-rail button.library-group-toggle[aria-expanded="true"] svg.library-group-caret { transform: rotate(90deg); }
+.asset-rail button.library-group-toggle[aria-expanded="true"]:not(:hover):not(#sheet button) { background: transparent; color: #354047; }
+.asset-rail button.library-group-toggle.is-current:not(#sheet button),
+.asset-rail button.asset-rail-item[aria-current="page"]:not(#sheet button) { background: #e7f0ee; color: #0f6f64; }
 
 .asset-rail button.asset-rail-item:not(#sheet button),
 .asset-rail button#settings-btn:not(#sheet button) {
@@ -444,6 +468,7 @@
 }
 
 .asset-rail-tools {
+  flex-shrink: 0;
   margin-top: auto;
   padding-bottom: 6px;
 }
@@ -455,6 +480,7 @@
 }
 
 .asset-rail-bottom {
+  flex-shrink: 0;
   padding-top: 10px;
   border-top: 1px solid #e1e6e8;
 }
@@ -606,3 +632,23 @@
     font-size: 10px;
   }
 }
+.document-create-dialog .web-import-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.document-create-dialog .web-import-toggle input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: #147c6e;
+}
+.document-create-dialog .web-import-fields { display: grid; gap: 7px; }
+.document-create-dialog .web-import-fields[hidden],
+.document-create-dialog .web-import-status[hidden] { display: none; }
+.document-create-dialog .web-import-hint,
+.document-create-dialog .web-import-status { margin: 0; font-size: 12px; line-height: 1.65; color: #68777d; }
+.document-create-dialog .web-import-status.is-error { color: #aa3e3e; }
+.document-create-dialog button:disabled { cursor: wait; opacity: .65; }

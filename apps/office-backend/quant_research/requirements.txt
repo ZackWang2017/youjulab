@@ -1,0 +1,5 @@
+bt==1.4.1
+numpy==2.2.6
+pandas==2.2.3
+python-dateutil==2.9.0.post0
+

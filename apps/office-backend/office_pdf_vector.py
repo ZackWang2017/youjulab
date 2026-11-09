@@ -8,8 +8,6 @@ from pathlib import Path
 from typing import Any, Callable
 
 import pymupdf
-import psycopg
-from psycopg.rows import dict_row
 
 from config import embedding_dim, pg_url, vector_backend
 from office_pdf_embed import EmbedError, embed_texts
@@ -40,6 +38,10 @@ def _conn():
     url = pg_url()
     if not url:
         raise ValueError("请先配置 OFFICE_PG_URL（含 pgvector 的 Postgres）。")
+    # 只有 pgvector 后端需要；桌面 sidecar 固定 sqlite-vec，不打包 psycopg。
+    import psycopg
+    from psycopg.rows import dict_row
+
     return psycopg.connect(url, row_factory=dict_row)
 
 
@@ -130,9 +132,11 @@ def _doc_lock(document_id: str) -> threading.Lock:
 
 
 def _file_meta(path: Path) -> tuple[int, str]:
-    data = path.read_bytes()
-    st = path.stat()
-    return int(st.st_mtime_ns), hashlib.sha256(data).hexdigest()
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return int(path.stat().st_mtime_ns), digest.hexdigest()
 
 
 def _split_page(page: int, text: str) -> list[dict[str, Any]]:
@@ -216,16 +220,33 @@ def get_index_status(document_id: str) -> dict[str, Any]:
             cur.execute("SELECT * FROM pdf_index WHERE document_id = %s", (document_id,))
             row = cur.fetchone()
     if not row:
-        return {"document_id": document_id, "status": "missing", "page_count": 0, "chunk_count": 0}
+        return {
+            "document_id": document_id,
+            "status": "missing",
+            "page_count": 0,
+            "chunk_count": 0,
+            "empty": False,
+            "error": "",
+            "phase": "",
+            "progress_done": 0,
+            "progress_total": 0,
+            "batch_size": 256,
+        }
+    chunk_count = int(row["chunk_count"] or 0)
+    ready = row["status"] == "ready"
     return {
         "document_id": row["document_id"],
         "status": row["status"],
         "page_count": row["page_count"],
-        "chunk_count": row["chunk_count"],
+        "chunk_count": chunk_count,
         "empty": bool(row.get("empty")),
         "error": row.get("error") or "",
         "updated_at": row["updated_at"].isoformat() if row.get("updated_at") else None,
         "layout_version": int(row.get("layout_version") or 0),
+        "phase": "",
+        "progress_done": chunk_count if ready else 0,
+        "progress_total": chunk_count if ready else 0,
+        "batch_size": 256,
     }
 
 

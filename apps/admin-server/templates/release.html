@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>有据 · 版本下载</title><link rel="stylesheet" href="/static/style.css"><link rel="stylesheet" href="/static/release.css"></head>
+<body>
+<header class="top"><img src="/static/logo.png" alt="有据" width="30" height="30"><a href="/release" class="brand">有据 <span>版本下载</span></a></header>
+<main class="public-downloads">
+  <div class="heading"><h1>桌面客户端下载</h1></div>
+  {% for release in releases %}
+  <article class="release">
+    <header><h2>v{{ release.version }}</h2>{% if release.latest %}<span class="badge latest">最新版本</span>{% endif %}{% if release.published_at %}<time datetime="{{ release.published_at.isoformat() }}">{{ release.published_at.strftime('%Y-%m-%d') }}</time>{% endif %}</header>
+    <div class="public-release-body">
+      {% if release.notes %}<p class="release-notes">{{ release.notes }}</p>{% endif %}
+      <ul class="public-artifacts">
+      {% for asset in release.artifacts %}
+        <li><div><strong>{% if asset.platform == 'darwin' %}macOS · {% if asset.arch == 'arm64' %}Apple 芯片{% else %}Intel{% endif %}{% else %}Windows · x64{% endif %}</strong><small>{{ '%.1f'|format(asset.size / 1048576) }} MB</small></div><a class="download-link" href="{{ request.url_for('download', identifier=asset.id, filename=asset.filename).path }}" download>下载安装包</a></li>
+      {% else %}<li class="empty">此版本暂无可下载的安装包。</li>{% endfor %}
+      </ul>
+    </div>
+  </article>
+  {% else %}<p class="empty">暂未发布版本，请稍后再来。</p>{% endfor %}
+</main>
+</body></html>

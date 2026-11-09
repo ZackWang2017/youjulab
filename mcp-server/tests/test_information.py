@@ -236,6 +236,16 @@ class GroupServiceTests(unittest.TestCase):
             service.list_items("u1", 1, today_only=True)
         self.assertIs(listed.call_args.kwargs.get("favorited"), True)
         self.assertIsNone(listed.call_args.kwargs.get("group_id"))
+        self.assertIsNone(listed.call_args.kwargs.get("fetched_date"), "收藏夹不按当天过滤，往日收藏也要显示")
+
+    def test_favorites_review_still_counts_today_only(self):
+        group = {"id": 1, "kind": "favorites", "name": "收藏夹"}
+        with patch.object(service.repo, "get_group", return_value=group), \
+             patch.object(service.repo, "public_group", return_value={"id": 1, "kind": "favorites", "name": "收藏夹", "config": {}}), \
+             patch.object(service.repo, "list_items", return_value=[]) as listed, \
+             patch.object(fetch, "today", return_value=date(2026, 10, 23)):
+            service.list_items("u1", 1, today_only=True, for_review=True)
+        self.assertEqual(listed.call_args.kwargs.get("fetched_date"), date(2026, 10, 23))
 
     def test_wechat_fetch_asks_for_login(self):
         group = {"id": 3, "kind": "wechat", "name": "公众号", "config": "{}"}
@@ -368,6 +378,48 @@ class AnnounceParseTests(unittest.TestCase):
         self.assertEqual(params["SECURITY_CODE"], "600000")
         self.assertNotIn("STOCKCODE", params)
         self.assertEqual(items[0]["url"], "https://static.sse.com.cn/disclosure/x.pdf")
+
+    def test_sec_retries_when_tls_closes_early(self):
+        ticker_req = httpx.Request("GET", "https://www.sec.gov/files/company_tickers.json")
+        efts_req = httpx.Request("GET", "https://efts.sec.gov/LATEST/search-index")
+        ticker_resp = httpx.Response(
+            200,
+            json={"0": {"cik_str": 320193, "ticker": "AAPL", "title": "Apple Inc."}},
+            request=ticker_req,
+        )
+        efts_resp = httpx.Response(
+            200,
+            json={
+                "hits": {
+                    "hits": [{
+                        "_id": "0000320193-26-000001:aapl-8k.htm",
+                        "_source": {
+                            "ciks": ["0000320193"],
+                            "form": "8-K",
+                            "file_date": "2026-10-01",
+                            "adsh": "0000320193-26-000001",
+                        },
+                    }],
+                },
+            },
+            request=efts_req,
+        )
+        calls = {"n": 0}
+
+        def fake_get(url, *args, **kwargs):
+            del args, kwargs
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise httpx.ConnectError("[SSL: UNEXPECTED_EOF_WHILE_READING]")
+            if "company_tickers.json" in str(url):
+                return ticker_resp
+            return efts_resp
+
+        with patch.object(announce.httpx, "get", side_effect=fake_get), \
+             patch.object(announce.time, "sleep"):
+            items = announce.fetch_sec("AAPL.US", "苹果")
+        self.assertEqual(calls["n"], 3)
+        self.assertIn("8-K", items[0]["title"])
 
     def test_sec_resolves_cik_and_maps_filing(self):
         ticker_req = httpx.Request("GET", "https://www.sec.gov/files/company_tickers.json")

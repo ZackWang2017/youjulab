@@ -19,10 +19,9 @@ DSH 侧接入（dsh-mcp-client 插件）见 agent-preset/investment-research/age
 模型看到的工具名始终是 mcp__finresearch__<tool>，与传输方式无关。
 
 设计要点：指标数值全部在本服务内确定性计算，模型只负责取数与解读。
-表格、文档和导图工具分别走同一进程的 /mcp/sheets、/mcp/documents、/mcp/mindmaps 及对应
-/api 路由，与财务 /mcp、/api/financial、PDF 渲染、选区 /api/office 分开。外部搜索走 /mcp/external-tools。
-单页读取走 /mcp/local-tools。财务、外部搜索与本地工具入口用静态 MCP_ACCESS_TOKEN；表格入口使用办公工作区每个用户自己的
-32 位访问令牌，用它找到登录邮箱账号后再挂项目。
+办公资产工具（表格/文档/导图/项目计划）已迁到桌面 office-backend；本进程只保留财务 /mcp、
+选区 /api/office、外部搜索 /mcp/external-tools、单页读取 /mcp/local-tools 等。
+财务、外部搜索与本地工具入口用静态 MCP_ACCESS_TOKEN。
 """
 
 from __future__ import annotations
@@ -76,12 +75,6 @@ for _layer in (
 import market_endpoint  # noqa: E402
 import pdf_report_endpoint  # noqa: E402
 import office_agent_endpoint  # noqa: E402
-import spreadsheet_endpoint  # noqa: E402
-import document_endpoint  # noqa: E402
-import mindmap_endpoint  # noqa: E402
-import project_plan_endpoint  # noqa: E402
-import pdf_index_endpoint  # noqa: E402
-import announcement_outline_endpoint  # noqa: E402
 import statement_endpoint  # noqa: E402
 import security_search_endpoint  # noqa: E402
 import search_endpoint as external_tools  # noqa: E402
@@ -93,7 +86,7 @@ import preset_news_endpoint  # noqa: E402
 import feed_endpoint  # noqa: E402
 import portfolio_endpoint  # noqa: E402
 import information_endpoint  # noqa: E402
-from access_token import bearer_matches, bearer_token, is_user_office_path, reset_incoming_access_token, set_incoming_access_token  # noqa: E402
+from access_token import bearer_matches, bearer_token  # noqa: E402
 from account_jwt import reset_claims, set_claims, verify  # noqa: E402
 from dotenv import load_dotenv  # noqa: E402
 
@@ -103,16 +96,6 @@ mcp = FastMCP("finresearch")
 market_endpoint.register_tools(mcp)
 pdf_report_endpoint.register_tools(mcp)
 office_agent_endpoint.register_tools(mcp)
-sheets_mcp = FastMCP("invp-sheets", streamable_http_path="/mcp/sheets")
-spreadsheet_endpoint.register_tools(sheets_mcp)
-docs_mcp = FastMCP("invp-documents", streamable_http_path="/mcp/documents")
-document_endpoint.register_tools(docs_mcp)
-pdf_index_endpoint.register_tools(docs_mcp)
-announcement_outline_endpoint.register_tools(docs_mcp)
-mindmaps_mcp = FastMCP("invp-mindmaps", streamable_http_path="/mcp/mindmaps")
-mindmap_endpoint.register_tools(mindmaps_mcp)
-project_plans_mcp = FastMCP("invp-project-plans", streamable_http_path="/mcp/project-plans")
-project_plan_endpoint.register_tools(project_plans_mcp)
 external_mcp = FastMCP("invp-external-tools", streamable_http_path="/mcp/external-tools")
 external_tools.register_tools(external_mcp)
 local_mcp = FastMCP("invp-local-tools", streamable_http_path="/mcp/local-tools")
@@ -128,7 +111,7 @@ preset_news_endpoint.register_tools(local_mcp)
 # ---------------------------------------------------------------------------
 
 def _run_http() -> None:
-    """同一进程：财务 /mcp、表格 /mcp/sheets、外部工具 /mcp/external-tools、本地工具 /mcp/local-tools。"""
+    """同一进程：财务 /mcp、外部工具 /mcp/external-tools、本地工具 /mcp/local-tools。"""
     import uvicorn
     from starlette.middleware.base import BaseHTTPMiddleware
     from starlette.responses import JSONResponse
@@ -140,10 +123,6 @@ def _run_http() -> None:
 
     app = mcp.streamable_http_app()
     from office_agent_endpoint import register_routes
-    from spreadsheet_endpoint import mount_sheet_mcp, register_routes as register_sheet_routes
-    from document_endpoint import register_routes as register_document_routes
-    from mindmap_endpoint import register_routes as register_mindmap_routes
-    from project_plan_endpoint import register_routes as register_project_plan_routes
     register_routes(app)
 
     _CORS = {
@@ -151,14 +130,6 @@ def _run_http() -> None:
         "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
         "Access-Control-Allow-Headers": "Content-Type, Authorization",
     }
-    register_sheet_routes(app, _CORS)
-    register_document_routes(app, _CORS)
-    register_mindmap_routes(app, _CORS)
-    register_project_plan_routes(app, _CORS)
-    mount_sheet_mcp(app, sheets_mcp)
-    mount_sheet_mcp(app, docs_mcp)
-    mount_sheet_mcp(app, mindmaps_mcp)
-    mount_sheet_mcp(app, project_plans_mcp)
     external_tools.mount_external_mcp(app, external_mcp)
     website_crawler_endpoint.mount_local_mcp(app, local_mcp)
 
@@ -217,16 +188,6 @@ def _run_http() -> None:
                 reset_claims(saved)
             response.headers.update(_CORS)
             return response
-        if is_user_office_path(request.url.path):
-            if not token:
-                return JSONResponse({"error": "unauthorized"}, status_code=401, headers=_CORS)
-            saved = set_incoming_access_token(token)
-            try:
-                response = await call_next(request)
-            finally:
-                reset_incoming_access_token(saved)
-            response.headers.update(_CORS)
-            return response
         if not bearer_matches(header):
             return JSONResponse({"error": "unauthorized"}, status_code=401, headers=_CORS)
         response = await call_next(request)
@@ -235,7 +196,7 @@ def _run_http() -> None:
 
     app.add_middleware(BaseHTTPMiddleware, dispatch=guard)
     print(
-        "mcp-server: finance, external-tools and local-tools use MCP_ACCESS_TOKEN; sheets, documents and mindmaps use per-user access token",
+        "mcp-server: finance, external-tools and local-tools use MCP_ACCESS_TOKEN; office sheets/documents live on desktop office-backend",
         file=sys.stderr,
     )
 
@@ -258,15 +219,9 @@ def _run_http() -> None:
     host = os.environ.get("FINANCE_MCP_HOST", "0.0.0.0")
     port = int(os.environ.get("FINANCE_MCP_PORT", "8000"))
     print(f"finresearch MCP server: streamable-http at http://{host}:{port}/mcp", file=sys.stderr)
-    print(f"invp-sheets MCP: streamable-http at http://{host}:{port}/mcp/sheets", file=sys.stderr)
-    print(f"invp-documents MCP: streamable-http at http://{host}:{port}/mcp/documents", file=sys.stderr)
-    print(f"invp-mindmaps MCP: streamable-http at http://{host}:{port}/mcp/mindmaps", file=sys.stderr)
-    print(f"invp-project-plans MCP: streamable-http at http://{host}:{port}/mcp/project-plans", file=sys.stderr)
     print(f"invp-external-tools MCP: streamable-http at http://{host}:{port}/mcp/external-tools", file=sys.stderr)
     print(f"invp-local-tools MCP: streamable-http at http://{host}:{port}/mcp/local-tools", file=sys.stderr)
-    print(f"spreadsheet API: POST http://{host}:{port}/api/spreadsheets/{{create,read,write,merge,unmerge,background,border,font}}", file=sys.stderr)
-    print(f"document API: POST http://{host}:{port}/api/documents/{{create,read,write,format}}", file=sys.stderr)
-    print(f"mindmap API: POST http://{host}:{port}/api/mindmaps/{{create,read,write,add-node,update-node,delete-node,move-node}}", file=sys.stderr)
+    print("office sheets/documents/mindmaps/project-plans: use desktop office-backend", file=sys.stderr)
     print(f"finresearch upload endpoint: POST http://{host}:{port}/upload?name=<文件名>.pdf", file=sys.stderr)
     print(f"finresearch financial API: GET http://{host}:{port}/api/financial/statements", file=sys.stderr)
     print(f"securities search: GET http://{host}:{port}/api/financial/securities/search", file=sys.stderr)

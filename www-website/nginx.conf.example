@@ -1,0 +1,25 @@
+# HTTP example only. Configure your own TLS certificate before enabling HTTPS.
+# Do not replace the existing app.youjulab.com server configuration.
+server {
+    listen 80;
+    server_name www.youjulab.com;
+    root /var/www/youjulab;
+    index index.html;
+    charset utf-8;
+
+    add_header X-Content-Type-Options nosniff always;
+    add_header Referrer-Policy strict-origin-when-cross-origin always;
+
+    location / {
+        try_files $uri $uri/ =404;
+    }
+
+    location /assets/ {
+        expires 1h;
+        try_files $uri =404;
+    }
+
+    location /design/ { return 404; }
+    location ~ /\. { deny all; }
+    location ~* \.(md|example)$ { return 404; }
+}

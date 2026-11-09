@@ -2,6 +2,7 @@ import { Editor } from '@tiptap/core';
 import Link from '@tiptap/extension-link';
 import StarterKit from '@tiptap/starter-kit';
 import { createIcons, icons } from 'lucide';
+import { assetIndexExtensions } from '../../asset-index';
 import { circleBullet, collapsibleListItem, fourLevelBulletTab } from '../rich-text-lists';
 import { stripOutlineReferences } from './outline';
 
@@ -35,6 +36,7 @@ function mountEditor(host: HTMLElement, doc: unknown, editable: boolean) {
       circleBullet,
       collapsibleListItem,
       fourLevelBulletTab,
+      ...assetIndexExtensions(),
     ],
     content: docOf(doc) as any,
     editable,

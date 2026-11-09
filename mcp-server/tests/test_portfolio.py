@@ -122,6 +122,18 @@ class SessionPriceTests(unittest.TestCase):
         )
         self.assertEqual((price, day, is_live), (D("102"), date(2026, 10, 22), False))
 
+        # 美股：纽约时间过零点到开盘前，腾讯 prev_close 仍是再前一日；应优先用入库收盘，其次用现价字段。
+        us_preopen = datetime(2026, 11, 6, 1, 17, tzinfo=ny)
+        price, day, is_live = mark_price(
+            "US", us_preopen, live=D("344.17"), prev_close=D("349.51"),
+            closes=[(date(2026, 11, 5), D("344.17")), (date(2026, 11, 4), D("349.51"))],
+        )
+        self.assertEqual((price, day, is_live), (D("344.17"), date(2026, 11, 5), False))
+        price, day, is_live = mark_price(
+            "US", us_preopen, live=D("344.17"), prev_close=D("349.51"), closes=[],
+        )
+        self.assertEqual((price, day, is_live), (D("344.17"), date(2026, 11, 5), False))
+
     def test_holding_change_uses_the_same_prices_as_the_session_rule(self):
         sh = ZoneInfo("Asia/Shanghai")
         quote = market.LiveQuote("600000.SH", D("11"), datetime(2026, 10, 22, 10, 0, tzinfo=sh), prev_close=D("10"))
@@ -373,19 +385,34 @@ class SchedulerTests(unittest.TestCase):
 
     def test_runs_once_after_trigger_time_on_weekdays(self):
         task = self._task("a")
-        self.assertFalse(self.scheduler.is_due(task, self._at("2026-10-14T16:59:00")))
+        self.store.mark("a", date(2026, 10, 13), "success")
+        self.assertFalse(self.scheduler.is_due(task, self._at("2026-10-14T16:59:00")), "前一交易日已跑过，17:00 前不触发")
         self.assertTrue(self.scheduler.is_due(task, self._at("2026-10-14T17:00:00")))
         self.scheduler.tick(self._at("2026-10-14T17:00:30"))
         self.assertEqual(self.calls, [("a", date(2026, 10, 14))])
         self.scheduler.tick(self._at("2026-10-14T18:00:00"))
         self.assertEqual(len(self.calls), 1, "同一天不会重复执行")
-        self.assertFalse(self.scheduler.is_due(task, self._at("2026-10-17T18:00:00")), "周六不触发")
         self.assertTrue(self.scheduler.is_due(task, self._at("2026-10-15T17:00:00")))
+        self.store.mark("a", date(2026, 10, 16), "success")
+        self.assertFalse(self.scheduler.is_due(task, self._at("2026-10-17T18:00:00")), "周五已跑过，周六不触发")
 
     def test_late_start_catches_up_same_day(self):
         self._task("a")
         self.scheduler.tick(self._at("2026-10-14T22:30:00"))
         self.assertEqual(self.calls, [("a", date(2026, 10, 14))])
+
+    def test_missed_trading_day_catches_up_on_next_start(self):
+        task = self._task("a")
+        self.store.mark("a", date(2026, 10, 21), "success")
+        # 周五晚上服务没开，周六上午启动：补跑周五，而不是等到下周一 17:00
+        self.assertEqual(self.scheduler.due_date(task, self._at("2026-10-24T10:00:00")), date(2026, 10, 23))
+        self.scheduler.tick(self._at("2026-10-24T10:00:00"))
+        self.assertEqual(self.calls, [("a", date(2026, 10, 23))])
+        # 周一 17:00 前不再重复补跑，17:00 后跑当天
+        self.scheduler.tick(self._at("2026-10-26T09:00:00"))
+        self.assertEqual(len(self.calls), 1)
+        self.scheduler.tick(self._at("2026-10-26T17:01:00"))
+        self.assertEqual(self.calls[-1], ("a", date(2026, 10, 26)))
 
     def test_dependency_chain_runs_in_order_within_one_tick(self):
         self._task("fx")
@@ -566,6 +593,26 @@ class YearToDateTests(unittest.TestCase):
         self.assertIsNone(ytd["start_nav"])
         self.assertIsNone(ytd["profit_cny"])
         self.assertFalse(ytd["since_inception"])
+
+
+class StatsPayloadTests(unittest.TestCase):
+    def test_series_carries_daily_net_invested_for_market_value_chart(self):
+        def row(day, nav, value, flow, cum_in, cum_out):
+            return {
+                "nav_date": date.fromisoformat(day), "nav": D(nav), "daily_return": None,
+                "total_value_cny": D(value), "net_flow_cny": D(flow), "units": D(value),
+                "cum_invested_cny": D(cum_in), "cum_withdrawn_cny": D(cum_out), "xirr": None,
+                "computed_at": datetime(2026, 10, 20, tzinfo=TZ),
+            }
+        series = [
+            row("2026-10-16", "1.000000", "100000", "100000", "100000", "0"),
+            row("2026-10-19", "1.020000", "132000", "30000", "130000", "0"),
+            row("2026-10-20", "1.010000", "111000", "-20000", "130000", "20000"),
+        ]
+        with patch.object(service.market, "get_risk_free_rate", return_value=None):
+            payload = service._stats_payload({"id": 1, "name": "测试"}, series, D("111000"))
+        self.assertEqual([D(p["net_invested_cny"]) for p in payload["series"]], [D("100000"), D("130000"), D("110000")])
+        self.assertEqual(D(payload["series"][-1]["total_value_cny"]), D("111000"))
 
 
 class ServiceValidationTests(unittest.TestCase):

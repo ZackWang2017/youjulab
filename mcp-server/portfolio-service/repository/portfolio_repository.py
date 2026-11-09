@@ -6,11 +6,43 @@ owner_id 是办公工作区的用户 id，由 office-backend 转发时在请求�
 from __future__ import annotations
 
 import threading
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import date
 from decimal import Decimal
 from typing import Any, Iterable
 
-from db.connection import get_connection
+from db.connection import get_connection as _connection
+from db.sqlite import SqliteConnection
+
+_transaction: ContextVar[Any] = ContextVar('portfolio_transaction', default=None)
+
+
+@contextmanager
+def get_connection():
+    current = _transaction.get()
+    if current is not None:
+        yield current
+    else:
+        with _connection() as conn:
+            yield conn
+
+
+@contextmanager
+def atomic_product(portfolio_id: int):
+    """Keep product, cash settlement and ledger updates in one transaction."""
+    ensure_schema()
+    with _connection() as conn:
+        with conn.cursor() as cur:
+            if isinstance(conn, SqliteConnection):
+                cur.execute('BEGIN IMMEDIATE')
+            else:
+                cur.execute('SELECT id FROM portfolios WHERE id = %s FOR UPDATE', (portfolio_id,))
+        token = _transaction.set(conn)
+        try:
+            yield
+        finally:
+            _transaction.reset(token)
 
 _DDL = """
 CREATE TABLE IF NOT EXISTS portfolios (
@@ -316,7 +348,7 @@ def held_tickers_everywhere() -> list[dict]:
                 """
                 SELECT ticker_code, market_code, DATE(MIN(opened_at)) AS first_date
                 FROM portfolio_holdings
-                WHERE market_code <> 'CASH'
+                WHERE market_code NOT IN ('CASH', 'FIXED', 'FUND')
                 GROUP BY ticker_code, market_code
                 ORDER BY ticker_code
                 """

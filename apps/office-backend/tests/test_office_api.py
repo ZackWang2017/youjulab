@@ -131,6 +131,31 @@ class OfficeApiTests(unittest.TestCase):
         self.assertEqual(asset["project_id"], project_id)
         self.assertIsNone(asset["file_path"])
 
+    def test_document_folders_are_project_scoped_without_mutating_assets(self):
+        data = self.auth("document-folders@example.com")
+        headers = {"Authorization": f"Bearer {data['token']}"}
+        project_id = data["user"]["last_project_id"]
+        doc = self.client.post(
+            f"/projects/{project_id}/assets", headers=headers,
+            json={"kind": "document", "name": "纪要"},
+        ).json()
+        initial = self.client.get(f"/projects/{project_id}/document-folders", headers=headers)
+        self.assertEqual(initial.status_code, 200)
+        self.assertFalse(initial.json()["configured"])
+        body = {
+            "folders": [{"id": "notes", "name": "笔记", "children": []}],
+            "placements": {doc["id"]: "notes"},
+            "collapsed": {"notes": True},
+        }
+        saved = self.client.put(f"/projects/{project_id}/document-folders", headers=headers, json=body)
+        self.assertEqual(saved.status_code, 200)
+        self.assertTrue(saved.json()["configured"])
+        self.assertEqual(saved.json()["placements"], body["placements"])
+        self.assertEqual(saved.json()["collapsed"], body["collapsed"])
+        asset = self.store.asset(data["user"]["id"], doc["id"])
+        self.assertEqual(asset["kind"], "document")
+        self.assertEqual(asset.get("name"), "纪要")
+
     def test_document_visibility_and_legacy_migration(self):
         data = self.auth("visibility@example.com")
         headers = {"Authorization": f"Bearer {data['token']}"}
@@ -178,6 +203,79 @@ class OfficeApiTests(unittest.TestCase):
 
         removed = self.client.delete(f"/assets/{personal['id']}", headers=headers)
         self.assertEqual(removed.status_code, 200)
+
+    def test_financial_accounts_research_create_save_and_visibility(self):
+        data = self.auth("accounts@example.com")
+        headers = {"Authorization": f"Bearer {data['token']}"}
+        project = data["user"]["last_project_id"]
+        content = {
+            "format": "invp-research-diagram-v1", "type": "financial_accounts", "title": "账户图",
+            "stock": {"ticker_code": "00700.HK", "name": "腾讯控股"}, "standard": "HKFRS",
+            "accounts": [
+                {"id": "cash", "name": "现金", "group": "asset", "normal": "debit", "note": "", "position": {"x": 0, "y": 0}},
+                {"id": "loan", "name": "借款", "group": "liability", "normal": "credit", "note": "", "position": {"x": 340, "y": 0}},
+            ],
+            "rules": [{"id": "borrow", "name": "取得借款", "debits": ["cash"], "credits": ["loan"], "next": []}],
+        }
+        response = self.client.post(f"/projects/{project}/assets", headers=headers, json={"kind": "research", "name": "账户图", "visibility": "user", "content": content})
+        self.assertEqual(response.status_code, 200, response.text)
+        asset = response.json()
+        self.assertEqual(asset["placement"], "user")
+        self.assertEqual(asset["content"], content)
+        other = self.client.post("/projects", headers=headers, json={"name": "另一项目"}).json()
+        listed = self.client.get(f"/projects/{other['id']}/assets?kind=research", headers=headers).json()["assets"]
+        self.assertIn(asset["id"], [a["id"] for a in listed])
+        content["rules"][0]["condition"] = "收到本金"
+        saved = self.client.put(f"/assets/{asset['id']}", headers=headers, json={"content": content, "revision": asset["revision"]})
+        self.assertEqual(saved.status_code, 200, saved.text)
+        self.assertEqual(self.client.get(f"/assets/{asset['id']}", headers=headers).json()["content"], content)
+        stranger = self.auth("accounts-other@example.com")
+        self.assertEqual(self.client.get(f"/assets/{asset['id']}", headers={"Authorization": f"Bearer {stranger['token']}"}).status_code, 404)
+        content["rules"][0]["credits"] = ["missing"]
+        invalid = self.client.put(f"/assets/{asset['id']}", headers=headers, json={"content": content, "revision": saved.json()["revision"]})
+        self.assertEqual(invalid.status_code, 400)
+
+    def test_research_creation_preserves_selected_diagram_type(self):
+        data = self.auth("research-create@example.com")
+        headers = {"Authorization": f"Bearer {data['token']}"}
+        for kind in ("timeline", "fishbone"):
+            content = {"format": "invp-research-diagram-v1", "type": kind, "title": "新图", "events": [], "categories": [], "problem": "问题"}
+            response = self.client.post(f"/projects/{data['user']['last_project_id']}/assets", headers=headers, json={"kind": "research", "name": "新图", "content": content})
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.json()["content"]["type"], kind)
+            self.assertEqual(response.json()["placement"], "project")
+
+    def test_sheet_visibility_create_and_edit(self):
+        data = self.auth("sheet-vis@example.com")
+        headers = {"Authorization": f"Bearer {data['token']}"}
+        first = data["user"]["last_project_id"]
+        personal = self.client.post(
+            f"/projects/{first}/assets",
+            headers=headers,
+            json={"kind": "sheet", "name": "个人表", "visibility": "user"},
+        ).json()
+        self.assertEqual(personal["placement"], "user")
+        self.assertIsNone(personal["project_id"])
+        self.assertEqual(personal["kind"], "sheet")
+
+        second = self.client.post("/projects", headers=headers, json={"name": "另一项目"}).json()
+        listed = self.client.get(
+            f"/projects/{second['id']}/assets?kind=sheet", headers=headers,
+        ).json()["assets"]
+        self.assertIn(personal["id"], [item["id"] for item in listed])
+
+        self.client.post(f"/projects/{second['id']}/select", headers=headers)
+        project_scoped = self.client.put(
+            f"/assets/{personal['id']}",
+            headers=headers,
+            json={"revision": personal["revision"], "name": "项目表", "visibility": "project"},
+        ).json()
+        self.assertEqual(project_scoped["placement"], "project")
+        self.assertEqual(project_scoped["project_id"], second["id"])
+        only_second = self.client.get(
+            f"/projects/{first}/assets?kind=sheet", headers=headers,
+        ).json()["assets"]
+        self.assertNotIn(personal["id"], [item["id"] for item in only_second])
 
     def test_project_plan_visibility_create_and_edit(self):
         data = self.auth("plan-vis@example.com")
@@ -240,6 +338,26 @@ class OfficeApiTests(unittest.TestCase):
         ).json()
         self.assertEqual(project_scoped["placement"], "project")
         self.assertEqual(project_scoped["project_id"], second["id"])
+
+    def test_diagram_can_be_deleted(self):
+        data = self.auth("diagram-del@example.com")
+        headers = {"Authorization": f"Bearer {data['token']}"}
+        project = data["user"]["last_project_id"]
+        seeded = data["user"]["last_assets"]["diagram"]
+        extra = self.client.post(
+            f"/projects/{project}/assets",
+            headers=headers,
+            json={"kind": "diagram", "name": "可删绘图"},
+        ).json()
+        removed = self.client.delete(f"/assets/{extra['id']}", headers=headers)
+        self.assertEqual(removed.status_code, 200, removed.text)
+        remain = self.client.get(f"/projects/{project}/assets?kind=diagram", headers=headers).json()["assets"]
+        self.assertEqual([item["id"] for item in remain], [seeded])
+        # 绘图允许删光，不强制至少保留一份
+        last = self.client.delete(f"/assets/{seeded}", headers=headers)
+        self.assertEqual(last.status_code, 200, last.text)
+        empty = self.client.get(f"/projects/{project}/assets?kind=diagram", headers=headers).json()["assets"]
+        self.assertEqual(empty, [])
 
     def test_user_tools_stay_visible_across_projects(self):
         data = self.auth("a@example.com")
@@ -1139,7 +1257,8 @@ class OfficeApiTests(unittest.TestCase):
         self.assertIn(token, skill.text)
         self.assertNotIn("__ACCESS_TOKEN__", skill.text)
         self.assertNotIn("__MCP_BASE_URL__", skill.text)
-        self.assertIn("http://127.0.0.1:8000/mcp/sheets", skill.text)
+        self.assertNotIn("__OFFICE_BASE_URL__", skill.text)
+        self.assertIn("http://127.0.0.1:8100/mcp/sheets", skill.text)
         self.assertIn("/mcp/sheets", skill.text)
         self.assertIn("/api/spreadsheets/read", skill.text)
         self.assertIn("/mcp/documents", skill.text)
@@ -1211,6 +1330,38 @@ class OfficeApiTests(unittest.TestCase):
             json={"revision": saved.json()["revision"], "content": {"unexpected": "body"}},
         )
         self.assertEqual(rejected.status_code, 400)
+
+    def test_pdf_translation_is_saved_alongside_notebook_and_translation_settings(self):
+        data = self.auth("pdf-translation@example.com")
+        headers = {"Authorization": f"Bearer {data['token']}"}
+        created = self.client.post(
+            f"/projects/{data['user']['last_project_id']}/assets",
+            headers=headers, json={"kind": "pdf", "name": "英文年报"},
+        ).json()
+        notebook = {"type": "doc", "content": [{"type": "paragraph"}]}
+        first = self.client.put(
+            f"/assets/{created['id']}", headers=headers,
+            json={"revision": created["revision"], "content": {"notebook": notebook}},
+        ).json()
+        translation = {"format": "pdf-translation-v1", "pages": {"1": {
+            "source": "Revenue increased.", "translation": "收入增长。", "translatedAt": "2026-10-29T00:00:00Z",
+        }}}
+        second = self.client.put(
+            f"/assets/{created['id']}", headers=headers,
+            json={"revision": first["revision"], "content": {"translation": translation}},
+        )
+        self.assertEqual(second.status_code, 200, second.text)
+        self.assertEqual(second.json()["content"], {"notebook": notebook, "translation": translation})
+        saved_settings = self.client.put(
+            "/auth/translation-settings", headers=headers,
+            json={"domains": ["investment_research", "financial_report"], "market": "hong_kong", "mode": "terminology", "context": "港股年报，金额以人民币百万元列示。"},
+        )
+        self.assertEqual(saved_settings.status_code, 200)
+        self.assertEqual(saved_settings.json()["domains"], ["investment_research", "financial_report"])
+        settings = self.client.get("/auth/translation-settings", headers=headers).json()
+        self.assertEqual(settings["market"], "hong_kong")
+        self.assertEqual(settings["mode"], "terminology")
+        self.assertEqual(settings["context"], "港股年报，金额以人民币百万元列示。")
 
     def _sample_pdf(self, text="Hello annotation sample"):
         import pymupdf

@@ -155,6 +155,8 @@ export function mountPortfolio(section: HTMLElement, onError: (error: unknown) =
 
   function holdingRow(h: Holding, all = false) {
     const cash = h.market_code === 'CASH';
+    const product = Boolean(h.asset_type);
+    const fixed = h.asset_type === 'fixed_income';
     const source = SOURCE_LABEL[h.price_source] ?? SOURCE_LABEL.none;
     const priceStamp = h.price_source === 'live'
       ? formatClock(h.price_as_of)
@@ -162,24 +164,25 @@ export function mountPortfolio(section: HTMLElement, onError: (error: unknown) =
     const profitSign = signClass(h.profit_cny ?? h.profit);
     const sources = (h.portfolios ?? []).map(name => `<span class="portfolio-chip-small">${esc(name)}</span>`).join('');
     return `<tr data-holding="${h.id ?? ''}">
-      <td class="${all ? 'portfolio-aggregate-asset-cell' : ''}"><div class="portfolio-asset-name" title="${esc(h.name)}">${esc(h.name)}</div><div class="portfolio-asset-meta"><span>${esc(h.stock_code)}</span><span class="portfolio-badge market-${esc(h.market_code.toLowerCase())}">${esc(h.market_name)}</span><span>${esc(h.currency)}</span></div></td>
+      <td class="${all ? 'portfolio-aggregate-asset-cell' : ''}"><div class="portfolio-asset-name" title="${esc(h.name)}">${esc(h.name)}</div><div class="portfolio-asset-meta">${product ? '' : `<span>${esc(h.stock_code)}</span>`}<span class="portfolio-badge market-${esc(h.market_code.toLowerCase())}">${esc(h.market_name)}</span><span>${esc(h.currency)}</span></div></td>
       ${all ? `<td class="portfolio-sources">${sources || '—'}</td>` : ''}
-      <td class="num">${formatMoneyWithCurrency(h.avg_cost, h.currency, 4)}</td>
-      <td class="num">${cash ? formatMoney(h.shares, 2) : formatShares(h.shares)}</td>
-      <td class="num"><div>${formatMoneyWithCurrency(h.current_price, h.currency, 4)}</div>${cash ? '' : `<div class="portfolio-asset-meta right"><span class="portfolio-badge ${source.cls}">${source.label}</span>${priceStamp ? `<span>${priceStamp}</span>` : ''}</div>`}</td>
+      <td class="num">${fixed ? '—' : formatMoneyWithCurrency(h.avg_cost, h.currency, 4)}</td>
+      <td class="num">${fixed ? '—' : cash ? formatMoney(h.shares, 2) : formatShares(h.shares)}</td>
+      <td class="num"><div>${fixed ? '—' : formatMoneyWithCurrency(h.current_price, h.currency, 4)}</div>${cash ? '' : `<div class="portfolio-asset-meta right"><span class="portfolio-badge ${source.cls}">${product ? '手动估值' : source.label}</span>${priceStamp ? `<span>${priceStamp}</span>` : ''}</div>`}</td>
       <td class="num ${signClass(h.change_pct)}">${cash || h.change_pct === null ? '—' : `${formatMoney(h.change, 3)}<div class="portfolio-sub">${formatPercent(h.change_pct, 2, true)}</div>`}</td>
       <td class="num ${signClass(h.year_change_pct)}">${cash || h.year_change_pct === null ? '—' : formatPercent(h.year_change_pct, 2, true)}</td>
       <td class="num">${formatMoneyWithCurrency(h.market_value, h.currency, 2)}</td>
       <td class="num strong">${formatMoney(h.market_value_cny, 2)}</td>
       <td class="num ${profitSign}"><div>${formatMoneyWithCurrency(h.profit, h.currency, 2)}</div>${h.currency !== 'CNY' && h.profit_cny != null ? `<div class="portfolio-sub">¥${formatMoney(h.profit_cny, 2)}</div>` : ''}</td>
-      <td class="num ${signClass(h.return_rate)}">${formatPercent(h.return_rate)}</td>
+      <td class="num ${signClass(h.return_rate)}" ${product ? `title="${fixed ? '简单累计收益率＝（持有金额＋累计转出－累计转入）÷累计转入' : '净值增长率＝最新单位净值÷剩余持仓加权买入净值－1'}"` : ''}>${formatPercent(h.return_rate)}</td>
       <td class="num">${formatPercentPoint(h.current_allocation_pct)}</td>
       ${all ? '' : `<td class="num portfolio-muted">${formatPercentPoint(h.target_allocation_pct)}</td>
       <td class="center"><div class="portfolio-row-actions">
-        <button type="button" data-action="${cash ? 'deposit' : 'add'}" data-holding-id="${h.id}">${cash ? '存入' : '增持'}</button>
-        <button type="button" data-action="${cash ? 'withdraw' : 'reduce'}" data-holding-id="${h.id}">${cash ? '取出' : '减持'}</button>
+        <button type="button" data-action="${cash ? 'deposit' : 'add'}" data-holding-id="${h.id}">${product ? '转入' : cash ? '存入' : '增持'}</button>
+        <button type="button" data-action="${cash ? 'withdraw' : 'reduce'}" data-holding-id="${h.id}">${product ? '转出' : cash ? '取出' : '减持'}</button>
+        ${product ? `<button type="button" data-action="valuation" data-holding-id="${h.id}">${fixed ? '金额' : '净值'}</button>` : ''}
         ${cash ? `<button type="button" data-dividend="${h.id}">分红</button>` : ''}
-        ${cash ? '' : `<button type="button" data-action="close" data-holding-id="${h.id}" class="portfolio-danger">清仓</button>`}
+        ${cash || product ? '' : `<button type="button" data-action="close" data-holding-id="${h.id}" class="portfolio-danger">清仓</button>`}
         <button type="button" data-holding-tx="${h.id}" title="交易流水"><i data-lucide="receipt-text"></i></button>
       </div></td>`}
     </tr>`;
@@ -232,32 +235,36 @@ export function mountPortfolio(section: HTMLElement, onError: (error: unknown) =
           : '无风险利率（中国 10 年期国债收益率）暂未获取到，夏普比率不显示；波动率按 252 个交易日年化。'}</p>
         ${hasSeries ? '' : '<p class="portfolio-hint">记录第一笔买入或存入后，这里会出现净值。</p>'}
       </section>
-      <section class="portfolio-card portfolio-card-chart">
-        <div class="portfolio-card-title"><i data-lucide="chart-line"></i>净值曲线</div>
-        <div class="portfolio-chart" data-chart="nav">${hasSeries ? '' : '<p class="portfolio-hint">暂无数据</p>'}</div>
-      </section>
-      <section class="portfolio-card portfolio-card-xirr">
-        <div class="portfolio-card-title"><i data-lucide="trending-up"></i>XIRR 年化收益</div>
-        <div class="portfolio-nav-main"><span class="portfolio-big ${signClass(xirrNow)}">${xirrNow === null ? '—' : formatPercent(xirrNow, 2, true)}</span><span class="portfolio-muted">截至 ${formatDate(stats.xirr.as_of)}（按实时市值）</span></div>
-        <div class="portfolio-chart portfolio-chart-small" data-chart="xirr">${hasSeries ? '' : '<p class="portfolio-hint">持有满 7 天后开始显示 XIRR 曲线</p>'}</div>
-      </section>
       <section class="portfolio-card portfolio-card-totals">
         <div class="portfolio-card-title"><i data-lucide="wallet"></i>资金与市值</div>
         <div class="portfolio-totals">
+          <div class="is-wide is-key"><span>当前总市值</span><b class="strong">¥${formatMoney(t.total_market_value_cny, 2)}</b></div>
           <div><span>累计投入成本</span><b>¥${formatMoney(t.cum_invested_cny, 2)}</b></div>
           <div><span>累计取出</span><b>¥${formatMoney(t.cum_withdrawn_cny, 2)}</b></div>
-          <div><span>当前总市值</span><b class="strong">¥${formatMoney(t.total_market_value_cny, 2)}</b></div>
           <div><span>净投入</span><b>¥${formatMoney(t.net_invested_cny, 2)}</b></div>
-          <div><span>累计收益（市值 − 净投入）</span><b class="${signClass(t.total_profit_cny)}">¥${formatMoney(t.total_profit_cny, 2)}</b></div>
+          <div><span>累计收益</span><b class="${signClass(t.total_profit_cny)}">¥${formatMoney(t.total_profit_cny, 2)}</b><small>市值 − 净投入</small></div>
         </div>
         <div class="portfolio-totals-year"><i data-lucide="calendar-range"></i>${yearLabel}${nav.ytd_since_inception ? '（自建仓起）' : ''}</div>
         <div class="portfolio-totals">
           <div><span>年初市值</span><b>${t.year_start_value_cny === null ? '—' : `¥${formatMoney(t.year_start_value_cny, 2)}`}</b></div>
           <div><span>今年新增</span><b>${t.ytd_inflow_cny === null ? '—' : `¥${formatMoney(t.ytd_inflow_cny, 2)}`}</b></div>
           <div><span>今年取出</span><b>${t.ytd_outflow_cny === null ? '—' : `¥${formatMoney(t.ytd_outflow_cny, 2)}`}</b></div>
-          <div><span>今年净浮盈（市值 − 年初 − 新增 + 取出）</span><b class="${signClass(t.ytd_profit_cny)}">${t.ytd_profit_cny === null ? '—' : `¥${formatMoney(t.ytd_profit_cny, 2)}`}</b></div>
+          <div><span>今年净浮盈</span><b class="${signClass(t.ytd_profit_cny)}">${t.ytd_profit_cny === null ? '—' : `¥${formatMoney(t.ytd_profit_cny, 2)}`}</b><small>市值 − 年初 − 新增 + 取出</small></div>
         </div>
         ${dividendSection(stats, yearLabel)}
+      </section>
+      <section class="portfolio-card portfolio-card-chart">
+        <div class="portfolio-card-title"><i data-lucide="chart-line"></i>净值曲线</div>
+        <div class="portfolio-chart" data-chart="nav">${hasSeries ? '' : '<p class="portfolio-hint">暂无数据</p>'}</div>
+      </section>
+      <section class="portfolio-card portfolio-card-value">
+        <div class="portfolio-card-title"><i data-lucide="chart-area"></i>总市值曲线<span class="portfolio-card-title-aside">虚线为净投入</span></div>
+        <div class="portfolio-chart portfolio-chart-medium" data-chart="value">${hasSeries ? '' : '<p class="portfolio-hint">暂无数据</p>'}</div>
+      </section>
+      <section class="portfolio-card portfolio-card-xirr">
+        <div class="portfolio-card-title"><i data-lucide="trending-up"></i>XIRR 年化收益</div>
+        <div class="portfolio-nav-main"><span class="portfolio-big ${signClass(xirrNow)}">${xirrNow === null ? '—' : formatPercent(xirrNow, 2, true)}</span><span class="portfolio-muted">截至 ${formatDate(stats.xirr.as_of)}（按实时市值）</span></div>
+        <div class="portfolio-chart portfolio-chart-small" data-chart="xirr">${hasSeries ? '' : '<p class="portfolio-hint">持有满 7 天后开始显示 XIRR 曲线</p>'}</div>
       </section>
     </div>`;
   }
@@ -271,11 +278,10 @@ export function mountPortfolio(section: HTMLElement, onError: (error: unknown) =
       <td class="num">¥${formatMoney(item.total_cny, 2)}</td>
       <td class="num ${signClass(item.yield_rate)}">${item.yield_rate === null ? '—' : formatPercent(item.yield_rate, 2)}</td>
     </tr>`).join('');
-    return `<div class="portfolio-totals-year"><i data-lucide="hand-coins"></i>分红</div>
+    return `<div class="portfolio-totals-year"><i data-lucide="hand-coins"></i>分红<span class="portfolio-totals-year-aside">${d.items.length} 只标的</span></div>
       <div class="portfolio-totals">
         <div><span>${yearLabel}累计分红</span><b class="${signClass(toNumber(d.year_cny) ? d.year_cny : null)}">¥${formatMoney(d.year_cny, 2)}</b></div>
         <div><span>累计分红</span><b>¥${formatMoney(d.total_cny, 2)}</b></div>
-        <div><span>分红标的</span><b>${d.items.length} 只</b></div>
       </div>
       ${rows ? `<table class="portfolio-table portfolio-dividend-table">
         <thead><tr><th>标的</th><th class="num">次数</th><th class="num">${yearLabel}分红</th><th class="num">累计分红</th><th class="num">股息率</th></tr></thead>
@@ -308,6 +314,45 @@ export function mountPortfolio(section: HTMLElement, onError: (error: unknown) =
           areaStyle: { color: { type: 'linear', x: 0, y: 0, x2: 0, y2: 1, colorStops: [{ offset: 0, color: 'rgba(20,124,110,.28)' }, { offset: 1, color: 'rgba(20,124,110,.02)' }] } },
           markLine: { silent: true, symbol: 'none', lineStyle: { color: '#b9c2c7', type: 'dashed' }, label: { show: false }, data: [{ yAxis: 1 }] },
         }],
+      });
+      charts.push(chart);
+    }
+    const valueHost = shell.querySelector<HTMLElement>('[data-chart="value"]');
+    if (valueHost) {
+      const chart = echarts.init(valueHost);
+      const values = stats.series.map(p => toNumber(p.total_value_cny));
+      const invested = stats.series.map(p => (p.net_invested_cny == null ? null : toNumber(p.net_invested_cny)));
+      const hasInvested = invested.some(v => v !== null);
+      const compact = (v: number) => (Math.abs(v) >= 1e8 ? `${(v / 1e8).toFixed(2)}亿` : Math.abs(v) >= 1e4 ? `${(v / 1e4).toFixed(1)}万` : v.toFixed(0));
+      chart.setOption({
+        grid: { left: 60, right: 16, top: 18, bottom: 32 },
+        tooltip: {
+          trigger: 'axis',
+          formatter: (params: any) => {
+            const idx = params[0].dataIndex;
+            const p = stats!.series[idx];
+            const value = values[idx];
+            const base = invested[idx];
+            const profit = value !== null && base !== null ? value - base : null;
+            const flow = toNumber(p.net_flow_cny);
+            return `${p.date}<br>总市值 <b>¥${formatMoney(value, 2)}</b>`
+              + (base === null ? '' : `<br>净投入 ¥${formatMoney(base, 2)}`)
+              + (profit === null ? '' : `<br>浮盈 <span style="color:${profit > 0 ? '#c73b3b' : profit < 0 ? '#1d8a5a' : 'inherit'}">¥${formatMoney(profit, 2)}</span>`)
+              + (flow ? `<br>资金${flow > 0 ? '流入' : '流出'} ¥${formatMoney(Math.abs(flow), 2)}` : '');
+          },
+        },
+        xAxis: { type: 'category', data: dates, boundaryGap: false, axisLabel: { color: '#78858d', fontSize: 11 }, axisLine: { lineStyle: { color: '#dfe4e7' } } },
+        yAxis: { type: 'value', scale: true, axisLabel: { color: '#78858d', fontSize: 11, formatter: compact }, splitLine: { lineStyle: { color: '#eef1f3' } } },
+        series: [
+          {
+            type: 'line', name: '总市值', data: values, smooth: true, showSymbol: false, lineStyle: { width: 2, color: '#c2862b' },
+            areaStyle: { color: { type: 'linear', x: 0, y: 0, x2: 0, y2: 1, colorStops: [{ offset: 0, color: 'rgba(194,134,43,.26)' }, { offset: 1, color: 'rgba(194,134,43,.02)' }] } },
+          },
+          ...(hasInvested ? [{
+            type: 'line', name: '净投入', data: invested, step: 'end', showSymbol: false, connectNulls: true,
+            lineStyle: { width: 1.5, color: '#7b8a92', type: 'dashed' },
+          }] : []),
+        ],
       });
       charts.push(chart);
     }

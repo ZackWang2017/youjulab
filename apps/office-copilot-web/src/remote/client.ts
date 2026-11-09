@@ -1,9 +1,12 @@
-/** 远程 mcp。调试默认本机 8000；部署后在登录窗或设置里改成服务器地址。 */
+/** Remote Python MCP; independent from the local Office asset service. */
 
-export const DEFAULT_REMOTE_BASE = 'http://127.0.0.1:8000';
+export const DEFAULT_REMOTE_BASE = 'http://192.168.0.5:8000';
 const URL_KEY = 'youju-remote-base';
 const TOKEN_KEY = 'youju-remote-token';
 const EMAIL_KEY = 'youju-remote-email';
+const OFFLINE_MESSAGE = '当前为离线模式，访问远程服务请先登录。';
+/** 只放内存：Electron 会把 sessionStorage 落盘，重启后仍应回到登录页重新判断能否在线。 */
+let offline = false;
 
 export class RemoteAuthError extends Error {
   constructor(message = '请先登录。') { super(message); this.name = 'RemoteAuthError'; }
@@ -20,14 +23,13 @@ export function remoteBase() {
 
 /** 浏览器开发态对本机默认地址走 Vite /backend 代理，避免跨域 OPTIONS 预检。 */
 export function remoteFetchBase() {
-  // 桌面端服务随应用随机端口启动。不能再请求旧实例或默认 8000。
-  const localMcp = typeof window !== 'undefined' ? window.youju?.mcpApiBase : '';
-  if (typeof window !== 'undefined' && window.youju?.isDesktop && localMcp) return localMcp.replace(/\/$/, '');
   const base = remoteBase();
   // 桌面壳或本机 office-backend 托管页：直连远程，不要走 Vite /backend。
-  if (typeof window !== 'undefined' && window.youju?.isDesktop) return base;
+  if (typeof window !== 'undefined' && window.youju?.isDesktop && window.youju.officeApiBase) {
+    return window.youju.officeApiBase.replace(/\/$/, '') + '/desktop-mcp';
+  }
   if (typeof window !== 'undefined' && window.youju?.officeApiBase) return base;
-  if (base === DEFAULT_REMOTE_BASE || base === 'http://localhost:8000') return '/backend';
+  if (base === 'http://127.0.0.1:8000' || base === 'http://localhost:8000') return '/backend';
   return base;
 }
 
@@ -41,9 +43,20 @@ export function remoteToken() {
   return localStorage.getItem(TOKEN_KEY);
 }
 
+export function offlineMode() {
+  return offline;
+}
+
+export function setOfflineMode(on: boolean) {
+  offline = on;
+}
+
 export function setRemoteToken(token: string | null) {
-  if (token) localStorage.setItem(TOKEN_KEY, token);
-  else {
+  if (token) {
+    localStorage.setItem(TOKEN_KEY, token);
+    setOfflineMode(false);
+  } else {
+    void window.youju?.setBackupSession?.(null).catch(() => {});
     localStorage.removeItem(TOKEN_KEY);
     localStorage.removeItem(EMAIL_KEY);
     try { sessionStorage.removeItem('youju-bound-remote'); } catch { /* ignore */ }
@@ -80,6 +93,9 @@ function errorMessage(data: any, status: number) {
 }
 
 export async function remoteFetch(path: string, init: RequestInit = {}) {
+  if (offlineMode() && path !== '/api/account/login' && path !== '/api/account/register') {
+    throw new RemoteAuthError(OFFLINE_MESSAGE);
+  }
   const headers = new Headers(init.headers);
   const token = remoteToken();
   if (token && !headers.has('Authorization')) headers.set('Authorization', `Bearer ${token}`);
@@ -151,7 +167,7 @@ declare global {
       appVersion?: string;
       /** Electron 注入的本机 office-backend 根地址，例如 http://127.0.0.1:54321 */
       officeApiBase?: string;
-      /** Electron 注入的本机 mcp-server 根地址，例如 http://127.0.0.1:54322 */
+      /** Configured remote MCP address. */
       mcpApiBase?: string;
       getConfig?: () => Promise<{
         remoteBaseUrl: string;
@@ -185,12 +201,14 @@ declare global {
         password: string;
         accountId?: string;
       }) => Promise<Record<string, unknown>>;
-      backupStatus?: (email: string) => Promise<{ directory: string; enabled: boolean; lastBackupAt: string; records: BackupRecord[] }>;
+      setBackupSession?: (token: string | null) => Promise<void>;
+      backupStatus?: (email: string) => Promise<{ directory: string; enabled: boolean; lastBackupAt: string; records: BackupRecord[]; warning?: string; progress?: BackupProgress }>;
       setBackupDirectory?: (directory: string) => Promise<Record<string, unknown>>;
       setBackupScheduleEnabled?: (enabled: boolean) => Promise<Record<string, unknown>>;
       onBackupProgress?: (listener: (progress: BackupProgress) => void) => () => void;
       createBackup?: () => Promise<BackupRecord>;
-      restoreBackup?: (payload: { id: string; email: string; accountId: string }) => Promise<{ ok: boolean; restartRequired: boolean }>;
+      retryBackupUpload?: (id: string) => Promise<BackupRecord>;
+      restoreBackup?: (payload: { id: string; token: string }) => Promise<{ ok: boolean; restartRequired: boolean }>;
       quitAfterRestore?: () => Promise<void>;
     };
   }
@@ -202,6 +220,12 @@ export interface BackupRecord {
   createdAt: string;
   kind: string;
   email?: string;
+  version?: number;
+  state?: 'local' | 'remote' | 'synced' | 'upload_failed';
+  legacy?: boolean;
+  localAvailable?: boolean;
+  warning?: string;
+  uploadError?: string;
 }
 
 export interface BackupProgress {

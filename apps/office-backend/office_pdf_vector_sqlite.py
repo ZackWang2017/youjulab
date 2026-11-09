@@ -41,6 +41,21 @@ def _connect() -> sqlite3.Connection:
         return _CONN
 
 
+_PROGRESS_BATCH = 256
+
+
+def _ensure_progress_columns(conn: sqlite3.Connection) -> None:
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(pdf_index)")}
+    alters = (
+        ("phase", "ALTER TABLE pdf_index ADD COLUMN phase TEXT NOT NULL DEFAULT ''"),
+        ("progress_done", "ALTER TABLE pdf_index ADD COLUMN progress_done INTEGER NOT NULL DEFAULT 0"),
+        ("progress_total", "ALTER TABLE pdf_index ADD COLUMN progress_total INTEGER NOT NULL DEFAULT 0"),
+    )
+    for name, sql in alters:
+        if name not in cols:
+            conn.execute(sql)
+
+
 def ensure_schema() -> None:
     global _SCHEMA_READY
     if _SCHEMA_READY:
@@ -63,6 +78,9 @@ def ensure_schema() -> None:
                 error TEXT,
                 empty INTEGER NOT NULL DEFAULT 0,
                 layout_version INTEGER NOT NULL DEFAULT 0,
+                phase TEXT NOT NULL DEFAULT '',
+                progress_done INTEGER NOT NULL DEFAULT 0,
+                progress_total INTEGER NOT NULL DEFAULT 0,
                 updated_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS pdf_chunks (
@@ -93,26 +111,12 @@ def ensure_schema() -> None:
             );
             CREATE INDEX IF NOT EXISTS pdf_chunks_document_ord ON pdf_chunks (document_id, ord);
             CREATE INDEX IF NOT EXISTS pdf_layout_blocks_document_ord ON pdf_layout_blocks (document_id, ord);
-            CREATE TABLE IF NOT EXISTS finance_terms (
-                en_key TEXT PRIMARY KEY,
-                en TEXT NOT NULL,
-                zh TEXT NOT NULL,
-                forbidden TEXT NOT NULL DEFAULT '',
-                keep_en INTEGER NOT NULL DEFAULT 0
-            );
-            CREATE TABLE IF NOT EXISTS project_terms (
-                project_id TEXT NOT NULL,
-                en_key TEXT NOT NULL,
-                en TEXT NOT NULL,
-                zh TEXT NOT NULL,
-                forbidden TEXT NOT NULL DEFAULT '',
-                PRIMARY KEY (project_id, en_key)
-            );
             """
         )
         conn.execute(
             f"CREATE VIRTUAL TABLE IF NOT EXISTS pdf_chunk_vec USING vec0(document_id TEXT, chunk_id TEXT, embedding float[{dim}])"
         )
+        _ensure_progress_columns(conn)
         conn.commit()
         _SCHEMA_READY = True
 
@@ -130,7 +134,20 @@ def get_index_status(document_id: str) -> dict[str, Any]:
     conn = _connect()
     row = conn.execute("SELECT * FROM pdf_index WHERE document_id = ?", (document_id,)).fetchone()
     if not row:
-        return {"document_id": document_id, "status": "missing", "page_count": 0, "chunk_count": 0}
+        return {
+            "document_id": document_id,
+            "status": "missing",
+            "page_count": 0,
+            "chunk_count": 0,
+            "empty": False,
+            "error": "",
+            "updated_at": None,
+            "layout_version": 0,
+            "phase": "",
+            "progress_done": 0,
+            "progress_total": 0,
+            "batch_size": _PROGRESS_BATCH,
+        }
     return {
         "document_id": row["document_id"],
         "status": row["status"],
@@ -140,6 +157,10 @@ def get_index_status(document_id: str) -> dict[str, Any]:
         "error": row["error"] or "",
         "updated_at": row["updated_at"],
         "layout_version": int(row["layout_version"] or 0),
+        "phase": row["phase"] or "",
+        "progress_done": int(row["progress_done"] or 0),
+        "progress_total": int(row["progress_total"] or 0),
+        "batch_size": _PROGRESS_BATCH,
     }
 
 
@@ -227,14 +248,23 @@ def ensure_index(
 
         conn.execute(
             """
-            INSERT INTO pdf_index (document_id, user_id, file_mtime, content_hash, status, page_count, chunk_count, error, empty, layout_version, updated_at)
-            VALUES (?, ?, ?, ?, 'indexing', 0, 0, NULL, 0, 0, ?)
+            INSERT INTO pdf_index (
+                document_id, user_id, file_mtime, content_hash, status, page_count, chunk_count,
+                error, empty, layout_version, phase, progress_done, progress_total, updated_at
+            )
+            VALUES (?, ?, ?, ?, 'indexing', 0, 0, NULL, 0, 0, 'extracting', 0, 0, ?)
             ON CONFLICT(document_id) DO UPDATE SET
                 user_id=excluded.user_id,
                 file_mtime=excluded.file_mtime,
                 content_hash=excluded.content_hash,
                 status='indexing',
+                page_count=0,
+                chunk_count=0,
                 error=NULL,
+                empty=0,
+                phase='extracting',
+                progress_done=0,
+                progress_total=0,
                 updated_at=excluded.updated_at
             """,
             (document_id, user_id, mtime, content_hash, _now()),
@@ -249,36 +279,54 @@ def ensure_index(
             if not chunks:
                 conn.execute(
                     """UPDATE pdf_index SET status='ready', page_count=?, chunk_count=0, layout_version=0,
-                       empty=1, error=?, updated_at=? WHERE document_id=?""",
+                       empty=1, phase='', progress_done=0, progress_total=0, error=?, updated_at=?
+                       WHERE document_id=?""",
                     (page_count, "未提取到可检索文本（可能是扫描件，需要 OCR）。", _now(), document_id),
                 )
                 conn.commit()
                 return get_index_status(document_id)
 
-            vectors = embed_fn([c["text"] for c in chunks])
-            if len(vectors) != len(chunks):
-                raise EmbedError("embedding 条数与文本块不一致。")
-
-            for i, (chunk, vec) in enumerate(zip(chunks, vectors)):
-                chunk_id = f"p{chunk['page']}-{i}"
+            stored = 0
+            total = len(chunks)
+            conn.execute(
+                """UPDATE pdf_index SET phase='embedding', page_count=?, progress_total=?, progress_done=0,
+                   chunk_count=0, updated_at=? WHERE document_id=?""",
+                (page_count, total, _now(), document_id),
+            )
+            conn.commit()
+            for start in range(0, total, _PROGRESS_BATCH):
+                batch = chunks[start:start + _PROGRESS_BATCH]
+                vectors = embed_fn([c["text"] for c in batch])
+                if len(vectors) != len(batch):
+                    raise EmbedError("embedding 条数与文本块不一致。")
+                for offset, (chunk, vec) in enumerate(zip(batch, vectors)):
+                    i = start + offset
+                    chunk_id = f"p{chunk['page']}-{i}"
+                    conn.execute(
+                        "INSERT INTO pdf_chunks (document_id, chunk_id, page, ord, text) VALUES (?, ?, ?, ?, ?)",
+                        (document_id, chunk_id, chunk["page"], i, chunk["text"]),
+                    )
+                    conn.execute(
+                        "INSERT INTO pdf_chunk_vec (document_id, chunk_id, embedding) VALUES (?, ?, ?)",
+                        (document_id, chunk_id, _pack(vec)),
+                    )
+                stored += len(batch)
                 conn.execute(
-                    "INSERT INTO pdf_chunks (document_id, chunk_id, page, ord, text) VALUES (?, ?, ?, ?, ?)",
-                    (document_id, chunk_id, chunk["page"], i, chunk["text"]),
+                    """UPDATE pdf_index SET progress_done=?, chunk_count=?, updated_at=? WHERE document_id=?""",
+                    (stored, stored, _now(), document_id),
                 )
-                conn.execute(
-                    "INSERT INTO pdf_chunk_vec (document_id, chunk_id, embedding) VALUES (?, ?, ?)",
-                    (document_id, chunk_id, _pack(vec)),
-                )
+                conn.commit()
             conn.execute(
                 """UPDATE pdf_index SET status='ready', page_count=?, chunk_count=?, layout_version=0,
-                   empty=0, error=NULL, updated_at=? WHERE document_id=?""",
-                (page_count, len(chunks), _now(), document_id),
+                   empty=0, phase='', progress_done=?, progress_total=?, error=NULL, updated_at=?
+                   WHERE document_id=?""",
+                (page_count, stored, stored, total, _now(), document_id),
             )
             conn.commit()
             return get_index_status(document_id)
         except Exception as exc:
             conn.execute(
-                "UPDATE pdf_index SET status='failed', error=?, updated_at=? WHERE document_id=?",
+                "UPDATE pdf_index SET status='failed', phase='', error=?, updated_at=? WHERE document_id=?",
                 (str(exc)[:800], _now(), document_id),
             )
             conn.commit()

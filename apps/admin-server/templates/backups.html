@@ -1,0 +1,6 @@
+{% extends 'base.html' %}{% block content %}
+<section class="heading"><div><h1>客户端备份</h1><p>按账号、设备隔离保存 · 最近 {{ records|length }} 条上传记录</p></div><a href="/admin/backups">刷新记录</a></section>
+<p class="storage-path">服务器目录：{{ backup_root }}</p>
+<div class="table-scroll"><table class="backup-table"><thead><tr><th>账号</th><th>设备</th><th>版本</th><th>类型</th><th>大小</th><th>上传完成</th></tr></thead><tbody>
+{% for row in records %}<tr><td>{{ row.email }}</td><td title="{{ row.device_id }}">{{ row.device_id[:12] }}</td><td>#{{ row.client_version }}</td><td>{{ {'manual':'手动备份','scheduled':'自动备份','pre-restore':'恢复前备份'}.get(row.kind,row.kind) }}</td><td>{{ '%.1f'|format(row.size/1048576) }} MB</td><td><time datetime="{{ row.uploaded_at.isoformat() }}">{{ row.uploaded_at.strftime('%Y-%m-%d %H:%M') }}</time></td></tr>{% else %}<tr><td colspan="6" class="empty">尚无客户端上传的备份</td></tr>{% endfor %}
+</tbody></table></div>{% endblock %}

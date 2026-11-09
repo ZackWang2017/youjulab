@@ -1,5 +1,6 @@
 import './style.css';
 import { download, type EditorAdapter, type Patch } from '../../context/types';
+import { financeLibraryConfig } from './finance-library';
 
 const ORIGIN = 'https://embed.diagrams.net';
 const FRAME_SRC = `${ORIGIN}/?embed=1&ui=atlas&proto=json&configure=1&spin=1&libraries=1&lang=zh&saveAndExit=0&noSaveBtn=1&noExitBtn=1`;
@@ -87,7 +88,7 @@ export function mountDiagram(
     const message = readMessage(event.data);
     if (!message) return;
     if (message.event === 'configure') {
-      post({ action: 'configure', config: { hideMenus: HIDDEN_MENUS, css: EMBED_CSS } });
+      post({ action: 'configure', config: { ...financeLibraryConfig(), hideMenus: HIDDEN_MENUS, css: EMBED_CSS } });
       return;
     }
     if (message.event === 'init') {

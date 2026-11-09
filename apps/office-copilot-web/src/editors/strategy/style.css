@@ -1,0 +1,67 @@
+#app:has(#strategy:not([hidden]))>main{grid-template-columns:minmax(0,1fr)!important}
+#app:has(#strategy:not([hidden]))>main>.workspace-split,#app:has(#strategy:not([hidden]))>main>aside{display:none!important}
+#strategy{background:#f6f8f9;color:#283c45}
+#strategy .strategy-shell{display:flex;flex-direction:column;height:100%;min-height:0}
+#strategy .strategy-toolbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:8px 14px;border-bottom:1px solid #e0e6e9;background:white;flex-shrink:0}
+#strategy .strategy-tabs{display:flex;gap:3px;flex:1;min-width:0;max-width:100%}
+#strategy .strategy-tabs button{border:0;background:transparent;font-size:13px;padding:5px 10px;min-height:32px;white-space:nowrap}
+#strategy .strategy-tabs button.is-active{background:#e8f3ef;color:#087768;font-weight:600}
+#strategy .strategy-toolbar>button{font-size:12px;min-height:32px;white-space:nowrap}
+#strategy [data-save]{font-size:11px;color:#778990}
+#strategy .strategy-summary{display:flex;gap:18px;flex-wrap:wrap;padding:12px 16px;align-items:center;border-bottom:1px solid #e4e9ec;background:#fff}
+#strategy .strategy-summary strong{font-size:14px}
+#strategy .strategy-summary span{font-size:12px;color:#74868e}
+#strategy .strategy-alert{margin:8px 14px 0;padding:10px 12px;border:1px solid #eed5ce;background:#fff5f1;color:#a54d3e;font-size:12px;border-radius:4px;white-space:pre-wrap}
+#strategy .strategy-content{flex:1;min-height:0;overflow:hidden}
+#strategy [data-panel]{height:100%;min-height:0}
+#strategy .strategy-research{display:grid;grid-template-columns:minmax(300px,1fr) minmax(300px,.85fr)}
+#strategy .strategy-conversation{display:flex;flex-direction:column;min-height:0;padding:16px 18px;background:white;border-right:1px solid #e0e7ea}
+#strategy .strategy-messages{flex:1;min-height:100px;overflow:auto;padding-right:6px}
+#strategy .strategy-message{padding:14px 0;border-bottom:1px solid #edf1f3}
+#strategy .strategy-message>strong{font-size:11px;color:#177b6d}
+#strategy .strategy-message.is-user>strong{color:#5f7f9c}
+#strategy .strategy-message>div{white-space:pre-wrap;font-size:13px;line-height:1.7;margin-top:6px;overflow-wrap:anywhere}
+#strategy .strategy-empty{display:flex;align-items:center;justify-content:center;gap:10px;height:100%;min-height:180px;color:#8c9ba2}
+#strategy .strategy-empty h3{font-size:16px;font-weight:500}
+#strategy [data-thinking]{max-height:180px;overflow:auto;margin-top:8px}
+#strategy [data-ask]{margin-top:12px;border-top:1px solid #e7edef;padding-top:12px}
+#strategy [data-ask] textarea{width:100%;min-height:86px;max-height:200px;resize:vertical;border:1px solid #d5e0e4;border-radius:5px;padding:10px 12px;font:inherit;font-size:13px;line-height:1.6}
+#strategy [data-ask]>div{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:8px}
+#strategy [data-capabilities]{font-size:11px;color:#8c9aa1}
+#strategy [data-ask] button{font-size:12px;white-space:nowrap}
+#strategy .strategy-plan{padding:18px 22px;overflow:auto;background:#f8fafb}
+#strategy .strategy-plan h3{font-size:14px;margin:0 0 16px}
+#strategy .strategy-plan p{font-size:13px;line-height:1.85;white-space:pre-wrap}
+#strategy .strategy-assumption{border-left:2px solid #a3c6bd;padding:7px 10px;margin:9px 0;font-size:12px;color:#6a7c84;line-height:1.65}
+#strategy .strategy-data-meta{margin-top:22px;padding-top:14px;border-top:1px solid #e0e8eb}
+#strategy .strategy-data-meta h4{font-size:12px;margin:0 0 8px}
+#strategy .strategy-data-meta p{font-size:12px;color:#778b95;margin:4px 0;overflow-wrap:anywhere}
+#strategy .strategy-muted{color:#8b9aa2;font-size:13px;padding:12px 0}
+#strategy .strategy-program{display:flex;flex-direction:column;background:white;padding:12px 16px;gap:10px}
+#strategy .strategy-program-bar{display:flex;align-items:center;gap:12px;font-size:12px}
+#strategy .strategy-program-bar span{flex:1;color:#8a999e;font-size:11px}
+#strategy .strategy-program-bar button{min-height:28px;padding:3px 5px;border:0}
+#strategy [data-code]{flex:1;min-height:220px;width:100%;resize:none;border:1px solid #dce4e8;border-radius:4px;background:#f9fbfc;padding:14px;font:12px/1.7 ui-monospace,SFMono-Regular,monospace;tab-size:4;color:#304b60;white-space:pre;overflow:auto}
+#strategy details{font-size:12px;color:#687e89;padding:8px 0}
+#strategy details pre{max-height:170px;overflow:auto}
+#strategy .strategy-results,#strategy .strategy-runs,#strategy .strategy-comparison{overflow:auto;padding:18px 22px;background:white}
+#strategy .strategy-result-heading{display:flex;align-items:center;justify-content:space-between;font-size:13px;gap:12px}
+#strategy .strategy-result-heading span{color:#8a9aa2;font-size:12px}
+#strategy .strategy-metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:18px;padding:22px 0;border-bottom:1px solid #e4eaed}
+#strategy .strategy-metrics span{display:block;font-size:12px;color:#7b8e97;margin-bottom:8px}
+#strategy .strategy-metrics strong{font-size:22px;font-weight:600;color:#254f50}
+#strategy .strategy-chart{height:330px;width:100%;min-width:0;margin-top:12px}
+#strategy [data-result-notes]{font-size:12px;color:#7a8d96;line-height:1.8;padding:12px 0;border-top:1px solid #edf0f2}
+#strategy .strategy-log{font-size:12px;line-height:1.7;color:#6d8089}
+#strategy .strategy-error{font-size:13px;line-height:1.7;color:#b25140;white-space:pre-wrap}
+#strategy table{border-collapse:collapse;width:100%;font-size:12px;text-align:left;white-space:nowrap}
+#strategy th{font-weight:500;color:#81929b;background:#f7f9fa}
+#strategy td,#strategy th{padding:11px 12px;border-bottom:1px solid #e6ecee}
+#strategy table button{font-size:12px;min-height:27px;padding:3px 7px;margin-right:5px}
+.strategy-data-dialog{width:min(540px,calc(100vw - 32px));padding:24px;gap:16px}
+.strategy-data-dialog h2{font-size:17px;margin:0}
+.strategy-data-dialog>label{display:grid;grid-template-columns:75px minmax(0,1fr);align-items:center;gap:10px;font-size:13px}
+.strategy-data-dialog input,.strategy-data-dialog select{min-width:0;width:100%;border:1px solid #d8e2e6;border-radius:4px;padding:7px 9px;background:white;font:inherit}
+.strategy-data-dialog pre{margin:0;background:#f6f9fa;padding:10px 12px;color:#7e919a;font-size:12px}
+.strategy-data-dialog [data-error]{color:#b25140;font-size:12px;margin:0}
+@media(max-width:850px){#strategy .strategy-research{grid-template-columns:1fr}#strategy .strategy-plan{display:none}#strategy .strategy-tabs{flex-basis:100%;overflow:auto}#strategy .strategy-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}#strategy .strategy-summary{gap:8px}#strategy [data-ask]>div{flex-wrap:wrap}}

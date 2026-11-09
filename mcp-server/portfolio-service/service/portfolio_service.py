@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 
 import market_quote_repository as market
 import portfolio_repository as repo
+import manual_product_service as products
 from market_session import after_bell, last_closed_session_date, mark_price, session_in_progress
 from nav_service import (
     MIN_RISK_OBSERVATIONS, DatedSeries, NavPoint, PricingContext, compute_nav_series, previous_weekday, risk_metrics, xirr,
@@ -261,6 +262,8 @@ def transact(owner_id: str, portfolio_id: int, holding_id: int, body: dict) -> d
 
 
 def _buy(owner_id: str, portfolio_id: int, body: dict) -> dict:
+    if body.get('asset_type'):
+        return products.create(owner_id, portfolio_id, body)
     _portfolio(owner_id, portfolio_id)
     security = resolve_security(str(body.get("ticker_code") or ""), body.get("name"))
     when = _when(body.get("occurred_at"))
@@ -313,6 +316,8 @@ def _transact(owner_id: str, portfolio_id: int, holding_id: int, body: dict) -> 
     holding = repo.get_holding(portfolio_id, holding_id)
     if not holding:
         raise PortfolioError("持仓不存在。", 404)
+    if holding['market_code'] in products.MARKETS:
+        return products.transact(owner_id, portfolio_id, holding_id, body)
     action = str(body.get("action") or "").strip()
     when = _when(body.get("occurred_at"))
     note = (body.get("note") or "").strip() or None
@@ -544,7 +549,7 @@ def _merge_holdings(portfolios: list[dict]) -> list[dict]:
     for portfolio in portfolios:
         for h in repo.list_holdings(int(portfolio["id"]), status="open"):
             shares = Decimal(h["shares"])
-            if shares <= 0:
+            if shares <= 0 and h['market_code'] != 'FIXED':
                 continue
             cost = shares * Decimal(h["avg_cost"])
             item = merged.get(h["ticker_code"])
@@ -552,6 +557,7 @@ def _merge_holdings(portfolios: list[dict]) -> list[dict]:
                 merged[h["ticker_code"]] = {
                     **h,
                     "id": None,
+                    "_manual_holding_id": h['id'],
                     "shares": shares,
                     "_cost": cost,
                     "target_allocation_pct": None,
@@ -564,7 +570,8 @@ def _merge_holdings(portfolios: list[dict]) -> list[dict]:
             if portfolio["name"] not in item["portfolios"]:
                 item["portfolios"].append(portfolio["name"])
     for item in merged.values():
-        item["avg_cost"] = item.pop("_cost") / item["shares"]
+        cost = item.pop('_cost')
+        item["avg_cost"] = cost / item["shares"] if item['shares'] else ZERO
     return list(merged.values())
 
 
@@ -687,7 +694,7 @@ def _render_overview(portfolio: dict, rows: list[dict], *, refresh_live: bool) -
     today = _shanghai_today(now)
 
     live: dict[str, market.LiveQuote] = {}
-    security_tickers = [r["ticker_code"] for r in rows if r["market_code"] != market.CASH_MARKET]
+    security_tickers = [r["ticker_code"] for r in rows if r["market_code"] != market.CASH_MARKET and r['market_code'] not in products.MARKETS]
     if refresh_live:
         live = market.fetch_live_quotes(security_tickers)
     recent_closes = repo.close_prices_between(security_tickers, today - timedelta(days=14), today) if security_tickers else {}
@@ -695,7 +702,7 @@ def _render_overview(portfolio: dict, rows: list[dict], *, refresh_live: bool) -
     # 交易时段优先用行情源的年初至今；已收盘或未开盘时现价可能不是行情现价，改用上年末收盘价重算
     need_year_base = [
         r["ticker_code"] for r in rows
-        if r["market_code"] != market.CASH_MARKET
+        if r["market_code"] != market.CASH_MARKET and r['market_code'] not in products.MARKETS
         and (
             not session_in_progress(r["market_code"], now)
             or not (live.get(r["ticker_code"]) and live[r["ticker_code"]].year_change_pct is not None)
@@ -716,18 +723,23 @@ def _render_overview(portfolio: dict, rows: list[dict], *, refresh_live: bool) -
         shares = Decimal(h["shares"])
         avg_cost = Decimal(h["avg_cost"])
         is_cash = h["market_code"] == market.CASH_MARKET
+        manual = h['market_code'] in products.MARKETS
+        fixed = h['market_code'] == 'FIXED'
+        product = products.product_info(h) if manual else None
         price: Decimal | None
         source = "none"
         trade_date: date | None = None
         quote = live.get(h["ticker_code"])
         change = change_pct = year_change_pct = None
-        if is_cash:
+        if manual:
+            price, source, trade_date = (ONE if fixed else product['price']), 'manual', product['as_of'].date()
+        elif is_cash:
             price, source, trade_date = ONE, "cash", today
         else:
             price, source, trade_date, change, change_pct, _base = _session_mark(
                 h["market_code"], now, quote, recent_closes.get(h["ticker_code"]) or [],
             )
-        if not is_cash and price is not None:
+        if not is_cash and not manual and price is not None:
             if session_in_progress(h["market_code"], now) and quote and quote.year_change_pct is not None:
                 year_change_pct = quote.year_change_pct
             elif year_bases.get(h["ticker_code"]):
@@ -739,6 +751,10 @@ def _render_overview(portfolio: dict, rows: list[dict], *, refresh_live: bool) -
         cost = shares * avg_cost
         profit = (market_value - cost) if market_value is not None else None
         return_rate = (profit / cost) if profit is not None and cost > 0 else None
+        if fixed:
+            profit = market_value + product['withdrawn'] - product['invested']
+            cost = product['invested'] - product['withdrawn']
+            return_rate = profit / product['invested'] if product['invested'] > 0 else None
         market_value_cny = market_value * rate if market_value is not None else None
         profit_cny = profit * rate if profit is not None else None
         cost_cny = cost * rate
@@ -757,7 +773,7 @@ def _render_overview(portfolio: dict, rows: list[dict], *, refresh_live: bool) -
                 "ticker_code": h["ticker_code"],
                 "stock_code": market.split_ticker(h["ticker_code"])[0],
                 "market_code": h["market_code"],
-                "market_name": _market_label(h["market_code"], security_types.get(h["ticker_code"])),
+                "market_name": ('固收' if fixed else '基金产品') if manual else _market_label(h["market_code"], security_types.get(h["ticker_code"])),
                 "name": h["name"],
                 "currency": currency,
                 "shares": shares,
@@ -774,6 +790,7 @@ def _render_overview(portfolio: dict, rows: list[dict], *, refresh_live: bool) -
                 "market_value": _q(market_value),
                 "profit": _q(profit),
                 "return_rate": _q(return_rate),
+                "asset_type": 'fixed_income' if fixed else 'fund' if manual else None,
                 "market_value_cny": _q(market_value_cny),
                 "profit_cny": _q(profit_cny),
                 "current_allocation_pct": None,
@@ -843,7 +860,7 @@ def _nav_points(transactions: list[dict], *, end: date | None = None, live_overl
         return []
     end = end or date.today()
     first = min(t["occurred_at"] for t in transactions).date() - timedelta(days=7)
-    tickers = sorted({t["ticker_code"] for t in transactions if not is_cash_ticker(t["ticker_code"])})
+    tickers = sorted({t["ticker_code"] for t in transactions if not is_cash_ticker(t["ticker_code"]) and not products.is_manual(t['ticker_code'])})
     close_points = repo.close_prices_between(tickers, first, end)
     closes = {t: DatedSeries(points) for t, points in close_points.items()}
     fx_rows = repo.fx_rates_between(first, end)
@@ -1070,6 +1087,8 @@ def _stats_payload(
                 "daily_return": row["daily_return"],
                 "total_value_cny": row["total_value_cny"],
                 "net_flow_cny": row["net_flow_cny"],
+                # 当日为止的净投入（累计投入 − 累计取出），总市值曲线用它对照本金
+                "net_invested_cny": _q(Decimal(row["cum_invested_cny"]) - Decimal(row["cum_withdrawn_cny"])),
                 "xirr": row["xirr"],
             }
             for row in series

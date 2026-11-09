@@ -35,13 +35,13 @@ class DatabaseConfig:
 
 
 def store_mode() -> str:
-    """postgres | sqlite。桌面 MCP 默认 SQLite，服务端保持 PostgreSQL 兼容。"""
+    """Remote service defaults to PostgreSQL; SQLite is an explicit legacy/test mode."""
     raw = (os.environ.get("FINANCE_STORE") or "").strip().lower()
     if raw in {"postgres", "postgresql"}:
         return "postgres"
     if raw == "sqlite":
         return "sqlite"
-    return "sqlite" if (os.environ.get("MCP_DESKTOP") or "").strip() == "1" else "postgres"
+    return "postgres"
 
 
 def sqlite_path() -> Path:

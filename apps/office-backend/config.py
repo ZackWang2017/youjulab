@@ -4,12 +4,22 @@ from __future__ import annotations
 import os
 import secrets
 import base64
+import json
+import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
 
 ROOT = Path(__file__).resolve().parents[2]
 load_dotenv(ROOT / ".env")
+
+
+def user_data_root() -> Path:
+    if sys.platform == 'darwin':
+        return Path.home() / 'Library' / 'Application Support' / 'youjulab-desktop'
+    if sys.platform == 'win32':
+        return Path(os.environ.get('APPDATA') or Path.home() / 'AppData' / 'Roaming') / 'youjulab-desktop'
+    return Path(os.environ.get('XDG_CONFIG_HOME') or Path.home() / '.config') / 'youjulab-desktop'
 
 
 def mongo_url() -> str:
@@ -27,8 +37,7 @@ def office_store_mode() -> str:
         return "memory"
     if raw in ("sqlite", "mongo"):
         return "sqlite"
-    url = mongo_url()
-    if url.startswith("memory:"):
+    if (os.environ.get('OFFICE_MONGO_URL') or '').startswith('memory:'):
         return "memory"
     return "sqlite"
 
@@ -45,7 +54,7 @@ def sqlite_path() -> Path:
                 path = ROOT / raw
             path.parent.mkdir(parents=True, exist_ok=True)
             return path
-        raw = str(ROOT / "data" / "office-local" / "office.sqlite")
+        raw = str(user_data_root() / "office.sqlite")
     path = Path(raw).expanduser()
     if not path.is_absolute():
         path = ROOT / path
@@ -57,7 +66,7 @@ _file_root_override: Path | None = None
 
 
 def default_file_root() -> Path:
-    raw = os.environ.get("OFFICE_FILE_ROOT", str(ROOT / "data" / "office-files"))
+    raw = os.environ.get("OFFICE_FILE_ROOT") or str(user_data_root() / "office-files")
     path = Path(raw).expanduser()
     if not path.is_absolute():
         path = ROOT / path
@@ -124,22 +133,39 @@ def api_port() -> int:
 
 def mcp_remote_base() -> str:
     """远程 mcp 根地址。调试默认本机 8000；部署后改 MCP_REMOTE_BASE_URL 或在登录窗里改。"""
+    desktop_config = os.environ.get('OFFICE_DESKTOP_CONFIG')
+    if desktop_config:
+        try:
+            address = json.loads(Path(desktop_config).read_text()).get('remoteBaseUrl')
+            if isinstance(address, str) and address.startswith(('http://', 'https://')):
+                return address.rstrip('/')
+        except (OSError, ValueError):
+            pass
     explicit = (os.environ.get("MCP_REMOTE_BASE_URL") or os.environ.get("FINANCE_MCP_BASE_URL") or "").strip().rstrip("/")
     if explicit:
         return explicit
-    host = (os.environ.get("FINANCE_MCP_HOST") or "127.0.0.1").strip() or "127.0.0.1"
-    if host == "0.0.0.0":
-        host = "127.0.0.1"
-    port = (os.environ.get("FINANCE_MCP_PORT") or "8000").strip() or "8000"
-    return f"http://{host}:{port}"
+    return "http://192.168.0.5:8000"
 
 
 def mcp_local_base() -> str:
-    """供外部 Agent 访问当前桌面随应用启动的 MCP 服务。"""
+    """供外部 Agent 访问当前桌面随应用启动的 MCP 服务（财务等远程能力）。"""
+    if os.environ.get('OFFICE_DESKTOP_CONFIG'):
+        return mcp_remote_base()
     explicit = (os.environ.get("MCP_LOCAL_BASE_URL") or "").strip().rstrip("/")
     if explicit:
         return explicit
     return mcp_remote_base()
+
+
+def office_api_base() -> str:
+    """外部 Agent 办公工具基址：本机 office-backend（表格/文档/导图等）。"""
+    explicit = (os.environ.get("OFFICE_PUBLIC_BASE_URL") or os.environ.get("OFFICE_API_BASE_URL") or "").strip().rstrip("/")
+    if explicit:
+        return explicit
+    host = api_host()
+    if host == "0.0.0.0":
+        host = "127.0.0.1"
+    return f"http://{host}:{api_port()}"
 
 
 def mcp_http_base() -> str:
@@ -214,6 +240,8 @@ def pg_url() -> str:
 def vector_backend() -> str:
     """pg | sqlite。桌面 OFFICE_STORE=sqlite 时默认 sqlite。"""
     raw = (os.environ.get("OFFICE_VECTOR_BACKEND") or "").strip().lower()
+    if os.environ.get("OFFICE_DESKTOP") == "1":
+        return "sqlite"
     if raw in ("pg", "postgres", "pgvector"):
         return "pg"
     if raw in ("sqlite", "sqlite-vec", "sqlite_vec"):

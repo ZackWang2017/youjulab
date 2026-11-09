@@ -34,6 +34,7 @@ apps/office-desktop/build/
 apps/office-desktop/sidecar/dist/
 apps/office-desktop/sidecar/build/
 apps/office-desktop/sidecar/.smoke*
+apps/office-desktop/sidecar/.build-venv/
 apps/office-desktop/mcp-sidecar/dist/
 apps/office-desktop/mcp-sidecar/build/
 apps/office-desktop/mcp-sidecar/.smoke*
@@ -44,3 +45,6 @@ deploy/deploy-mcp.log
 
 # 误生成在仓库根下的 Windows 绝对路径目录（用户 PDF，勿提交）
 D\:*/
+
+# 第三方独立克隆（microsoft/RD-Agent），自带 .git 与 .env
+RD-Agent/

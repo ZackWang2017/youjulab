@@ -4,18 +4,19 @@ from __future__ import annotations
 import copy
 import hashlib
 import secrets
+import threading
 from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
 from config import mongo_db, mongo_url
 
-KINDS = ("sheet", "document", "pdf", "mindmap", "research", "diagram", "project_plan", "calendar", "calc", "notebook", "outline_template")
+KINDS = ("sheet", "document", "pdf", "strategy", "mindmap", "research", "diagram", "project_plan", "calendar", "calc", "notebook", "outline_template")
 # 每种只保留一份的用户资产。大纲模板可以有多份。
 USER_SINGLETON_KINDS = frozenset({"calendar", "calc", "notebook"})
 USER_KINDS = USER_SINGLETON_KINDS | frozenset({"outline_template"})
 # 可在「项目可见 / 我可见」间切换；我可见时 project_id 为空，跨项目出现在列表中。
-SCOPED_VISIBILITY_KINDS = frozenset({"document", "diagram", "project_plan"})
+SCOPED_VISIBILITY_KINDS = frozenset({"sheet", "document", "diagram", "project_plan", "research", "strategy"})
 DEFAULT_SHEET_NAME = "未命名表格"
 DEFAULT_DOCUMENT_NAME = "未命名文档"
 DEFAULT_MINDMAP_NAME = "未命名导图"
@@ -29,7 +30,7 @@ RECENT_ASSET_LIMIT = 8
 
 
 def empty_last_assets() -> dict:
-    return {"sheet": None, "document": None, "pdf": None, "mindmap": None, "research": None, "diagram": None, "project_plan": None, "calendar": None}
+    return {"sheet": None, "document": None, "pdf": None, "strategy": None, "mindmap": None, "research": None, "diagram": None, "project_plan": None, "calendar": None}
 
 
 def recent_asset_ids(doc: dict, project_id: str, opened_id: str | None = None) -> list[str]:
@@ -305,11 +306,14 @@ class Store:
     def delete_sheet_charts(self, user_id: str, document_id: str) -> None: raise NotImplementedError
     def get_pdf_folder_store(self, user_id: str, project_id: str) -> dict | None: raise NotImplementedError
     def upsert_pdf_folder_store(self, user_id: str, project_id: str, fields: dict) -> dict: raise NotImplementedError
+    def get_document_folder_store(self, user_id: str, project_id: str) -> dict | None: raise NotImplementedError
+    def upsert_document_folder_store(self, user_id: str, project_id: str, fields: dict) -> dict: raise NotImplementedError
     def reassign_owner(self, from_user_id: str, to_user_id: str) -> int: raise NotImplementedError
 
 
 class MemoryStore(Store):
     def __init__(self) -> None:
+        self._asset_write_lock = threading.RLock()
         self._users: dict[str, dict] = {}
         self._projects: dict[str, dict] = {}
         self._assets: dict[str, dict] = {}
@@ -320,6 +324,7 @@ class MemoryStore(Store):
         self._sheet_charts: dict[str, dict] = {}
         self._user_model_configs: dict[str, dict] = {}
         self._pdf_folders: dict[str, dict] = {}
+        self._document_folders: dict[str, dict] = {}
 
     def create_user(self, email: str, password: str) -> dict:
         user = {
@@ -450,13 +455,16 @@ class MemoryStore(Store):
             return None
         return copy.deepcopy(found)
 
-    def update_asset(self, owner_id: str, asset_id: str, **fields: Any) -> dict | None:
-        found = self._assets.get(asset_id)
-        if not found or found["owner_id"] != owner_id:
-            return None
-        found.update(fields)
-        found["updated_at"] = now()
-        return copy.deepcopy(found)
+    def update_asset(self, owner_id: str, asset_id: str, *, expected_revision: int | None = None, **fields: Any) -> dict | None:
+        with self._asset_write_lock:
+            found = self._assets.get(asset_id)
+            if not found or found["owner_id"] != owner_id:
+                return None
+            if expected_revision is not None and found.get('revision', 0) != expected_revision:
+                return None
+            found.update(fields)
+            found["updated_at"] = now()
+            return copy.deepcopy(found)
 
     def delete_asset(self, owner_id: str, asset_id: str) -> dict | None:
         found = self._assets.get(asset_id)
@@ -564,6 +572,19 @@ class MemoryStore(Store):
             folder_store["user_id"] = to_user_id
             folder_store["updated_at"] = now()
             self._pdf_folders[new_key] = folder_store
+            moved += 1
+        for key, folder_store in list(self._document_folders.items()):
+            if folder_store.get("user_id") != from_user_id:
+                continue
+            project_id = str(folder_store.get("project_id") or "")
+            new_key = f"{to_user_id}:{project_id}"
+            self._document_folders.pop(key, None)
+            if new_key in self._document_folders:
+                continue
+            folder_store["id"] = new_key
+            folder_store["user_id"] = to_user_id
+            folder_store["updated_at"] = now()
+            self._document_folders[new_key] = folder_store
             moved += 1
         if from_user_id in self._user_model_configs and to_user_id not in self._user_model_configs:
             cfg = self._user_model_configs.pop(from_user_id)
@@ -793,365 +814,22 @@ class MemoryStore(Store):
         self._pdf_folders[key] = current
         return copy.deepcopy(current)
 
+    def get_document_folder_store(self, user_id: str, project_id: str) -> dict | None:
+        found = self._document_folders.get(f"{user_id}:{project_id}")
+        return copy.deepcopy(found) if found else None
 
-class MongoStore(Store):
-    def __init__(self, url: str, dbname: str) -> None:
-        from pymongo import MongoClient
-        self.client = MongoClient(url, serverSelectionTimeoutMS=3000)
-        try:
-            self.client.admin.command("ping")
-        except Exception as exc:
-            raise RuntimeError(f"无法连接 MongoDB（{url}）。可改用 OFFICE_MONGO_URL=memory://office 做本地演示。") from exc
-        self.db = self.client[dbname]
-        self.db.users.create_index("email", unique=True)
-        self.db.users.create_index("access_token", unique=True, sparse=True)
-        self.db.projects.create_index([("owner_id", 1), ("updated_at", -1)])
-        self.db.assets.create_index([("owner_id", 1), ("project_id", 1), ("kind", 1)])
-        self.db.digest_jobs.create_index([("user_id", 1), ("document_id", 1)], unique=True)
-        self.db.digest_jobs.create_index([("enabled", 1), ("hour", 1), ("minute", 1)])
-        self.db.assistant_sessions.create_index([("user_id", 1), ("document_id", 1), ("updated_at", -1)])
-        self.db.assistant_sessions.create_index("id", unique=True)
-        self.db.sheet_cache.create_index([("user_id", 1), ("document_id", 1), ("sheet_id", 1)], unique=True)
-        self.db.sheet_charts.create_index([("user_id", 1), ("document_id", 1), ("sheet_id", 1), ("updated_at", -1)])
-        self.db.sheet_charts.create_index("id", unique=True)
-        self.db.document_skills.create_index("id", unique=True)
-        self.db.document_skills.create_index([("user_id", 1), ("document_id", 1), ("updated_at", -1)])
-        self.db.user_model_configs.create_index("user_id", unique=True)
-        self.db.pdf_folders.create_index([("user_id", 1), ("project_id", 1)], unique=True)
-
-    def _one(self, collection: str, query: dict) -> dict | None:
-        doc = self.db[collection].find_one(query)
-        return doc
-
-    def create_user(self, email: str, password: str) -> dict:
-        user = {
-            "id": new_id(), "email": email.lower(), "password_hash": hash_password(password),
-            "access_token": self._unique_access_token(),
-            "last_project_id": None, "last_assets": empty_last_assets(), "recent_assets": [], "recent_assets_by_project": {},
-            "created_at": now(),
+    def upsert_document_folder_store(self, user_id: str, project_id: str, fields: dict) -> dict:
+        key = f"{user_id}:{project_id}"
+        current = self._document_folders.get(key) or {
+            "id": key, "user_id": user_id, "project_id": project_id, "created_at": now(),
         }
-        self.db.users.insert_one(user)
-        return user
-
-    def _unique_access_token(self) -> str:
-        for _ in range(8):
-            token = new_access_token()
-            if not self.user_by_access_token(token):
-                return token
-        raise RuntimeError("无法生成访问令牌。")
-
-    def user_by_email(self, email: str) -> dict | None:
-        return self._one("users", {"email": email.lower()})
-
-    def user_by_id(self, user_id: str) -> dict | None:
-        return self._one("users", {"id": user_id})
-
-    def user_by_access_token(self, token: str) -> dict | None:
-        token = (token or "").strip()
-        if len(token) != ACCESS_TOKEN_LENGTH:
-            return None
-        return self._one("users", {"access_token": token})
-
-    def ensure_access_token(self, user: dict) -> dict:
-        token = (user.get("access_token") or "").strip()
-        if len(token) == ACCESS_TOKEN_LENGTH:
-            return user
-        return self.rotate_access_token(user["id"]) or user
-
-    def rotate_access_token(self, user_id: str) -> dict | None:
-        return self.update_user(user_id, access_token=self._unique_access_token())
-
-    def update_user(self, user_id: str, **fields: Any) -> dict | None:
-        self.db.users.update_one({"id": user_id}, {"$set": fields})
-        return self.user_by_id(user_id)
-
-    def create_project(self, owner_id: str, name: str) -> dict:
-        project = {"id": new_id(), "owner_id": owner_id, "name": name, "created_at": now(), "updated_at": now()}
-        self.db.projects.insert_one(project)
-        return project
-
-    def projects(self, owner_id: str) -> list[dict]:
-        return list(self.db.projects.find({"owner_id": owner_id}, {"_id": 0}).sort("updated_at", -1))
-
-    def project(self, owner_id: str, project_id: str) -> dict | None:
-        return self._one("projects", {"id": project_id, "owner_id": owner_id})
-
-    def update_project(self, owner_id: str, project_id: str, **fields: Any) -> dict | None:
-        fields["updated_at"] = now()
-        self.db.projects.update_one({"id": project_id, "owner_id": owner_id}, {"$set": fields})
-        return self.project(owner_id, project_id)
-
-    def delete_project(self, owner_id: str, project_id: str) -> list[dict] | None:
-        if not self.project(owner_id, project_id):
-            return None
-        removed = list(self.db.assets.find({"owner_id": owner_id, "project_id": project_id}, {"_id": 0}))
-        self.db.assets.delete_many({"owner_id": owner_id, "project_id": project_id})
-        self.db.projects.delete_one({"id": project_id, "owner_id": owner_id})
-        return removed
-
-    def create_asset(self, owner_id: str, project_id: str | None, kind: str, name: str, content: Any = None) -> dict:
-        placed = None if is_user_kind(kind) else project_id
-        asset = {
-            "id": new_id(), "owner_id": owner_id,
-            "project_id": placed,
-            "kind": kind, "name": name,
-            "visibility": "user" if placed is None else "project",
-            "revision": 0, "content": content, "file_path": None, "filename": None, "size": None,
-            "updated_at": now(),
-        }
-        self.db.assets.insert_one(asset)
-        return asset
-
-    def promote_user_assets(self, owner_id: str) -> None:
-        self.db.assets.update_many(
-            {"owner_id": owner_id, "kind": {"$in": sorted(USER_KINDS)}},
-            {"$set": {"project_id": None}, "$unset": {"scope": ""}},
-        )
-
-    def normalize_document_visibility(self, owner_id: str, project_id: str) -> None:
-        legacy = {"owner_id": owner_id, "kind": "document", "visibility": {"$exists": False}}
-        self.db.assets.update_many(
-            {**legacy, "$or": [{"project_id": None}, {"project_id": {"$exists": False}}]},
-            {"$set": {"project_id": project_id, "visibility": "project"}, "$unset": {"scope": ""}},
-        )
-        self.db.assets.update_many(
-            legacy,
-            {"$set": {"visibility": "project"}, "$unset": {"scope": ""}},
-        )
-
-    def assets(self, owner_id: str, project_id: str | None, kind: str | None = None) -> list[dict]:
-        self.promote_user_assets(owner_id)
-        if project_id:
-            self.normalize_document_visibility(owner_id, project_id)
-        projection = {"_id": 0, "content": 0, "file_path": 0}
-        query: dict[str, Any] = {"owner_id": owner_id}
-        if kind:
-            query["kind"] = kind
-        if kind and is_user_kind(kind):
-            query["project_id"] = None
-        elif kind and supports_scoped_visibility(kind):
-            query["$or"] = [
-                {"project_id": project_id},
-                {"project_id": None, "visibility": "user"},
-            ]
-        elif kind:
-            query["project_id"] = project_id
-        else:
-            query["$or"] = [
-                {"project_id": project_id, "kind": {"$nin": sorted(USER_KINDS)}},
-                {"kind": {"$in": sorted(USER_KINDS)}},
-                {"project_id": None, "visibility": "user", "kind": {"$in": sorted(SCOPED_VISIBILITY_KINDS)}},
-            ]
-        return list(self.db.assets.find(query, projection).sort("updated_at", -1))
-
-    def asset(self, owner_id: str, asset_id: str) -> dict | None:
-        return self._one("assets", {"id": asset_id, "owner_id": owner_id})
-
-    def update_asset(self, owner_id: str, asset_id: str, **fields: Any) -> dict | None:
-        fields["updated_at"] = now()
-        self.db.assets.update_one({"id": asset_id, "owner_id": owner_id}, {"$set": fields})
-        return self.asset(owner_id, asset_id)
-
-    def delete_asset(self, owner_id: str, asset_id: str) -> dict | None:
-        found = self.asset(owner_id, asset_id)
-        if not found:
-            return None
-        self.db.assets.delete_one({"id": asset_id, "owner_id": owner_id})
-        return found
-
-    def all_projects(self) -> list[dict]:
-        return list(self.db.projects.find({}, {"_id": 0}).sort("updated_at", -1))
-
-    def project_any(self, project_id: str) -> dict | None:
-        return self._one("projects", {"id": project_id})
-
-    def assets_any(self, project_id: str, kind: str | None = None) -> list[dict]:
-        query: dict[str, Any] = {"project_id": project_id}
-        if kind:
-            query["kind"] = kind
-        return list(self.db.assets.find(query, {"_id": 0, "content": 0, "file_path": 0}).sort("updated_at", -1))
-
-    def asset_any(self, asset_id: str) -> dict | None:
-        return self._one("assets", {"id": asset_id})
-
-    def users(self) -> list[dict]:
-        return list(self.db.users.find({}, {"_id": 0, "password_hash": 0, "access_token": 0}))
-
-    def get_user_model_config(self, user_id: str) -> dict | None:
-        return self.db.user_model_configs.find_one({"user_id": user_id}, {"_id": 0})
-
-    def upsert_user_model_config(self, user_id: str, fields: dict) -> dict:
-        payload = {**fields, "user_id": user_id, "updated_at": now()}
-        existing = self.get_user_model_config(user_id)
-        if existing:
-            self.db.user_model_configs.update_one({"user_id": user_id}, {"$set": payload})
-        else:
-            payload["created_at"] = now()
-            self.db.user_model_configs.insert_one(payload)
-        return self.get_user_model_config(user_id) or payload
-
-    def delete_user_model_config(self, user_id: str) -> bool:
-        return bool(self.db.user_model_configs.delete_one({"user_id": user_id}).deleted_count)
-
-    def get_digest_job(self, user_id: str, document_id: str) -> dict | None:
-        return self._one("digest_jobs", {"user_id": user_id, "document_id": document_id})
-
-    def upsert_digest_job(self, user_id: str, document_id: str, fields: dict) -> dict:
-        payload = {**fields, "user_id": user_id, "document_id": document_id, "updated_at": now()}
-        existing = self.get_digest_job(user_id, document_id)
-        if existing:
-            self.db.digest_jobs.update_one(
-                {"user_id": user_id, "document_id": document_id},
-                {"$set": payload},
-            )
-        else:
-            payload["id"] = new_id()
-            self.db.digest_jobs.insert_one(payload)
-        return self.get_digest_job(user_id, document_id) or payload
-
-    def delete_digest_job(self, user_id: str, document_id: str) -> None:
-        self.db.digest_jobs.delete_one({"user_id": user_id, "document_id": document_id})
-
-    def list_document_skills(self, user_id: str, document_id: str) -> list[dict]:
-        return list(self.db.document_skills.find(
-            {"user_id": user_id, "document_id": document_id}, {"_id": 0},
-        ).sort("updated_at", -1))
-
-    def get_document_skill(self, user_id: str, skill_id: str) -> dict | None:
-        return self._one("document_skills", {"id": skill_id, "user_id": user_id})
-
-    def upsert_document_skill(self, user_id: str, document_id: str, project_id: str, fields: dict) -> dict:
-        skill_id = (fields.get("id") or "").strip() or new_id()
-        existing = self.get_document_skill(user_id, skill_id)
-        if existing and existing.get("document_id") != document_id:
-            raise ValueError("技能不属于当前文档。")
-        payload = {
-            **(existing or {}),
-            **fields,
-            "id": skill_id,
-            "user_id": user_id,
-            "document_id": document_id,
-            "project_id": project_id,
-            "updated_at": now(),
-        }
-        payload.pop("_id", None)
-        if existing:
-            self.db.document_skills.update_one({"id": skill_id, "user_id": user_id}, {"$set": payload})
-        else:
-            self.db.document_skills.insert_one(payload)
-        return self.get_document_skill(user_id, skill_id) or payload
-
-    def delete_document_skill(self, user_id: str, skill_id: str) -> bool:
-        result = self.db.document_skills.delete_one({"id": skill_id, "user_id": user_id})
-        return bool(result.deleted_count)
-
-    def delete_document_skills(self, user_id: str, document_id: str) -> None:
-        self.db.document_skills.delete_many({"user_id": user_id, "document_id": document_id})
-
-    def reassign_document_links(self, user_id: str, old_id: str, new_id: str) -> None:
-        stamp = now()
-        query = {"user_id": user_id, "document_id": old_id}
-        update = {"$set": {"document_id": new_id, "updated_at": stamp}}
-        self.db.document_skills.update_many(query, update)
-        self.db.digest_jobs.update_many(query, update)
-        self.db.assistant_sessions.update_many(query, update)
-
-    def list_enabled_digest_jobs(self) -> list[dict]:
-        return list(self.db.digest_jobs.find({"enabled": True}, {"_id": 0}))
-
-    def list_assistant_sessions(self, user_id: str, document_id: str, limit: int = 30) -> list[dict]:
-        return list(self.db.assistant_sessions.find(
-            {"user_id": user_id, "document_id": document_id},
-            {"_id": 0},
-        ).sort("updated_at", -1).limit(limit))
-
-    def get_assistant_session(self, user_id: str, session_id: str) -> dict | None:
-        return self._one("assistant_sessions", {"id": session_id, "user_id": user_id})
-
-    def upsert_assistant_session(self, user_id: str, document_id: str, fields: dict) -> dict:
-        session_id = (fields.get("id") or "").strip()
-        existing = self.get_assistant_session(user_id, session_id) if session_id else None
-        payload = {**fields, "user_id": user_id, "document_id": document_id, "updated_at": now()}
-        if existing:
-            self.db.assistant_sessions.update_one({"id": session_id, "user_id": user_id}, {"$set": payload})
-            return self.get_assistant_session(user_id, session_id) or payload
-        payload["id"] = session_id or new_id()
-        payload.setdefault("created_at", now())
-        self.db.assistant_sessions.insert_one(payload)
-        return self.get_assistant_session(user_id, payload["id"]) or payload
-
-    def delete_assistant_session(self, user_id: str, session_id: str) -> bool:
-        result = self.db.assistant_sessions.delete_one({"id": session_id, "user_id": user_id})
-        return result.deleted_count > 0
-
-    def get_sheet_cache(self, user_id: str, document_id: str, sheet_id: str) -> dict | None:
-        return self.db.sheet_cache.find_one(
-            {"user_id": user_id, "document_id": document_id, "sheet_id": sheet_id},
-            {"_id": 0},
-        )
-
-    def upsert_sheet_cache(self, user_id: str, document_id: str, fields: dict) -> dict:
-        sheet_id = (fields.get("sheet_id") or "").strip()
-        query = {"user_id": user_id, "document_id": document_id, "sheet_id": sheet_id}
-        existing = self.get_sheet_cache(user_id, document_id, sheet_id)
-        payload = {**fields, "user_id": user_id, "document_id": document_id, "sheet_id": sheet_id, "updated_at": now()}
-        if existing:
-            self.db.sheet_cache.update_one(query, {"$set": payload})
-        else:
-            payload.setdefault("created_at", now())
-            payload.setdefault("profile", "")
-            payload.setdefault("profile_fingerprint", "")
-            self.db.sheet_cache.insert_one(payload)
-        return self.get_sheet_cache(user_id, document_id, sheet_id) or payload
-
-    def delete_sheet_caches(self, user_id: str, document_id: str) -> None:
-        self.db.sheet_cache.delete_many({"user_id": user_id, "document_id": document_id})
-
-    def list_sheet_charts(self, user_id: str, document_id: str, sheet_id: str) -> list[dict]:
-        return list(self.db.sheet_charts.find(
-            {"user_id": user_id, "document_id": document_id, "sheet_id": sheet_id},
-            {"_id": 0},
-        ).sort("updated_at", -1))
-
-    def get_sheet_chart(self, user_id: str, chart_id: str) -> dict | None:
-        return self._one("sheet_charts", {"id": chart_id, "user_id": user_id})
-
-    def create_sheet_chart(self, user_id: str, document_id: str, sheet_id: str, fields: dict) -> dict:
-        payload = {
-            **fields,
-            "id": new_id(),
-            "user_id": user_id,
-            "document_id": document_id,
-            "sheet_id": sheet_id,
-            "created_at": now(),
-            "updated_at": now(),
-        }
-        self.db.sheet_charts.insert_one(payload)
-        return self.get_sheet_chart(user_id, payload["id"]) or payload
-
-    def update_sheet_chart(self, user_id: str, chart_id: str, fields: dict) -> dict | None:
-        payload = {**fields, "updated_at": now()}
-        self.db.sheet_charts.update_one({"id": chart_id, "user_id": user_id}, {"$set": payload})
-        return self.get_sheet_chart(user_id, chart_id)
-
-    def delete_sheet_charts(self, user_id: str, document_id: str) -> None:
-        self.db.sheet_charts.delete_many({"user_id": user_id, "document_id": document_id})
-
-    def get_pdf_folder_store(self, user_id: str, project_id: str) -> dict | None:
-        return self.db.pdf_folders.find_one(
-            {"user_id": user_id, "project_id": project_id}, {"_id": 0},
-        )
-
-    def upsert_pdf_folder_store(self, user_id: str, project_id: str, fields: dict) -> dict:
-        query = {"user_id": user_id, "project_id": project_id}
-        existing = self.get_pdf_folder_store(user_id, project_id)
-        payload = {**fields, "id": f"{user_id}:{project_id}", **query, "updated_at": now()}
-        if existing:
-            self.db.pdf_folders.update_one(query, {"$set": payload})
-        else:
-            payload["created_at"] = now()
-            self.db.pdf_folders.insert_one(payload)
-        return self.get_pdf_folder_store(user_id, project_id) or payload
+        current.update(fields)
+        current["id"] = key
+        current["user_id"] = user_id
+        current["project_id"] = project_id
+        current["updated_at"] = now()
+        self._document_folders[key] = current
+        return copy.deepcopy(current)
 
 
 def create_store(url: str | None = None) -> Store:

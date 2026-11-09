@@ -166,9 +166,11 @@ def compute_nav_series(
             ticker = tx["ticker_code"]
             shares = Decimal(tx["shares"])
             positions[ticker] = positions.get(ticker, ZERO) + _shares_delta(tx["action"], shares)
+            if ticker.endswith('.FIXED') and tx['action'] == 'valuation':
+                positions[ticker] = Decimal(tx['amount'])
             currency_of[ticker] = tx["currency"]
             price = Decimal(tx["price"]) if tx.get("price") is not None else None
-            if price is not None and price > 0:
+            if price is not None and (price > 0 or (ticker.endswith('.FUND') and price == 0)):
                 last_tx_price[ticker] = price
             external = Decimal(tx.get("external_flow") or 0)
             if external:

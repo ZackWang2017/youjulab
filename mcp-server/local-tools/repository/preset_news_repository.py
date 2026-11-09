@@ -56,22 +56,24 @@ def hkex_titles(stock_id: int) -> dict[str, Any]:
 
 
 def _hkex_get(url: str, params: dict[str, str]) -> httpx.Response:
-    """港交所偶发在 TLS 读完前断开。忽略这种结束，失败后改用 TLS 1.2 再试。"""
+    """港交所偶发在 TLS 读完前断开。忽略这种结束，失败后改用 TLS 1.2 再试，并绕过系统代理。"""
     last: Exception | None = None
-    for attempt in range(3):
+    for attempt in range(4):
         try:
             response = httpx.get(
                 url,
                 params=params,
                 headers=_HKEX_HEADERS,
                 timeout=20.0,
-                verify=_hkex_ssl(tls12=attempt > 0),
+                verify=_hkex_ssl(tls12=attempt >= 2),
+                trust_env=False,
+                follow_redirects=True,
             )
             response.raise_for_status()
             return response
         except httpx.TransportError as exc:
             last = exc
-            if attempt < 2:
+            if attempt < 3:
                 time.sleep(0.4 * (attempt + 1))
     assert last is not None
     raise last
@@ -79,7 +81,8 @@ def _hkex_get(url: str, params: dict[str, str]) -> httpx.Response:
 
 def _hkex_ssl(*, tls12: bool) -> ssl.SSLContext:
     context = ssl.create_default_context()
-    context.options |= ssl.OP_IGNORE_UNEXPECTED_EOF
+    if hasattr(ssl, "OP_IGNORE_UNEXPECTED_EOF"):
+        context.options |= ssl.OP_IGNORE_UNEXPECTED_EOF
     if tls12:
         context.maximum_version = ssl.TLSVersion.TLSv1_2
     return context

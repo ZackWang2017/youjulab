@@ -2,6 +2,7 @@ import { Editor } from '@tiptap/core';
 import Link from '@tiptap/extension-link';
 import StarterKit from '@tiptap/starter-kit';
 import { createIcons, icons } from 'lucide';
+import { assetIndexExtensions } from '../asset-index';
 import { office } from '../office-client/client';
 import { circleBullet, listStack, nestedListTab, nestUnderNumber } from '../editors/rich-text-lists';
 
@@ -183,6 +184,7 @@ export function openNotebookWindow(asset: NotebookAsset) {
       Link.configure({ openOnClick: true, autolink: true, defaultProtocol: 'https' }),
       circleBullet,
       nestedListTab,
+      ...assetIndexExtensions(),
     ],
     content: asset.content || EMPTY_DOCUMENT,
     editable: Boolean(asset.id),

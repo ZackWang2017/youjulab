@@ -8,7 +8,7 @@ from typing import Any
 
 import httpx
 
-from config import mcp_remote_base
+from config import ROOT, mcp_remote_base
 from model_runtime import model_configuration_error, model_configured, model_name
 from remote_auth import remote_token
 from assistant import iter_chat_events

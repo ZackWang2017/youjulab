@@ -6,6 +6,8 @@ import { UniverSheetsThreadCommentPreset } from '@univerjs/preset-sheets-thread-
 import ThreadCommentZhCN from '@univerjs/preset-sheets-thread-comment/locales/zh-CN';
 import { SetStyleCommand } from '@univerjs/sheets';
 import { IMenuManagerService } from '@univerjs/ui';
+import { MessageType } from '@univerjs/design';
+import { PrintIcon } from '@univerjs/icons';
 import '@univerjs/preset-sheets-core/lib/index.css';
 import '@univerjs/preset-sheets-thread-comment/lib/index.css';
 import { download, type EditorAdapter } from '../../context/types';
@@ -16,7 +18,10 @@ import { parseSheetStructure, serializeSheetStructure, STRUCTURE_JSON_MAX, type 
 import { patchSheetCache, putSheetCache, refreshSheetProfile } from './sheet-cache';
 import { computeSelectionStats, extractNumbers, formatStatsBrief } from './selection-stats';
 import { openSheetEncryptionDialog } from './encryption-dialog';
+import { printActiveSheet } from './print-sheet';
 import type { Asset } from '../../workspace/session';
+import { assertSheetContentOwner, sheetBindings } from './asset-binding';
+import { copySheetPath, sheetAssetPath } from './copy-path';
 
 const SHEET_LOCALES = mergeLocales(ZhCN, ThreadCommentZhCN, {
   ui: {
@@ -114,7 +119,7 @@ function ensureSnapshotDimensions(snapshot: Record<string, unknown>): {
   return { snapshot: { ...snapshot, sheets: nextSheets }, expanded: true };
 }
 
-export function mountSheet(container: HTMLElement, changed: () => void, onDirty: (content: unknown) => void): EditorAdapter {
+export function mountSheet(container: HTMLElement, changed: () => void, onDirty: (assetId: string, content: unknown) => void, getAssetPath?: (id: string) => string | undefined): EditorAdapter {
   let univer: ReturnType<typeof createUniver>['univer'] | undefined;
   let univerAPI: ReturnType<typeof createUniver>['univerAPI'] | undefined;
   let workbook: ReturnType<ReturnType<typeof createUniver>['univerAPI']['createWorkbook']> | undefined;
@@ -134,6 +139,21 @@ export function mountSheet(container: HTMLElement, changed: () => void, onDirty:
   let syncedRevision = -1;
   let profileStale = false;
   let cacheTimer: ReturnType<typeof setTimeout> | undefined;
+  const bindings = sheetBindings();
+  let binding = bindings.begin('');
+  let booting = false;
+
+  function snapshotForSave() {
+    if (!assetId || !workbook) return undefined;
+    const content = workbook.save();
+    assertSheetContentOwner(assetId, content);
+    return content;
+  }
+
+  function emitDirty() {
+    const content = snapshotForSave();
+    if (content !== undefined) onDirty(assetId, content);
+  }
 
   function clearStructureCache() {
     lastStructureJson = '';
@@ -180,13 +200,16 @@ export function mountSheet(container: HTMLElement, changed: () => void, onDirty:
     if (!assetId || !workbook || loading || encrypted) return;
     const structure = currentStructure();
     if (!structure?.sheet_id) return;
+    const sourceBinding = binding;
+    const sourceAssetId = assetId;
+    const sourceRevision = revision;
     const sameSheet = syncedSheetId === structure.sheet_id && syncedValues.length > 0 && !regenerateProfile;
     const diff = sameSheet ? diffCells(structure.values) : null;
     let meta;
     if (diff && diff.ratio <= 0.2 && diff.cells.length) {
-      meta = await patchSheetCache(assetId, {
+      meta = await patchSheetCache(sourceAssetId, {
         sheet_id: structure.sheet_id,
-        revision,
+        revision: sourceRevision,
         cells: diff.cells,
         rows: structure.rows,
         cols: structure.cols,
@@ -197,15 +220,17 @@ export function mountSheet(container: HTMLElement, changed: () => void, onDirty:
       syncedRevision = revision;
       return;
     } else {
-      meta = await putSheetCache(assetId, structure, revision);
+      meta = await putSheetCache(sourceAssetId, structure, sourceRevision);
     }
+    if (!bindings.current(sourceBinding)) return;
     syncedValues = structure.values;
     syncedSheetId = structure.sheet_id;
-    syncedRevision = revision;
+    syncedRevision = sourceRevision;
     profileStale = Boolean(meta.profile_stale || !meta.has_profile);
     const incremental = Boolean(diff && diff.cells.length);
     if (regenerateProfile || (!meta.has_profile && !incremental)) {
-      const refreshed = await refreshSheetProfile(assetId, structure.sheet_id);
+      const refreshed = await refreshSheetProfile(sourceAssetId, structure.sheet_id);
+      if (!bindings.current(sourceBinding)) return;
       profileStale = Boolean(refreshed.profile_stale || !refreshed.has_profile);
     }
     changed();
@@ -295,7 +320,7 @@ export function mountSheet(container: HTMLElement, changed: () => void, onDirty:
     workbook.setCustomMetadata(custom);
     if (persist && !loading && !restoring && assetId && !(encrypted && !contentReady)) {
       revision++;
-      onDirty(workbook.save());
+      emitDirty();
     }
   }
 
@@ -314,7 +339,7 @@ export function mountSheet(container: HTMLElement, changed: () => void, onDirty:
   }
 
   const markReady = () => {
-    if (!univerAPI) return;
+    if (!univerAPI || !workbook || booting) return;
     if (univerAPI.getCurrentLifecycleStage() >= univerAPI.Enum.LifecycleStages.Rendered) {
       restoreActiveSheet();
       loading = false;
@@ -397,17 +422,37 @@ export function mountSheet(container: HTMLElement, changed: () => void, onDirty:
 
   function bindApi() {
     if (!univerAPI) return;
+    const sourceBinding = binding;
+    const current = () => bindings.current(sourceBinding);
     ensureAiRibbonTab();
+    const menuAPI = univerAPI;
+    univerAPI.createMenu({
+      id: 'office.sheet.copy-asset-path',
+      title: '复制路径',
+      tooltip: '复制项目、表格及工作表路径，供外部 Agent 定位',
+      action: () => {
+        if (!current() || loading || !assetId || !workbook) return;
+        void (async () => {
+          try {
+            const path = sheetAssetPath(getAssetPath?.(assetId), workbook.getActiveSheet().getSheetName());
+            await copySheetPath(path);
+            menuAPI.showMessage({ content: '已复制路径', type: MessageType.Success, duration: 2000 });
+          } catch (error) {
+            menuAPI.showMessage({ content: error instanceof Error ? error.message : '复制失败。', type: MessageType.Error, duration: 3000 });
+          }
+        })();
+      },
+    }).appendTo(['contextMenu.footerTabs', 'contextMenu.others']);
     univerAPI.createMenu({
       id: SHEET_COMMENT_MANAGEMENT_MENU_ID,
       title: '评论管理',
       tooltip: 'sheets-thread-comment-ui.menu.commentManagement',
       action: () => univerAPI?.executeCommand(TOGGLE_SHEET_COMMENT_PANEL_OPERATION_ID),
     }).appendTo('ribbon.data.others');
-    univerAPI.addEvent(univerAPI.Event.LifeCycleChanged, markReady);
-    univerAPI.addEvent(univerAPI.Event.SelectionChanged, changed);
+    univerAPI.addEvent(univerAPI.Event.LifeCycleChanged, () => { if (current()) markReady(); });
+    univerAPI.addEvent(univerAPI.Event.SelectionChanged, () => { if (current()) changed(); });
     univerAPI.addEvent(univerAPI.Event.ActiveSheetChanged, () => {
-      if (loading || restoring) return;
+      if (!current() || loading || restoring) return;
       document.querySelector<HTMLButtonElement>('.sheet-ai-chart-window [data-close]')?.click();
       clearStructureCache();
       rememberActiveSheet(true);
@@ -441,6 +486,25 @@ export function mountSheet(container: HTMLElement, changed: () => void, onDirty:
         });
       },
     }).appendTo('ribbon.data.others');
+    univerAPI.registerComponent('office-sheet-print-icon', PrintIcon);
+    univerAPI.createMenu({
+      id: 'office.sheet.print',
+      title: '',
+      icon: 'office-sheet-print-icon',
+      tooltip: '打印：当前工作表或选区',
+      action: () => {
+        if (!workbook) return;
+        try {
+          printActiveSheet(workbook.getActiveSheet(), {
+            title: assetName || workbook.getActiveSheet().getSheetName() || '表格',
+          });
+        } catch (error) {
+          window.dispatchEvent(new CustomEvent('office-error', {
+            detail: error instanceof Error ? error.message : '打印失败。',
+          }));
+        }
+      },
+    }).appendTo('ribbon.start.others');
     univerAPI.createMenu({
       id: 'office.sheet.text-to-number',
       title: '文本转数值',
@@ -489,7 +553,7 @@ export function mountSheet(container: HTMLElement, changed: () => void, onDirty:
         if (typeof range.setNumberFormats === 'function') {
           range.setNumberFormats(nextFormats);
         }
-        onDirty(workbook.save());
+        emitDirty();
         changed();
       },
     }).appendTo('ribbon.data.others');
@@ -533,7 +597,13 @@ export function mountSheet(container: HTMLElement, changed: () => void, onDirty:
       tooltip: '复用协作助手读取的表结构，由模型选择 X/Y 轴和图表类型',
       action: () => {
         if (!workbook || !assetId) return;
-        const activeSheet = () => workbook!.getActiveSheet();
+        const chartAssetId = assetId;
+        const chartBinding = binding;
+        const chartWorkbook = workbook;
+        const activeSheet = () => {
+          if (!bindings.current(chartBinding)) throw new Error('已切换资产，请重新打开图表助手。');
+          return chartWorkbook.getActiveSheet();
+        };
         const chartSelection = () => {
           const range = activeSheet().getSelection()?.getActiveRange();
           if (!range) return null;
@@ -555,11 +625,12 @@ export function mountSheet(container: HTMLElement, changed: () => void, onDirty:
           selectionAddress: () => chartSelection()?.address || '',
           getModelStatus: () => office.json('/assistant/status'),
           generate: async (description, onEvent) => {
+            activeSheet();
             await publishSheetCache(false);
             const selection = chartSelection();
             let response: ChartResponse | undefined;
             let streamError = '';
-            await office.stream(`/assets/${assetId}/assistant/chart/stream`, {
+            await office.stream(`/assets/${chartAssetId}/assistant/chart/stream`, {
               sheet_id: activeSheet().getSheetId(),
               description,
               selection,
@@ -575,11 +646,11 @@ export function mountSheet(container: HTMLElement, changed: () => void, onDirty:
           list: async () => {
             const sheetId = encodeURIComponent(activeSheet().getSheetId());
             const response = await office.json<{ charts: SavedSheetChart[] }>(
-              `/assets/${assetId}/sheet-charts?sheet_id=${sheetId}`,
+              `/assets/${chartAssetId}/sheet-charts?sheet_id=${sheetId}`,
             );
             return response.charts;
           },
-          save: (name, description, chart) => office.json(`/assets/${assetId}/sheet-charts`, {
+          save: (name, description, chart) => office.json(`/assets/${chartAssetId}/sheet-charts`, {
             method: 'POST',
             body: JSON.stringify({
               sheet_id: activeSheet().getSheetId(),
@@ -588,7 +659,7 @@ export function mountSheet(container: HTMLElement, changed: () => void, onDirty:
               chart,
             }),
           }),
-          rename: (chartId, name) => office.json(`/assets/${assetId}/sheet-charts/${chartId}`, {
+          rename: (chartId, name) => office.json(`/assets/${chartAssetId}/sheet-charts/${chartId}`, {
             method: 'PUT',
             body: JSON.stringify({ name }),
           }),
@@ -597,17 +668,20 @@ export function mountSheet(container: HTMLElement, changed: () => void, onDirty:
     }).appendTo('ribbon.ai.others');
 
     univerAPI.onCommandExecuted(command => {
-      if (loading || restoring || command.type !== 2 || !assetId || !workbook) return;
+      if (!current() || loading || restoring || command.type !== 2 || !assetId || !workbook) return;
       if (encrypted && !contentReady) return;
       rememberActiveSheet(false);
       revision++;
-      onDirty(workbook.save());
+      emitDirty();
       changed();
       scheduleSheetCache();
     });
   }
 
   function boot(snapshot: Record<string, unknown>) {
+    binding = bindings.begin(assetId);
+    loading = true;
+    booting = true;
     univer?.dispose();
     univer = undefined;
     univerAPI = undefined;
@@ -645,12 +719,32 @@ export function mountSheet(container: HTMLElement, changed: () => void, onDirty:
     univerAPI = created.univerAPI;
     bindApi();
     workbook = univerAPI.createWorkbook(snapshot);
+    booting = false;
     markReady();
   }
 
   boot({ name: '未命名表格' });
   return {
     async load(asset) {
+      try {
+        assertSheetContentOwner(asset.id, asset.content);
+      } catch (error) {
+        binding = bindings.begin('');
+        assetId = '';
+        loading = true;
+        container.inert = true;
+        container.dataset.ready = 'false';
+        clearStructureCache();
+        univer?.dispose();
+        univer = undefined;
+        univerAPI = undefined;
+        workbook = undefined;
+        const notice = document.createElement('p');
+        notice.textContent = error instanceof Error ? error.message : '工作簿归属不一致，已阻止加载。';
+        notice.setAttribute('role', 'alert');
+        container.replaceChildren(notice);
+        throw error;
+      }
       // 同一表格已就绪：不 dispose/重建，避免切回工作区时白屏闪烁
       const snapshotReady = isSnapshot(asset.content);
       if (
@@ -675,7 +769,7 @@ export function mountSheet(container: HTMLElement, changed: () => void, onDirty:
       const locked = encrypted && !snapshotReady;
       let expanded = false;
       let snapshot: Record<string, unknown> = isSnapshot(asset.content)
-        ? asset.content
+        ? { ...asset.content, id: asset.id }
         : { id: asset.id, name: asset.name || '未命名表格' };
       if (isSnapshot(asset.content)) {
         const normalized = ensureSnapshotDimensions(snapshot);
@@ -685,7 +779,7 @@ export function mountSheet(container: HTMLElement, changed: () => void, onDirty:
       lastSheetId = isSnapshot(asset.content) ? rememberedSheetId(snapshot) : '';
       boot(snapshot);
       restoreActiveSheet();
-      if (!locked && workbook && (!isSnapshot(asset.content) || expanded)) onDirty(workbook.save());
+      if (!locked && workbook && (!isSnapshot(asset.content) || expanded)) emitDirty();
       markReady();
     },
     context() {
@@ -868,10 +962,10 @@ export function mountSheet(container: HTMLElement, changed: () => void, onDirty:
       } else if (!formatOps.length) {
         throw new Error('修改内容为空。');
       }
-      onDirty(workbook.save());
+      emitDirty();
       changed();
     },
-    snapshot() { return workbook?.save(); },
+    snapshot() { return snapshotForSave(); },
     undo() { void univerAPI?.undo(); },
     export() {
       if (!workbook) return;

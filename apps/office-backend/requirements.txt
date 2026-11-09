@@ -1,12 +1,17 @@
 fastapi>=0.115
 uvicorn>=0.32
-pymongo>=4.10
 pyjwt>=2.9
 python-dotenv>=1.0,<2
 python-multipart>=0.0.9
 httpx>=0.27
-pymupdf>=1.24
+beautifulsoup4>=4.12,<5
+# 2.x 强制依赖 onnxruntime / pymupdf4llm / pymupdf-layout 等版面分析包（桌面包多 ~100MB，未使用）
+pymupdf>=1.24,<2
+# 仅 OFFICE_VECTOR_BACKEND=pg 时使用；桌面 sidecar 不打包
 psycopg[binary]>=3.1
 sqlite-vec>=0.1.6
 pyyaml>=6.0
 cryptography>=42
+# mcp 2.x 移除了 fastmcp 模块，钉在 1.x（外部 Agent /mcp/sheets 等）
+mcp>=1.2.0,<2.0.0
+-r quant_research/requirements.txt

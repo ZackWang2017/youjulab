@@ -87,7 +87,8 @@ def list_items(owner_id: str, group_id: int, *, today_only: bool = False, for_re
     row = _group(owner_id, group_id)
     day = fetch.today() if today_only else None
     if row["kind"] == "favorites":
-        rows = repo.list_items(owner_id, favorited=True, fetched_date=day, hidden=None if for_review else False)
+        # 收藏夹列出全部收藏；只有复盘按当天收藏统计。
+        rows = repo.list_items(owner_id, favorited=True, fetched_date=day if for_review else None, hidden=None if for_review else False)
     elif for_review:
         rows = repo.list_items(owner_id, group_id=group_id, fetched_date=day)
     else:

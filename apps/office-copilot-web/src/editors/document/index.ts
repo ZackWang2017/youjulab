@@ -5,6 +5,7 @@ import Heading from '@tiptap/extension-heading';
 import Paragraph from '@tiptap/extension-paragraph';
 import StarterKit from '@tiptap/starter-kit';
 import { Table, TableCell, TableHeader, TableRow } from '@tiptap/extension-table';
+import { assetIndexExtensions } from '../../asset-index';
 import { download, persist, saved, type EditorAdapter } from '../../context/types';
 import { circleBullet, listStack, nestedListTab, nestUnderNumber } from '../rich-text-lists';
 import { formattedInsertHtml } from './markdown';
@@ -109,7 +110,7 @@ const indentedHeading = Heading.extend({
 export function mountDocument(
   container: HTMLElement,
   changed: () => void,
-  onDirty: (content: unknown) => void,
+  onDirty: (assetId: string, content: unknown) => void,
 ): EditorAdapter {
   let revision = 0;
   let assetId = '';
@@ -166,6 +167,7 @@ export function mountDocument(
       TableCell,
       circleBullet,
       nestedListTab,
+      ...assetIndexExtensions(),
     ], content: FALLBACK,
     onSelectionUpdate() {
       changed();
@@ -174,7 +176,7 @@ export function mountDocument(
     onUpdate() {
       if (loading || !assetId) return;
       revision++;
-      onDirty(editor.getJSON());
+      onDirty(assetId, editor.getJSON());
       changed();
     },
   });

@@ -1,0 +1,61 @@
+#research .accounts-workspace{height:100%;display:flex;flex-direction:column;background:#f8fafb;min-width:0}
+#research .accounts-bar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:9px 12px;background:white;border-bottom:1px solid #e2e7eb;font-size:12px}
+#research .accounts-bar>strong{font-size:13px;color:#253b42}
+#research .accounts-bar>span[data-standard]{color:#72808a}
+#research .accounts-bar-spacer{flex:1}
+#research .accounts-bar select{max-width:150px;height:30px;border:1px solid #dbe3e7;border-radius:4px;background:white;padding:0 7px;font:inherit}
+#research .accounts-bar button{min-height:30px;height:30px;padding:4px 8px;font-size:12px;gap:4px}
+#research .accounts-bar svg{width:15px;height:15px}
+#research .accounts-main{display:flex;flex:1;min-height:0;min-width:0}
+#research .accounts-flow{flex:1;min-width:0;min-height:0}
+#research .t-account{width:280px;background:white;border:1px solid #cad7dd;border-top:3px solid #4c8b83;border-radius:5px;box-shadow:0 2px 5px #2239440a;color:#293b43;overflow:hidden}
+#research .t-account.group-liability{border-top-color:#638eb9}
+#research .t-account.group-equity{border-top-color:#a781a3}
+#research .t-account.group-income{border-top-color:#5b9c7d}
+#research .t-account.group-expense{border-top-color:#bb9564}
+#research .t-account header{padding:9px 10px;display:flex;align-items:center;gap:8px;border-bottom:2px solid #425a65;min-height:40px}
+#research .t-account header>span{font-size:10px;color:#72858c;flex-shrink:0}
+#research .t-account header>strong{font-size:13px;overflow-wrap:anywhere}
+#research .account-columns{display:grid;grid-template-columns:1fr 1fr;min-height:116px}
+#research .account-side{padding:6px;min-width:0}
+#research .account-side+ .account-side{border-left:1px solid #aebfc8}
+#research .account-side>strong{font-size:10px;font-weight:400;display:block;color:#788a93;margin:0 0 5px}
+#research button.account-entry{position:relative;display:block;width:100%;font-size:11px;line-height:1.5;text-align:left;justify-content:flex-start;min-height:25px;padding:3px 4px;margin:2px 0;border:0;border-radius:3px;background:transparent;overflow-wrap:anywhere}
+#research button.account-entry:hover,#research button.account-entry.is-focused{background:#e6f3ef;color:#087b69}
+#research .t-account footer{padding:5px 9px;font-size:10px;color:#8b979e;border-top:1px solid #edf1f3}
+#research .react-flow__node.selected .t-account{outline:2px solid #269b87;outline-offset:2px}
+#research .account-rule-node{font-size:10px;border-color:#bfd4d3;background:#f3faf8;border-radius:4px;padding:6px;overflow-wrap:anywhere}
+#research .accounts-details{flex:0 0 320px;width:320px;max-width:45%;overflow:auto;background:#fff;border-left:1px solid #dce4e8;padding:0 14px 14px;font-size:12px}
+#research .accounts-details>header{display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;background:#fff;padding:10px 0;border-bottom:1px solid #edf0f2;z-index:1}
+#research .accounts-details>header button{width:26px;min-height:26px;padding:3px;border:0}
+#research .accounts-details form>label{display:grid;grid-template-columns:65px minmax(0,1fr);gap:8px;align-items:center;margin-top:12px}
+#research .accounts-details input:not([type=checkbox]),#research .accounts-details textarea,#research .accounts-details select{width:100%;min-width:0;border:1px solid #d8e1e5;border-radius:4px;padding:7px;font:inherit;background:white;color:#293b43}
+#research .accounts-details textarea{resize:vertical;line-height:1.6}
+#research .accounts-details fieldset{border:0;border-top:1px solid #e4eaed;padding:8px 0 0;margin:16px 0;max-height:200px;overflow:auto}
+#research .accounts-details legend{font-weight:600;padding:0 8px 0 0}
+#research .accounts-check{display:flex;align-items:center;gap:7px;padding:4px 0}
+#research .accounts-check input{accent-color:#147c6e}
+#research .accounts-actions{display:flex;justify-content:space-between;gap:8px;margin-top:14px}
+#research .accounts-actions button{font-size:12px;min-height:30px}
+#research .accounts-related{display:flex;flex-direction:column;gap:4px;margin-top:14px}
+#research .accounts-related button{font-size:12px;justify-content:flex-start}
+#research [data-error]{color:#b44444}
+#research .accounts-status{display:flex;gap:22px;flex-wrap:wrap;font-size:11px;color:#7c8c94;padding:6px 12px;border-top:1px solid #e1e7eb;background:#fff}
+#research .research-accounts-host{height:100%;min-height:0}
+#research .research-shell.is-accounts .research-body{display:none}
+#research .research-shell.is-accounts{display:flex;flex-direction:column}
+#research .research-shell.is-accounts .research-accounts-host{flex:1}
+.research-create-dialog{width:min(520px,calc(100vw - 32px));gap:18px;padding:24px}
+.research-create-dialog h2{margin:0;font-size:17px}
+.research-create-fields{display:grid;gap:16px}
+.research-create-row{display:grid;grid-template-columns:80px minmax(0,1fr);align-items:center;gap:12px;font-size:13px;position:relative}
+.research-create-row>span{color:#52636d}
+.research-create-row input:not([type=radio]),.research-create-row select{width:100%;height:36px;min-width:0;border:1px solid #d5dfe3;border-radius:5px;padding:0 10px;font:inherit;background:#fff;color:#263a43}
+.research-create-visibility{display:flex;gap:20px;align-items:center;min-height:36px}
+.research-create-visibility label{display:flex;align-items:center;gap:6px;white-space:nowrap}
+.research-create-visibility input{accent-color:#147c6e;margin:0}
+.research-stock-input{position:relative;min-width:0}
+.research-stock-results{position:absolute;top:calc(100% + 4px);left:0;right:0;z-index:3;max-height:200px;overflow:auto;border:1px solid #dce5e9;border-radius:5px;background:#fff;box-shadow:0 8px 22px #18333b14;padding:4px}
+.research-stock-results button:not(#sheet button){display:flex;width:100%;justify-content:space-between;text-align:left;font-size:12px;border:0;min-height:32px;padding:6px;gap:8px}
+.research-stock-results p{padding:4px 8px;font-size:12px;color:#71818a;margin:0}
+.research-create-dialog [data-error]{color:#b44444;font-size:12px;margin:0}

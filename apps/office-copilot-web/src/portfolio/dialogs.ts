@@ -2,7 +2,7 @@ import { createIcons, icons } from 'lucide';
 import {
   portfolioApi, type BuyBody, type Holding, type HoldingAction, type ScheduledTask, type SecurityHit, type Transaction, type TransactionBody,
 } from './api';
-import { formatDateTime, formatMoney, formatMoneyWithCurrency, formatShares, localDateInputValue, toNumber } from './format';
+import { bookedOccurredAt, formatDateTime, formatMoney, formatMoneyWithCurrency, formatShares, localDateInputValue, toNumber } from './format';
 
 const esc = (value: string) => value.replace(/[&<>'"]/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[char]!));
 
@@ -11,6 +11,11 @@ const CASH_OPTIONS = [
   { ticker_code: 'HKD.CASH', name: '港元现金 (HKD)' },
   { ticker_code: 'USD.CASH', name: '美元现金 (USD)' },
 ];
+const PRODUCT_OPTIONS: SecurityHit[] = [
+  { ticker_code: 'NEW.FIXED', name: '固收（金额余额型）' },
+  { ticker_code: 'NEW.FUND', name: '基金产品（份额净值型）' },
+];
+const ENTRY_OPTIONS = [...CASH_OPTIONS, ...PRODUCT_OPTIONS];
 
 function currencyOfTicker(ticker: string): string {
   const [code, market] = ticker.toUpperCase().split('.');
@@ -26,6 +31,8 @@ function currencyOfTicker(ticker: string): string {
 function marketTag(item: SecurityHit): string {
   const [code, market] = item.ticker_code.toUpperCase().split('.');
   if (market === 'CASH') return '现金';
+  if (market === 'FIXED') return '固收';
+  if (market === 'FUND') return '基金';
   if (market === 'US') return item.security_type === '基金' ? '美股ETF' : '美股';
   if (market === 'HK') return '港股';
   if (item.security_type === '基金') return '场内基金';
@@ -54,10 +61,7 @@ function busy(form: HTMLFormElement, on: boolean) {
 }
 
 function occurredAt(dateValue: string): string | undefined {
-  if (!dateValue) return undefined;
-  // 以当天本地 15:30 记账，保证落在交易日内，且时区信息完整
-  const d = new Date(`${dateValue}T15:30:00`);
-  return Number.isNaN(d.getTime()) ? undefined : d.toISOString();
+  return bookedOccurredAt(dateValue);
 }
 
 /** 买入 / 存入现金。cashCurrencies：组合里已有的现金账户币种，用来默认勾选「用组合现金结算」。 */
@@ -65,12 +69,16 @@ export function openBuyDialog(portfolioId: number, cashBalances: Record<string, 
   return new Promise(resolve => {
     const el = overlay(`<form class="name-dialog portfolio-dialog portfolio-buy-dialog">
       <h2>买入 / 存入</h2>
-      <label class="field-label">证券或现金</label>
+      <label class="field-label">证券、现金或产品</label>
       <div class="portfolio-combobox">
-        <input data-search autocomplete="off" placeholder="输入代码或名称搜索（支持 A 股、B 股、港股、美股及 ETF），或选择现金" required>
+        <input data-search autocomplete="off" placeholder="搜索证券，或选择现金、固收、基金产品" required>
         <div class="portfolio-suggest" data-suggest hidden></div>
       </div>
       <div class="portfolio-picked" data-picked hidden></div>
+      <div class="portfolio-grid-2" data-product-fields hidden>
+        <label><span>产品名称</span><input data-product-name maxlength="128"></label>
+        <label><span>币种</span><select data-product-currency><option>CNY</option><option>HKD</option><option>USD</option></select></label>
+      </div>
       <div class="portfolio-grid-2">
         <label><span data-price-label>买入价格</span><input data-price type="number" step="any" min="0" placeholder="0.00"></label>
         <label><span data-shares-label>数量</span><input data-shares type="number" step="any" min="0" required placeholder="0"></label>
@@ -111,7 +119,7 @@ export function openBuyDialog(portfolioId: number, cashBalances: Record<string, 
         const button = document.createElement('button');
         button.type = 'button';
         button.dataset.ticker = item.ticker_code;
-        button.innerHTML = `<span>${esc(item.name)}</span><small><em>${esc(marketTag(item))}</em>${esc(item.ticker_code)}</small>`;
+        button.innerHTML = `<span>${esc(item.name)}</span><small><em>${esc(marketTag(item))}</em>${PRODUCT_OPTIONS.some(p => p.ticker_code === item.ticker_code) ? '手动录入' : esc(item.ticker_code)}</small>`;
         button.addEventListener('click', () => pick(item));
         suggest.append(button);
       });
@@ -119,20 +127,28 @@ export function openBuyDialog(portfolioId: number, cashBalances: Record<string, 
     };
 
     const pick = (item: SecurityHit) => {
+      seq++;
+      clearTimeout(timer);
       selected = item;
       const isCash = item.ticker_code.endsWith('.CASH');
-      search.value = `${item.name}（${item.ticker_code}）`;
+      const product = PRODUCT_OPTIONS.some(p => p.ticker_code === item.ticker_code);
+      const fixed = product && item.ticker_code.endsWith('.FIXED');
+      const nameInput = el.querySelector<HTMLInputElement>('[data-product-name]')!;
+      el.querySelector<HTMLElement>('[data-product-fields]')!.hidden = !product;
+      nameInput.required = product;
+      price.parentElement!.hidden = fixed;
+      search.value = product ? item.name : `${item.name}（${item.ticker_code}）`;
       suggest.hidden = true;
       picked.hidden = false;
-      picked.textContent = isCash ? '现金账户：金额按 1:1 记账' : `计价币种 ${currencyOfTicker(item.ticker_code)}`;
-      el.querySelector('[data-price-label]')!.textContent = isCash ? '价格（现金固定为 1）' : '买入价格';
-      el.querySelector('[data-shares-label]')!.textContent = isCash ? '存入金额' : '数量';
-      price.disabled = isCash;
-      price.required = !isCash;
-      if (isCash) price.value = '1';
+      picked.textContent = product ? item.name : isCash ? '现金账户：金额按 1:1 记账' : `计价币种 ${currencyOfTicker(item.ticker_code)}`;
+      el.querySelector('[data-price-label]')!.textContent = product ? '买入单位净值' : isCash ? '价格（现金固定为 1）' : '买入价格';
+      el.querySelector('[data-shares-label]')!.textContent = fixed ? '转入金额' : product ? '确认份额' : isCash ? '存入金额' : '数量';
+      price.disabled = isCash || fixed;
+      price.required = !isCash && !fixed;
+      if (isCash || fixed) price.value = '1';
       else if (price.value === '1') price.value = '';
-      form.querySelector<HTMLButtonElement>('button[type="submit"]')!.textContent = isCash ? '确认存入' : '确认买入';
-      const ccy = currencyOfTicker(item.ticker_code);
+      form.querySelector<HTMLButtonElement>('button[type="submit"]')!.textContent = product ? '确认转入' : isCash ? '确认存入' : '确认买入';
+      const ccy = product ? el.querySelector<HTMLSelectElement>('[data-product-currency]')!.value : currencyOfTicker(item.ticker_code);
       const balance = cashBalances[ccy];
       if (!isCash && balance !== undefined) {
         settleWrap.hidden = false;
@@ -144,17 +160,20 @@ export function openBuyDialog(portfolioId: number, cashBalances: Record<string, 
         settle.checked = false;
       }
       el.querySelector<HTMLElement>('[data-hint]')!.hidden = isCash;
-      (isCash ? shares : price).focus();
+      (product ? nameInput : isCash ? shares : price).focus();
     };
+    el.querySelector('[data-product-currency]')!.addEventListener('change', () => { if (selected) pick(selected); });
 
     search.addEventListener('input', () => {
       selected = null;
+      el.querySelector<HTMLElement>('[data-product-fields]')!.hidden = true;
+      el.querySelector<HTMLInputElement>('[data-product-name]')!.required = false;
       picked.hidden = true;
       settleWrap.hidden = true;
       const text = search.value.trim();
       clearTimeout(timer);
-      if (!text) { renderSuggest(CASH_OPTIONS, '现金账户'); return; }
-      const cashHits = CASH_OPTIONS.filter(c => c.name.toLowerCase().includes(text.toLowerCase()) || c.ticker_code.toLowerCase().includes(text.toLowerCase()));
+      if (!text) { renderSuggest(ENTRY_OPTIONS, '现金与产品'); return; }
+      const cashHits = ENTRY_OPTIONS.filter(c => c.name.toLowerCase().includes(text.toLowerCase()) || c.ticker_code.toLowerCase().includes(text.toLowerCase()));
       const current = ++seq;
       timer = setTimeout(async () => {
         let items: SecurityHit[] = [];
@@ -168,7 +187,7 @@ export function openBuyDialog(portfolioId: number, cashBalances: Record<string, 
         renderSuggest([...cashHits, ...items, ...manual], items.length || cashHits.length || manual.length ? '' : '没有匹配的证券');
       }, 220);
     });
-    search.addEventListener('focus', () => { if (!selected && !search.value.trim()) renderSuggest(CASH_OPTIONS, '现金账户'); });
+    search.addEventListener('focus', () => { if (!selected && !search.value.trim()) renderSuggest(ENTRY_OPTIONS, '现金与产品'); });
     el.addEventListener('click', e => { if (e.target === el) finish(false); if (!(e.target as Element).closest('.portfolio-combobox')) suggest.hidden = true; });
     el.querySelector('[data-cancel]')!.addEventListener('click', () => finish(false));
 
@@ -176,6 +195,8 @@ export function openBuyDialog(portfolioId: number, cashBalances: Record<string, 
       e.preventDefault();
       if (!selected) { showError(form, '请先从搜索结果中选择证券或现金。'); search.focus(); return; }
       const isCash = selected.ticker_code.endsWith('.CASH');
+      const product = PRODUCT_OPTIONS.some(p => p.ticker_code === selected!.ticker_code);
+      const fixed = product && selected.ticker_code.endsWith('.FIXED');
       const qty = toNumber(shares.value);
       if (!qty || qty <= 0) { showError(form, isCash ? '请输入存入金额。' : '请输入数量。'); return; }
       const body: BuyBody = {
@@ -188,6 +209,12 @@ export function openBuyDialog(portfolioId: number, cashBalances: Record<string, 
         target_allocation_pct: el.querySelector<HTMLInputElement>('[data-target]')!.value.trim() || undefined,
         settle_with_cash: !isCash && !settleWrap.hidden && settle.checked,
       };
+      if (product) {
+        body.asset_type = fixed ? 'fixed_income' : 'fund';
+        body.currency = el.querySelector<HTMLSelectElement>('[data-product-currency]')!.value;
+        body.name = el.querySelector<HTMLInputElement>('[data-product-name]')!.value.trim();
+        if (fixed) body.amount = shares.value.trim();
+      }
       if (!isCash && !(toNumber(body.price) && toNumber(body.price)! > 0)) { showError(form, '请输入买入价格。'); return; }
       showError(form, '');
       busy(form, true);
@@ -203,7 +230,7 @@ export function openBuyDialog(portfolioId: number, cashBalances: Record<string, 
   });
 }
 
-const ACTION_LABEL: Record<HoldingAction, string> = { add: '增持', reduce: '减持', close: '清仓', deposit: '存入', withdraw: '取出', dividend: '分红' };
+const ACTION_LABEL: Record<HoldingAction, string> = { add: '增持', reduce: '减持', close: '清仓', deposit: '存入', withdraw: '取出', dividend: '分红', valuation: '更新估值' };
 
 /** 分红入账：金额记入该现金账户，并归属到组合里的一只证券，供分红统计使用。 */
 export function openDividendDialog(portfolioId: number, cash: Holding, sources: Holding[]): Promise<boolean> {
@@ -253,6 +280,7 @@ export function openDividendDialog(portfolioId: number, cash: Holding, sources: 
 
 /** 对已有持仓的增持 / 减持 / 清仓，或现金账户的存入 / 取出。 */
 export function openAdjustDialog(portfolioId: number, holding: Holding, action: HoldingAction, cashBalances: Record<string, number>): Promise<boolean> {
+  if (holding.asset_type) return openProductDialog(portfolioId, holding, action, cashBalances);
   return new Promise(resolve => {
     const isCash = holding.market_code === 'CASH';
     const label = ACTION_LABEL[action];
@@ -312,8 +340,62 @@ export function openAdjustDialog(portfolioId: number, holding: Holding, action: 
   });
 }
 
+function openProductDialog(portfolioId: number, holding: Holding, action: HoldingAction, cashBalances: Record<string, number>): Promise<boolean> {
+  const fixed = holding.asset_type === 'fixed_income';
+  const valuation = action === 'valuation';
+  const label = valuation ? (fixed ? '更新金额' : '更新净值') : action === 'add' ? '转入' : '转出';
+  return new Promise(resolve => {
+    const el = overlay(`<form class="name-dialog portfolio-dialog">
+      <h2>${label} · ${esc(holding.name)}</h2>
+      <p class="portfolio-dialog-sub">${esc(holding.currency)} · ${fixed ? `持有金额 ${formatMoney(holding.market_value, 2)}` : `持有份额 ${formatShares(holding.shares)}`}</p>
+      ${!valuation && action !== 'add' ? '<label class="portfolio-check"><input data-all type="checkbox"><span>全部转出</span></label>' : ''}
+      <div class="portfolio-grid-2">
+        ${!fixed ? `<label><span>${valuation ? '最新单位净值' : '成交单位净值'}</span><input data-value type="number" min="0" step="any" required value="${esc(holding.current_price ?? '')}"></label>` : ''}
+        ${fixed || !valuation ? `<label><span>${fixed ? valuation ? '当前持有总金额（含收益）' : '转入／转出金额' : '确认份额'}</span><input data-quantity type="number" min="0" step="any" required value="${fixed && valuation ? esc(holding.market_value ?? '') : ''}"></label>` : ''}
+        <label><span>${valuation ? '估值日期' : '发生日期'}</span><input data-date type="date" required value="${localDateInputValue()}" max="${localDateInputValue()}"></label>
+      </div>
+      ${!valuation ? `<label class="portfolio-check"><input data-settle type="checkbox" ${action !== 'add' || cashBalances[holding.currency] !== undefined ? 'checked' : ''}><span>${action === 'add' ? '用组合现金结算' : '转入组合现金账户'}（${esc(holding.currency)}）</span></label>` : ''}
+      <label><span>备注（可选）</span><input data-note maxlength="200"></label>
+      <p class="portfolio-hint">${valuation ? '仅更新估值，不记作转入或收益入账。' : '未选择组合现金结算时，记为外部资金进出。'}</p>
+      <div class="portfolio-dialog-error" data-error role="alert" hidden></div>
+      <div class="dialog-actions"><button type="button" data-cancel>取消</button><button type="submit" class="primary">确认${label}</button></div>
+    </form>`);
+    const form = el.querySelector('form')!;
+    const finish = (changed: boolean) => { el.remove(); resolve(changed); };
+    el.querySelector('[data-cancel]')!.addEventListener('click', () => finish(false));
+    el.addEventListener('click', event => { if (event.target === el) finish(false); });
+    const all = el.querySelector<HTMLInputElement>('[data-all]');
+    const quantity = el.querySelector<HTMLInputElement>('[data-quantity]');
+    all?.addEventListener('change', () => {
+      quantity!.value = all.checked ? fixed ? holding.market_value ?? '0' : holding.shares : '';
+      quantity!.readOnly = all.checked && !fixed;
+    });
+    form.addEventListener('submit', async event => {
+      event.preventDefault();
+      const body: TransactionBody = {
+        action: all?.checked ? 'close' : action,
+        shares: fixed || valuation ? '0' : quantity!.value,
+        price: fixed ? '1' : el.querySelector<HTMLInputElement>('[data-value]')!.value,
+        amount: fixed ? quantity!.value : undefined,
+        occurred_at: occurredAt(el.querySelector<HTMLInputElement>('[data-date]')!.value),
+        settle_with_cash: el.querySelector<HTMLInputElement>('[data-settle]')?.checked ?? false,
+        note: el.querySelector<HTMLInputElement>('[data-note]')!.value.trim() || undefined,
+      };
+      busy(form, true);
+      showError(form, '');
+      try {
+        await portfolioApi.transact(portfolioId, holding.id, body);
+        finish(true);
+      } catch (error) {
+        busy(form, false);
+        showError(form, error instanceof Error ? error.message : String(error));
+      }
+    });
+  });
+}
+
 const TX_LABEL: Record<string, string> = {
-  buy: '买入', add: '增持', reduce: '减持', close: '清仓', deposit: '存入', withdraw: '取出', dividend: '分红', cash_in: '现金入账', cash_out: '现金扣款',
+  buy: '买入', add: '增持', reduce: '减持', close: '清仓', deposit: '存入', withdraw: '取出', dividend: '分红', cash_in: '现金入账', cash_out: '现金扣款', valuation: '更新估值',
 };
 
 export async function openTransactionsDialog(portfolioId: number, holding?: Holding) {

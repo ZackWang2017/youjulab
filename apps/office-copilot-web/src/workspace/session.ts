@@ -1,5 +1,5 @@
-import { clearPdfFileCache, office } from '../office-client/client';
-import { remoteToken } from '../remote/client';
+import { clearPdfFileCache, office, type PdfFileProgress } from '../office-client/client';
+import { remoteToken, setOfflineMode } from '../remote/client';
 import type { Surface } from '../context/types';
 
 export type Kind = Surface;
@@ -38,7 +38,7 @@ export interface Workspace {
   recentAssets: RecentAsset[];
 }
 
-const KINDS: Kind[] = ['sheet', 'document', 'pdf', 'mindmap', 'research', 'diagram', 'project_plan', 'calendar'];
+const KINDS: Kind[] = ['sheet', 'document', 'pdf', 'strategy', 'mindmap', 'research', 'diagram', 'project_plan', 'calendar'];
 const serverRevision = new Map<string, number>();
 /** 已拉取过正文的资产，切换文件时优先直接打开，避免每次重新请求。 */
 const assetCache = new Map<string, Asset>();
@@ -75,7 +75,7 @@ function assetHasBody(asset: Asset | null | undefined) {
     content.sheets || content.sheetOrder || content.nodeData || content.type === 'doc'
     || content.format === 'drawio-v1' || content.format === 'mermaid-v1'
     || content.format === 'invp-research-diagram-v1' || content.format === 'invp-project-plan-v1'
-    || content.format === 'invp-calendar-v1' || content.format === 'mind-elixir-v1',
+    || content.format === 'invp-calendar-v1' || content.format === 'mind-elixir-v1' || content.format === 'youju-strategy-v1',
   );
 }
 
@@ -176,6 +176,7 @@ export async function flushSave() {
 
 export function queueSave(id: string, content: unknown) {
   if (!canSaveEncrypted(id)) return;
+  if (queued && queued.id !== id) void flushSave();
   queued = { id, content };
   saveFailed = false;
   clearTimeout(saveTimer);
@@ -192,6 +193,7 @@ async function loadAssets(projectId: string) {
     sheet: [] as Asset[],
     document: [] as Asset[],
     pdf: [] as Asset[],
+    strategy: [] as Asset[],
     mindmap: [] as Asset[],
     research: [] as Asset[],
     diagram: [] as Asset[],
@@ -243,6 +245,7 @@ function selectedFrom(assets: Record<Kind, Asset[]>, last: Record<Kind, string |
     sheet: pick(assets.sheet, last.sheet),
     document: pick(assets.document, last.document),
     pdf: pick(assets.pdf, last.pdf),
+    strategy: pick(assets.strategy, last.strategy),
     mindmap: pick(assets.mindmap, last.mindmap),
     research: pick(assets.research, last.research),
     diagram: pick(assets.diagram, last.diagram),
@@ -291,7 +294,7 @@ export async function openAsset(id: string, trackRecent = true) {
   const suffix = trackRecent ? '' : '?track_recent=false';
   const cached = assetCache.get(id);
   const [asset, user] = await Promise.all([
-    cached && assetHasBody(cached) ? Promise.resolve(cached) : getAsset(id, { force: true }),
+    cached && assetHasBody(cached) && cached.kind !== 'research' ? Promise.resolve(cached) : getAsset(id, { force: true }),
     office.json<User>(`/assets/${id}/select${suffix}`, { method: 'POST' }),
   ]);
   return { asset: cacheAsset(asset), user };
@@ -348,21 +351,34 @@ export async function createProject(name: string) {
   return selectProject(project.id);
 }
 
-export async function createAsset(projectId: string, kind: Kind, name: string, visibility: 'project' | 'user' = 'project') {
+export async function createAsset(projectId: string, kind: Kind, name: string, visibility: 'project' | 'user' = 'project', content?: unknown, sourceUrl?: string) {
   await flushSaveSoft();
-  const body: { kind: Kind; name: string; visibility: 'project' | 'user' } = { kind, name, visibility };
-  const asset = await office.json<Asset>(`/projects/${projectId}/assets`, {
+  const body = { kind, name, visibility, ...(content === undefined ? {} : { content }), ...(sourceUrl ? { source_url: sourceUrl } : {}) };
+  let asset = await office.json<Asset>(`/projects/${projectId}/assets`, {
     method: 'POST', body: JSON.stringify(body),
   });
+  // Older running backends ignore initial research content; persist it before opening the editor.
+  if (kind === 'research' && content !== undefined && JSON.stringify(asset.content) !== JSON.stringify(content)) {
+    asset = await office.json<Asset>(`/assets/${asset.id}`, {
+      method: 'PUT', body: JSON.stringify({ content, revision: asset.revision }),
+    });
+    const expected = content as { type?: unknown };
+    if (!asset.content || asset.content.type !== expected.type) {
+      throw new Error('研究图类型保存失败，请重启后台服务后重试。');
+    }
+  }
   return cacheAsset(asset);
 }
 
-export async function uploadPdf(projectId: string, file: File) {
+export async function uploadPdf(
+  projectId: string,
+  file: File,
+  onProgress?: (progress: PdfFileProgress) => void,
+) {
   const name = file.name.replace(/\.pdf$/i, '') || '未命名 PDF';
   const asset = await createAsset(projectId, 'pdf', name);
-  const uploaded = await office.upload<Asset>(asset.id, file);
-  rememberRevision(uploaded.id, uploaded.revision);
-  return uploaded;
+  const uploaded = await office.upload<Asset>(asset.id, file, onProgress);
+  return cacheAsset(uploaded);
 }
 
 export async function savePdfFile(id: string, file: File) {
@@ -391,19 +407,26 @@ export async function register(email: string, password: string) {
 const BOUND_REMOTE_KEY = 'youju-bound-remote';
 
 /** 远程账号登录后：按注册邮箱绑定本机 users，并把访客资产挂到该邮箱下。 */
-export async function bindLocalAccount(opts?: { force?: boolean }) {
+export async function bindLocalAccount(opts?: { force?: boolean; password?: string }) {
   const remote = remoteToken();
   if (!remote) throw new Error('请先登录远程账号。');
   // 同一次会话里同一远程令牌已绑过且本机仍有 JWT，跳过，避免反复打 mcp /api/account/me
   if (!opts?.force && office.signedIn() && sessionStorage.getItem(BOUND_REMOTE_KEY) === remote) {
     return null;
   }
+  // 远程刚校验通过的密码一并交给本机保存哈希，网络不可用时可离线进入。
   const data = await office.json<{ token: string; user: User; email?: string }>('/local/bind-account', {
     method: 'POST',
+    ...(opts?.password ? { body: JSON.stringify({ password: opts.password }) } : {}),
   });
   office.setToken(data.token);
   sessionStorage.setItem(BOUND_REMOTE_KEY, remote);
   return data.user;
+}
+
+/** 远程改密成功后同步本机离线凭据。 */
+export async function syncLocalPassword(password: string) {
+  await office.json('/local/password', { method: 'PUT', body: JSON.stringify({ password }) });
 }
 
 export function logout() {
@@ -415,6 +438,7 @@ export function logout() {
   filePasswords.clear();
   clearPdfFileCache();
   sessionStorage.removeItem(BOUND_REMOTE_KEY);
+  setOfflineMode(false);
   void office.json('/auth/logout', { method: 'POST' }).catch(() => {});
   office.setToken(null);
 }

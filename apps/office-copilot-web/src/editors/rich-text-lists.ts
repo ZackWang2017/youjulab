@@ -228,6 +228,7 @@ export const collapsibleListItem = ListItem.extend({
   },
   addKeyboardShortcuts() {
     return {
+      ...this.parent?.(),
       'Alt-ArrowLeft': () => setListCollapsed(this.editor, true),
       'Alt-ArrowRight': () => setListCollapsed(this.editor, false),
     };

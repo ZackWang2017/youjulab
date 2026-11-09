@@ -4,13 +4,20 @@ import {
   addPdfFolder, deletePdfFolder, folderMatches, folderPaths, hydratePdfFolders, loadPdfFolders, pdfsInFolder,
   placePdf, renamePdfFolder, savePdfFolders, type PdfFolder,
 } from './pdf-folders';
+import {
+  addDocumentFolder, deleteDocumentFolder, documentFolderMatches, documentFolderPaths, documentsInFolder,
+  hydrateDocumentFolders, loadDocumentFolders, placeDocument, renameDocumentFolder, saveDocumentFolders,
+  type DocumentFolder,
+} from './document-folders';
 import { office } from '../office-client/client';
 import { changeRemotePassword, DEFAULT_REMOTE_BASE, remoteBase, remoteLogin, remoteToken, setRemoteBase, type BackupProgress, type BackupRecord } from '../remote/client';
 import type { Asset, Kind, Workspace } from './session';
+import { syncLocalPassword } from './session';
 import { openCalcWindow } from './calc-window';
+import { libraryExpanded, saveLibraryExpanded } from './library-preference';
 
-const LABELS: Record<Kind, string> = { sheet: '表格', document: '文档', pdf: 'PDF', mindmap: '导图', research: '研究图', diagram: '绘图', project_plan: '项目计划', calendar: '计划' };
-const NEW_LABELS: Record<Kind, string> = { sheet: '新建表格', document: '新建文档', pdf: '新建 PDF', mindmap: '新建导图', research: '新建研究图', diagram: '新建绘图', project_plan: '新建项目计划', calendar: '新建计划' };
+const LABELS: Record<Kind, string> = { sheet: '表格', document: '文档', pdf: 'PDF', strategy: '策略', mindmap: '导图', research: '研究图', diagram: '绘图', project_plan: '项目计划', calendar: '计划' };
+const NEW_LABELS: Record<Kind, string> = { sheet: '新建表格', document: '新建文档', pdf: '新建 PDF', strategy: '新建策略', mindmap: '新建导图', research: '新建研究图', diagram: '新建绘图', project_plan: '新建项目计划', calendar: '新建计划' };
 const LIBRARY_KINDS: Kind[] = ['pdf', 'sheet', 'mindmap', 'document', 'project_plan', 'research', 'diagram'];
 let libraryOpenKind: Kind | null = null;
 
@@ -28,6 +35,7 @@ function kindIcon(kind: Kind) {
   if (kind === 'sheet') return 'table-2';
   if (kind === 'document') return 'file-text';
   if (kind === 'pdf') return 'book-open';
+  if (kind === 'strategy') return 'flask-conical';
   if (kind === 'calendar') return 'calendar-days';
   if (kind === 'diagram') return 'workflow';
   if (kind === 'research') return 'chart-no-axes-combined';
@@ -39,7 +47,7 @@ export function renderAuth(root: HTMLElement) {
   root.innerHTML = `<div class="auth-page" id="auth-page">
     <form id="auth" class="auth-card">
       <button type="button" class="auth-close" id="auth-close" title="关闭" aria-label="关闭" hidden><i data-lucide="x"></i></button>
-      <h1>有据 - AI 价值投资实验室</h1>
+      <h1>有据youjulab - AI 价值投资实验室</h1>
       <label class="auth-field" for="auth-email"><span>邮箱</span><input id="auth-email" name="email" type="email" autocomplete="username"></label>
       <label class="auth-field" for="auth-password"><span>密码</span><input id="auth-password" name="password" type="password" autocomplete="current-password" minlength="6"></label>
       <label class="auth-auto-login" for="auth-auto-login"><input id="auth-auto-login" type="checkbox"><span>自动登录</span><small data-auto-login-status hidden></small></label>
@@ -62,9 +70,10 @@ export function renderChrome(root: HTMLElement) {
   <main><div class="workspace">
     <section id="sheet" class="surface" aria-label="表格编辑器"></section>
     <section id="document" class="surface" aria-label="文档编辑器" hidden><div class="format-bar"><button data-format="bold" title="加粗" aria-label="加粗"><i data-lucide="bold"></i></button><button data-format="italic" title="斜体" aria-label="斜体"><i data-lucide="italic"></i></button><button data-format="strike" title="删除线" aria-label="删除线"><i data-lucide="strikethrough"></i></button><button data-format="highlight" title="高亮" aria-label="高亮"><i data-lucide="highlighter"></i></button><button data-format="code" title="行内代码" aria-label="行内代码"><i data-lucide="code"></i></button><button data-format="h1" title="一级标题" aria-label="一级标题"><i data-lucide="heading-1"></i></button><button data-format="heading" title="二级标题" aria-label="二级标题"><i data-lucide="heading-2"></i></button><button data-format="h3" title="三级标题" aria-label="三级标题"><i data-lucide="heading-3"></i></button><button data-format="paragraph" title="正文" aria-label="正文"><i data-lucide="pilcrow"></i></button><button data-format="list" title="无序列表" aria-label="无序列表"><i data-lucide="list"></i></button><button data-format="ordered" title="有序列表" aria-label="有序列表"><i data-lucide="list-ordered"></i></button><button data-format="quote" title="引用" aria-label="引用"><i data-lucide="quote"></i></button><button data-format="codeblock" title="代码块" aria-label="代码块"><i data-lucide="square-code"></i></button><button data-format="rule" title="分隔线" aria-label="分隔线"><i data-lucide="minus"></i></button></div><div id="rich-editor"></div></section>
-    <section id="pdf" class="surface" aria-label="PDF 阅读器" hidden><div class="pdf-toolbar"><input type="file" accept="application/pdf,.pdf" hidden><div class="pdf-annotate" role="toolbar" aria-label="PDF 批注"><button type="button" data-annotate="highlight" title="先划选文字，再点击高亮" aria-label="高亮" disabled><i data-lucide="highlighter"></i><span>高亮</span></button><button type="button" data-annotate="text" title="先划选文字，再添加批注" aria-label="文字批注" disabled><i data-lucide="message-square-plus"></i><span>批注</span></button><button type="button" data-pdf-terms title="维护本项目的财报译法" aria-label="术语">术语</button><button type="button" data-pdf-shot title="在页面上拖拽截取区域" aria-label="截图" aria-pressed="false" disabled>截图</button></div><div class="pdf-shots" data-pdf-shots hidden></div><span data-page hidden>未打开文件</span><button type="button" class="pdf-notebook-toggle" data-pdf-notebook title="打开 PDF 笔记本" aria-label="打开 PDF 笔记本" aria-pressed="false" disabled><i data-lucide="notebook-pen"></i><span>笔记</span></button><button type="button" class="pdf-ask-ai" data-ask-ai title="先划选文字，再向 AI 提问" aria-label="问 AI" disabled><i data-lucide="sparkles"></i><span>问AI</span></button><span class="pdf-toolbar-spacer" aria-hidden="true"></span><div class="pdf-nav"><button data-prev title="上一页" aria-label="上一页"><i data-lucide="chevron-left"></i></button><input data-page-input type="number" min="1" step="1" value="1" aria-label="跳转到页码" title="输入页码后回车跳转"><span data-page-total>/ 0</span><button data-next title="下一页" aria-label="下一页"><i data-lucide="chevron-right"></i></button></div><div class="pdf-zoom"><button data-zoom-out title="缩小" aria-label="缩小" disabled><i data-lucide="zoom-out"></i></button><span data-zoom>100%</span><button data-zoom-in title="放大" aria-label="放大" disabled><i data-lucide="zoom-in"></i></button><button data-fit-width title="适应宽度" aria-label="适应宽度" disabled><i data-lucide="unfold-horizontal"></i></button></div><button type="button" data-split-view aria-pressed="false" title="左右对照同一份 PDF" disabled>复制浏览</button></div><div class="pdf-stage"><aside class="pdf-notebook-panel" data-pdf-notebook-panel hidden><div class="notebook-toolbar" role="toolbar" aria-label="PDF 笔记格式"><button type="button" data-pdf-note-command="bold" title="加粗" aria-label="加粗"><i data-lucide="bold"></i></button><button type="button" data-pdf-note-command="italic" title="斜体" aria-label="斜体"><i data-lucide="italic"></i></button><button type="button" data-pdf-note-command="heading" title="标题 H2" aria-label="标题 H2"><i data-lucide="heading-2"></i></button><button type="button" data-pdf-note-command="heading3" title="标题 H3" aria-label="标题 H3"><i data-lucide="heading-3"></i></button><button type="button" data-pdf-note-command="heading4" title="标题 H4" aria-label="标题 H4"><i data-lucide="heading-4"></i></button><button type="button" data-pdf-note-command="heading5" title="标题 H5" aria-label="标题 H5"><i data-lucide="heading-5"></i></button><button type="button" data-pdf-note-command="bullet" title="无序列表" aria-label="无序列表"><i data-lucide="list"></i></button><button type="button" data-pdf-note-command="ordered" title="有序列表" aria-label="有序列表"><i data-lucide="list-ordered"></i></button><span aria-hidden="true"></span><button type="button" data-pdf-note-page-link title="为选中文字添加 PDF 页码链接" aria-label="添加 PDF 页码链接"><i data-lucide="link-2"></i></button><button type="button" class="pdf-outline-toggle" data-pdf-outline title="生成文档大纲" aria-label="生成文档大纲" disabled><i data-lucide="list-tree"></i></button><button type="button" data-pdf-template title="大纲模板" aria-label="大纲模板"><i data-lucide="bookmark-plus"></i></button></div><div class="notebook-editor" data-pdf-notebook-editor></div></aside><div class="pdf-pane" data-pane="copy" hidden><div class="pdf-scroll" tabindex="0" data-scroll="copy"></div></div><div class="pdf-split" role="separator" aria-orientation="vertical" aria-label="调整对照窗格宽度" tabindex="0" hidden></div><div class="pdf-pane is-active" data-pane="main"><div class="pdf-scroll" tabindex="0" data-scroll="main"><div class="pdf-page"><div class="empty"><i data-lucide="file-search"></i><p>未打开 PDF</p></div></div></div></div></div></section>
+    <section id="pdf" class="surface" aria-label="PDF 阅读器" hidden><div class="pdf-toolbar"><input type="file" accept="application/pdf,.pdf" hidden><div class="pdf-annotate" role="toolbar" aria-label="PDF 批注"><button type="button" data-annotate="highlight" title="先划选文字，再点击高亮" aria-label="高亮" disabled><i data-lucide="highlighter"></i><span>高亮</span></button><button type="button" data-annotate="text" title="先划选文字，再添加批注" aria-label="文字批注" disabled><i data-lucide="message-square-plus"></i><span>批注</span></button><button type="button" data-pdf-terms title="维护本项目的财报译法" aria-label="术语">术语</button><button type="button" data-pdf-shot title="在页面上拖拽截取区域" aria-label="截图" aria-pressed="false" disabled>截图</button></div><div class="pdf-shots" data-pdf-shots hidden></div><span data-page hidden>未打开文件</span><button type="button" class="pdf-notebook-toggle" data-pdf-notebook title="打开 PDF 笔记本" aria-label="打开 PDF 笔记本" aria-pressed="false" disabled><i data-lucide="notebook-pen"></i><span>笔记</span></button><button type="button" class="pdf-ask-ai" data-ask-ai title="先划选文字，再向 AI 提问" aria-label="问 AI" disabled><i data-lucide="sparkles"></i><span>问AI</span></button><span class="pdf-toolbar-spacer" aria-hidden="true"></span><div class="pdf-nav"><button data-prev title="上一页" aria-label="上一页"><i data-lucide="chevron-left"></i></button><input data-page-input type="number" min="1" step="1" value="1" aria-label="跳转到页码" title="输入页码后回车跳转"><span data-page-total>/ 0</span><button data-next title="下一页" aria-label="下一页"><i data-lucide="chevron-right"></i></button></div><div class="pdf-zoom"><button data-zoom-out title="缩小" aria-label="缩小" disabled><i data-lucide="zoom-out"></i></button><span data-zoom>100%</span><button data-zoom-in title="放大" aria-label="放大" disabled><i data-lucide="zoom-in"></i></button><button data-fit-width title="适应宽度" aria-label="适应宽度" disabled><i data-lucide="unfold-horizontal"></i></button></div><button type="button" data-split-view aria-pressed="false" title="左右对照同一份 PDF" disabled>复制浏览</button></div><div class="pdf-stage"><aside class="pdf-notebook-panel" data-pdf-notebook-panel hidden><div class="notebook-toolbar" role="toolbar" aria-label="PDF 笔记格式"><button type="button" data-pdf-note-command="bold" title="加粗" aria-label="加粗"><i data-lucide="bold"></i></button><button type="button" data-pdf-note-command="italic" title="斜体" aria-label="斜体"><i data-lucide="italic"></i></button><button type="button" data-pdf-note-command="heading" title="标题 H2" aria-label="标题 H2"><i data-lucide="heading-2"></i></button><button type="button" data-pdf-note-command="heading3" title="标题 H3" aria-label="标题 H3"><i data-lucide="heading-3"></i></button><button type="button" data-pdf-note-command="heading4" title="标题 H4" aria-label="标题 H4"><i data-lucide="heading-4"></i></button><button type="button" data-pdf-note-command="heading5" title="标题 H5" aria-label="标题 H5"><i data-lucide="heading-5"></i></button><button type="button" data-pdf-note-command="paragraph" title="正文" aria-label="正文"><i data-lucide="pilcrow"></i></button><button type="button" data-pdf-note-command="bullet" title="无序列表" aria-label="无序列表"><i data-lucide="list"></i></button><button type="button" data-pdf-note-command="ordered" title="有序列表" aria-label="有序列表"><i data-lucide="list-ordered"></i></button><button type="button" data-pdf-note-command="quote" title="引用" aria-label="引用"><i data-lucide="quote"></i></button><span aria-hidden="true"></span><button type="button" data-pdf-note-page-link title="为选中文字添加 PDF 页码链接" aria-label="添加 PDF 页码链接"><i data-lucide="link-2"></i></button><button type="button" class="pdf-outline-toggle" data-pdf-outline title="生成文档大纲" aria-label="生成文档大纲" disabled><i data-lucide="list-tree"></i></button><button type="button" data-pdf-template title="大纲模板" aria-label="大纲模板"><i data-lucide="bookmark-plus"></i></button></div><div class="notebook-editor" data-pdf-notebook-editor></div></aside><div class="pdf-pane" data-pane="copy" hidden><div class="pdf-scroll" tabindex="0" data-scroll="copy"></div></div><div class="pdf-split" role="separator" aria-orientation="vertical" aria-label="调整对照窗格宽度" tabindex="0" hidden></div><div class="pdf-pane is-active" data-pane="main"><div class="pdf-scroll" tabindex="0" data-scroll="main"><div class="pdf-page"><div class="empty"><i data-lucide="file-search"></i><p>未打开 PDF</p></div></div></div></div></div></section>
     <section id="mindmap" class="surface" aria-label="思维导图" hidden></section>
     <section id="research" class="surface" aria-label="研究图" hidden></section>
+    <section id="strategy" class="surface" aria-label="量化策略研究" hidden></section>
     <section id="diagram" class="surface" aria-label="绘图" hidden></section>
     <section id="project-plan" class="surface" aria-label="项目计划" hidden></section>
     <section id="calendar" class="surface" aria-label="工作计划" hidden></section>
@@ -82,7 +91,7 @@ export function renderChrome(root: HTMLElement) {
     <div class="assistant-scroll">
       <div id="result" aria-live="polite"><div class="result-meta" id="result-meta"></div><div id="answer" class="assistant-thread"></div><div id="patch-preview"></div><div id="patch-actions" hidden><button class="primary" id="apply"><i data-lucide="check"></i>接受修改</button><button id="discard">放弃</button></div></div>
     </div>
-    <form id="ask" class="assistant-composer"><div id="error" role="alert" hidden></div><div class="task-modes" role="radiogroup" aria-label="任务类型"><label class="task-mode"><input type="radio" name="task-mode" id="task-explain" value="explain" checked>选区解释</label><label class="task-mode"><input type="radio" name="task-mode" id="task-generate" value="generate">生成内容</label></div><div class="assistant-composer-row"><textarea id="intent" rows="3" required placeholder="请输入您的任务描述"></textarea><div class="assistant-composer-actions"><button class="primary" id="run" type="submit" title="运行（Ctrl/⌘+Enter）"><i data-lucide="play"></i><span>运行</span></button><button type="button" id="new-assistant-thread" title="新对话"><i data-lucide="message-square-plus"></i><span>新对话</span></button></div></div></form>
+    <form id="ask" class="assistant-composer"><div id="error" role="alert" hidden></div><div class="task-modes" role="radiogroup" aria-label="任务类型"><label class="task-mode"><input type="radio" name="task-mode" id="task-explain" value="explain" checked>选区解释</label><label class="task-mode"><input type="radio" name="task-mode" id="task-generate" value="generate">生成内容</label></div><div class="assistant-composer-row"><div id="intent" class="assistant-intent-editor is-empty" data-placeholder="请输入您的任务描述" role="textbox" aria-multiline="true" aria-label="任务描述"></div><div class="assistant-composer-actions"><button class="primary" id="run" type="submit" title="运行（Ctrl/⌘+Enter）"><i data-lucide="play"></i><span>运行</span></button><button type="button" id="new-assistant-thread" title="新对话"><i data-lucide="message-square-plus"></i><span>新对话</span></button></div></div></form>
   </aside></main><footer><span class="footer-left"><span id="footer-surface">工作区</span><span id="save-status" hidden></span></span><span class="footer-right"><span id="footer-user">本地工作区</span></span></footer>`;
 }
 
@@ -139,6 +148,7 @@ export function askText(title: string, placeholder: string, initial = '', maxLen
 }
 
 export type AssetVisibility = 'project' | 'user';
+type ScopedAssetInput = { name: string; visibility: AssetVisibility; sourceUrl?: string };
 
 function askScopedAssetDialog(opts: {
   title: string;
@@ -146,8 +156,10 @@ function askScopedAssetDialog(opts: {
   submitLabel: string;
   name?: string;
   visibility?: AssetVisibility;
+  fromInternet?: boolean;
+  submit?: (value: ScopedAssetInput) => Promise<Asset>;
 }) {
-  return new Promise<{ name: string; visibility: AssetVisibility } | null>(resolve => {
+  return new Promise<(ScopedAssetInput & { asset?: Asset }) | null>(resolve => {
     const overlay = document.createElement('div');
     overlay.className = 'dialog-overlay';
     const projectChecked = opts.visibility !== 'user' ? 'checked' : '';
@@ -156,36 +168,82 @@ function askScopedAssetDialog(opts: {
       <h2>${opts.title}</h2>
       <label class="field-label" for="scoped-asset-name">${opts.nameLabel}</label>
       <input id="scoped-asset-name" required maxlength="80" placeholder="${opts.nameLabel}">
+      ${opts.fromInternet ? `<label class="web-import-toggle"><input type="checkbox" data-from-internet><span>来自互联网</span></label>
+      <div class="web-import-fields" hidden><label class="field-label" for="scoped-source-url">网页链接</label><input id="scoped-source-url" type="url" maxlength="4096" placeholder="https://mp.weixin.qq.com/s/…"><p class="web-import-hint">提取公开网页正文，保留标题、段落、列表和表格；图片保留原图链接。不调用大模型。</p></div>` : ''}
       <fieldset><legend>可见范围</legend>
         <label><input type="radio" name="visibility" value="project" ${projectChecked}><span>项目可见</span></label>
         <label><input type="radio" name="visibility" value="user" ${userChecked}><span>我可见</span></label>
       </fieldset>
-      <div class="dialog-actions"><button type="button" data-cancel>取消</button><button class="primary">${opts.submitLabel}</button></div>
+      <p class="web-import-status" role="status" aria-live="polite" hidden></p>
+      <div class="dialog-actions"><button type="button" data-cancel>取消</button><button class="primary" type="submit">${opts.submitLabel}</button></div>
     </form>`;
     const input = overlay.querySelector<HTMLInputElement>('#scoped-asset-name')!;
     if (opts.name) input.value = opts.name;
-    const finish = (value: { name: string; visibility: AssetVisibility } | null) => { overlay.remove(); resolve(value); };
-    overlay.querySelector('[data-cancel]')!.addEventListener('click', () => finish(null));
-    overlay.addEventListener('click', event => { if (event.target === overlay) finish(null); });
-    overlay.querySelector('form')!.addEventListener('submit', event => {
+    let busy = false;
+    const finish = (value: (ScopedAssetInput & { asset?: Asset }) | null) => { overlay.remove(); resolve(value); };
+    overlay.querySelector('[data-cancel]')!.addEventListener('click', () => { if (!busy) finish(null); });
+    overlay.addEventListener('click', event => { if (event.target === overlay && !busy) finish(null); });
+    const internet = overlay.querySelector<HTMLInputElement>('[data-from-internet]');
+    const urlInput = overlay.querySelector<HTMLInputElement>('#scoped-source-url');
+    internet?.addEventListener('change', () => {
+      overlay.querySelector<HTMLElement>('.web-import-fields')!.hidden = !internet.checked;
+      urlInput!.required = internet.checked;
+      urlInput!.disabled = !internet.checked;
+      if (internet.checked) urlInput!.focus();
+    });
+    if (urlInput) urlInput.disabled = true;
+    overlay.querySelector('form')!.addEventListener('submit', async event => {
       event.preventDefault();
+      if (busy) return;
       const name = input.value.trim();
       const visibility = overlay.querySelector<HTMLInputElement>('input[name="visibility"]:checked')!.value as AssetVisibility;
-      if (name) finish({ name, visibility });
+      if (!name) { input.focus(); return; }
+      const sourceUrl = internet?.checked ? urlInput!.value.trim() : undefined;
+      if (sourceUrl) {
+        try { if (!['http:', 'https:'].includes(new URL(sourceUrl).protocol)) throw new Error(); }
+        catch { urlInput!.setCustomValidity('请输入 HTTP 或 HTTPS 网页链接。'); urlInput!.reportValidity(); return; }
+      }
+      const value = { name, visibility, ...(sourceUrl ? { sourceUrl } : {}) };
+      if (!opts.submit) { finish(value); return; }
+      busy = true;
+      const controls = overlay.querySelectorAll<HTMLInputElement | HTMLButtonElement>('input, button');
+      const status = overlay.querySelector<HTMLElement>('.web-import-status')!;
+      const submitButton = overlay.querySelector<HTMLButtonElement>('button[type="submit"]')!;
+      controls.forEach(control => { control.disabled = true; });
+      submitButton.textContent = sourceUrl ? '正在抓取…' : '正在创建…';
+      status.hidden = false;
+      status.classList.remove('is-error');
+      status.textContent = sourceUrl ? '正在抓取并整理正文，请稍候…' : '正在创建文档…';
+      try { finish({ ...value, asset: await opts.submit(value) }); }
+      catch (error) {
+        busy = false;
+        controls.forEach(control => { control.disabled = false; });
+        if (urlInput) urlInput.disabled = !internet?.checked;
+        submitButton.textContent = opts.submitLabel;
+        status.classList.add('is-error');
+        status.textContent = error instanceof Error ? error.message : '创建失败，请稍后重试。';
+      }
     });
+    urlInput?.addEventListener('input', () => urlInput.setCustomValidity(''));
     document.body.append(overlay);
     input.focus();
     if (opts.name) input.select();
   });
 }
 
-export function askDocumentCreate() {
+export function askDocumentCreate(submit?: (value: ScopedAssetInput) => Promise<Asset>) {
   return askScopedAssetDialog({
     title: '新建文档',
     nameLabel: '文档名称',
     submitLabel: '创建',
     visibility: 'project',
+    fromInternet: true,
+    submit,
   });
+}
+
+export function askStrategyCreate() {
+  return askScopedAssetDialog({ title: '新建策略', nameLabel: '策略名称', submitLabel: '创建', visibility: 'project' });
 }
 
 export function askProjectPlanCreate() {
@@ -201,6 +259,15 @@ export function askDiagramCreate() {
   return askScopedAssetDialog({
     title: '新建绘图',
     nameLabel: '绘图名称',
+    submitLabel: '创建',
+    visibility: 'project',
+  });
+}
+
+export function askSheetCreate() {
+  return askScopedAssetDialog({
+    title: '新建表格',
+    nameLabel: '表格名称',
     submitLabel: '创建',
     visibility: 'project',
   });
@@ -260,30 +327,49 @@ function formatBackupTime(value: string) {
 async function restoreBackupRecord(record: BackupRecord, email: string) {
   const overlay = document.createElement('div');
   overlay.className = 'dialog-overlay';
-  overlay.innerHTML = `<form class="name-dialog backup-restore-dialog"><h2>恢复数据备份</h2><p>将恢复 ${formatBackupTime(record.createdAt)} 的备份，并覆盖当前全部数据。系统会先创建一份“恢复前”备份。</p><label class="field-label">当前账号<input name="email" type="email" required readonly></label><label class="field-label">当前密码<input name="password" type="password" autocomplete="current-password" minlength="6" required></label><p class="backup-restore-error" hidden></p><div class="dialog-actions"><button type="button" data-cancel>取消</button><button class="primary" type="submit">确认恢复</button></div></form>`;
+  overlay.innerHTML = `<form class="name-dialog backup-restore-dialog"><h2>恢复数据备份</h2><p data-description></p><label class="field-label">当前账号<input name="email" type="email" required readonly></label><label class="field-label">当前密码<input name="password" type="password" autocomplete="current-password" minlength="6" required></label><div class="backup-operation" data-restore-progress hidden aria-live="polite"><div class="backup-operation-heading"><span data-step></span><strong data-percent></strong></div><div class="backup-operation-track" role="progressbar" aria-label="恢复进度" aria-valuemin="0" aria-valuemax="100"><i data-bar></i></div></div><p class="backup-restore-error" hidden role="alert"></p><div class="dialog-actions"><button type="button" data-cancel>取消</button><button class="primary" type="submit">确认恢复</button></div></form>`;
   const form = overlay.querySelector<HTMLFormElement>('form')!;
+  form.querySelector('[data-description]')!.textContent = (record.id === 'latest'
+    ? '将先核对服务器与本地记录，恢复最新可用备份。'
+    : '将恢复 ' + formatBackupTime(record.createdAt) + ' 的所选备份。')
+    + '优先使用完整本地文件，必要时下载；恢复前会先保存当前数据，其他账号和远端持仓不受影响。';
   const account = form.elements.namedItem('email') as HTMLInputElement;
   const password = form.elements.namedItem('password') as HTMLInputElement;
   const error = form.querySelector<HTMLElement>('.backup-restore-error')!;
   const submit = form.querySelector<HTMLButtonElement>('[type="submit"]')!;
+  const cancel = form.querySelector<HTMLButtonElement>('[data-cancel]')!;
+  let restoring = false;
+  let unsubscribe: (() => void) | undefined;
   account.value = email;
-  const close = () => overlay.remove();
-  overlay.querySelector('[data-cancel]')!.addEventListener('click', close);
+  const close = () => { if (!restoring) { unsubscribe?.(); overlay.remove(); } };
+  const progress = (value: BackupProgress) => {
+    const percent = Math.max(0, Math.min(100, Math.round(value.percent)));
+    form.querySelector<HTMLElement>('[data-restore-progress]')!.hidden = false;
+    form.querySelector('[data-step]')!.textContent = value.message;
+    form.querySelector('[data-percent]')!.textContent = percent + '%';
+    form.querySelector<HTMLElement>('[data-bar]')!.style.width = percent + '%';
+    form.querySelector('[role="progressbar"]')!.setAttribute('aria-valuenow', String(percent));
+  };
+  cancel.addEventListener('click', close);
   overlay.addEventListener('click', event => { if (event.target === overlay) close(); });
   form.addEventListener('submit', async event => {
     event.preventDefault();
     error.hidden = true;
-    submit.disabled = true;
+    restoring = true;
+    submit.disabled = true; cancel.disabled = true;
     try {
-      // 先由账户服务验证当前密码，再核对备份绑定的稳定账户身份。
+      unsubscribe = window.youju?.onBackupProgress?.(progress);
+      progress({phase:'authenticating',percent:0,message:'正在验证账号，请稍候…'});
       const session = await remoteLogin({ email, password: password.value });
-      await window.youju?.restoreBackup?.({ id: record.id, email, accountId: session.user.id });
-      alert('数据已恢复完成，应用正在重新启动。');
+      password.value = '';
+      await window.youju?.restoreBackup?.({ id: record.id, token: session.token });
+      progress({phase:'done',percent:100,message:'恢复完成，应用正在重新启动…'});
       await window.youju?.quitAfterRestore?.();
     } catch (cause) {
       error.hidden = false;
       error.textContent = cause instanceof Error ? cause.message : String(cause);
-      submit.disabled = false;
+    } finally {
+      unsubscribe?.(); restoring = false; submit.disabled = false; cancel.disabled = false;
     }
   });
   document.body.append(overlay);
@@ -291,38 +377,52 @@ async function restoreBackupRecord(record: BackupRecord, email: string) {
 }
 
 async function renderBackupRecords(host: HTMLElement, email: string, onChanged?: (lastBackupAt: string) => void) {
-  if (!window.youju?.backupStatus) {
-    host.textContent = '数据备份仅在桌面应用中可用。';
-    return;
-  }
-  host.replaceChildren(document.createTextNode('正在读取备份记录…'));
+  if (!window.youju?.backupStatus) { host.textContent = '数据备份仅在桌面应用中可用。'; return; }
+  host.replaceChildren(document.createTextNode('正在读取本地记录并核对服务器…'));
   try {
     const status = await window.youju.backupStatus(email);
     onChanged?.(status.lastBackupAt);
     host.replaceChildren();
+    if (status.warning) {
+      const warning = document.createElement('p');
+      warning.className = 'settings-note';
+      warning.textContent = status.warning;
+      host.append(warning);
+    }
     if (!status.records.length) {
-      host.textContent = '当前目录还没有此账号可恢复的备份。';
+      host.append(document.createTextNode('还没有当前账号、当前设备可恢复的备份。'));
       return;
     }
+    const latest = document.createElement('button');
+    latest.type = 'button'; latest.textContent = '恢复最新备份';
+    latest.addEventListener('click', () => { void restoreBackupRecord({id:'latest',name:'最新备份',createdAt:'',kind:'manual'},email); });
+    host.append(latest);
     for (const record of status.records) {
-      const row = document.createElement('div');
-      row.className = 'backup-record';
+      const row = document.createElement('div'); row.className = 'backup-record';
       const info = document.createElement('div');
       const title = document.createElement('strong');
-      title.textContent = record.kind === 'pre-restore' ? '恢复前备份' : '数据备份';
+      title.textContent = (record.kind === 'pre-restore' ? '恢复前备份' : '数据备份') + (record.version ? ' · #' + record.version : '');
       const detail = document.createElement('small');
-      detail.textContent = formatBackupTime(record.createdAt);
-      info.append(title, detail);
+      const source = record.state === 'synced' ? '本地与服务器已同步' : record.state === 'remote'
+        ? '服务器副本 · 恢复时下载' : record.state === 'upload_failed' ? '本地已保存 · 待上传' : '仅本地';
+      detail.textContent = formatBackupTime(record.createdAt) + ' · ' + source;
+      info.append(title,detail); row.append(info);
+      const actions = document.createElement('div'); actions.className = 'backup-record-actions';
+      if (!record.legacy && record.localAvailable && record.state !== 'synced' && window.youju.retryBackupUpload) {
+        const retry = document.createElement('button'); retry.type = 'button'; retry.textContent = '重试上传';
+        retry.addEventListener('click', async () => {
+          retry.disabled = true; retry.textContent = '正在上传…';
+          try { await window.youju!.retryBackupUpload!(record.id); await renderBackupRecords(host,email,onChanged); }
+          catch (cause) { detail.textContent = '本地文件仍保留。' + (cause instanceof Error ? cause.message : String(cause)); retry.disabled = false; retry.textContent = '重试上传'; }
+        });
+        actions.append(retry);
+      }
       const action = document.createElement('button');
-      action.type = 'button';
-      action.textContent = '数据恢复';
-      action.addEventListener('click', () => { void restoreBackupRecord(record, email); });
-      row.append(info, action);
-      host.append(row);
+      action.type = 'button'; action.textContent = '恢复此份';
+      action.addEventListener('click', () => { void restoreBackupRecord(record,email); });
+      actions.append(action); row.append(actions); host.append(row);
     }
-  } catch (cause) {
-    host.textContent = cause instanceof Error ? cause.message : String(cause);
-  }
+  } catch (cause) { host.textContent = cause instanceof Error ? cause.message : String(cause); }
 }
 
 export async function openBackupRecordsDialog(email: string) {
@@ -351,6 +451,7 @@ export async function openSettingsDialog(email: string, onLogout: () => void, on
       <button type="button" data-settings-category="account" role="tab" aria-selected="false"><i data-lucide="user-round"></i><span>用户账号</span></button>
       <button type="button" data-settings-category="agent" role="tab" aria-selected="false"><i data-lucide="bot"></i><span>外部 Agent</span></button>
       <button type="button" data-settings-category="model" role="tab" aria-selected="false"><i data-lucide="brain-circuit"></i><span>大模型配置</span></button>
+      <button type="button" data-settings-category="translation" role="tab" aria-selected="false"><i data-lucide="languages"></i><span>翻译设置</span></button>
       <button type="button" data-settings-category="data" role="tab" aria-selected="false"><i data-lucide="database-backup"></i><span>数据管理</span></button>
       <button type="button" class="settings-nav-account" data-account-action><i data-lucide="log-out"></i><span>退出登录</span></button>
     </nav>
@@ -391,8 +492,22 @@ export async function openSettingsDialog(email: string, onLogout: () => void, on
       </div>
       <div class="settings-inline-actions"><button type="button" data-save-model>保存配置</button><button type="button" class="settings-danger" data-delete-model hidden>移除配置</button><p data-model-note>API Key 仅在服务端加密保存，页面不会回显完整密钥。</p></div>
     </section>
+    <section class="settings-section" data-settings-panel="translation" role="tabpanel" aria-labelledby="settings-translation-title" hidden>
+      <div class="settings-section-title"><i data-lucide="languages"></i><div><h3 id="settings-translation-title">翻译设置</h3><p>可组合专业场景、披露语境与译法取向；模型只读取当前页及相邻页的少量文本判断术语和指代。</p></div></div>
+      <div class="translation-settings-grid">
+        <fieldset class="translation-profiles"><legend>专业场景（最多 4 项）</legend><div data-translation-domains>
+          <label><input type="checkbox" value="investment_research">证券投研</label><label><input type="checkbox" value="financial_report">财报与公告</label><label><input type="checkbox" value="accounting">会计与审计</label><label><input type="checkbox" value="ipo_regulation">IPO 与监管</label><label><input type="checkbox" value="macro_policy">宏观与政策</label><label><input type="checkbox" value="technology">科技、软件与 AI</label><label><input type="checkbox" value="semiconductor">半导体与硬件</label><label><input type="checkbox" value="healthcare">医疗健康</label><label><input type="checkbox" value="consumer_internet">消费与互联网</label><label><input type="checkbox" value="legal">合同与法律</label><label><input type="checkbox" value="general">通用商业</label>
+        </div></fieldset>
+        <div class="translation-context-fields">
+          <label><span>披露市场/会计语境</span><select data-translation-market><option value="global">按原文口径</option><option value="china">中国内地</option><option value="hong_kong">港股 / 香港</option><option value="us">美股 / SEC</option><option value="europe">欧洲 / IFRS</option><option value="mixed">跨市场材料</option></select></label>
+          <label><span>译法取向</span><select data-translation-mode><option value="research">投研阅读</option><option value="faithful">忠实对照</option><option value="terminology">术语优先</option></select></label>
+          <label><span>补充背景与固定译法</span><textarea data-translation-context rows="5" maxlength="2000" placeholder="例如：港股年报；金额以人民币百万元列示；Tencent Music 固定译为腾讯音乐。"></textarea></label>
+        </div>
+      </div>
+      <div class="translation-save-row"><p data-translation-note>翻译会严格保留数字、单位、期间、产品名、表格结构和原文层级。</p><button type="button" class="primary" data-save-translation>保存翻译设置</button></div>
+    </section>
     <section class="settings-section" data-settings-panel="data" role="tabpanel" aria-labelledby="settings-data-title" hidden>
-      <div class="settings-section-title"><i data-lucide="database-backup"></i><div><h3 id="settings-data-title">数据管理</h3><p>每日 12:00 和 18:00 自动备份办公数据、持仓数据和 PDF 文件。</p></div></div>
+      <div class="settings-section-title"><i data-lucide="database-backup"></i><div><h3 id="settings-data-title">数据管理</h3><p>每日 12:00 和 18:00 先保存当前账号的本地备份，再上传服务器。恢复时核对版本并优先使用完整本地文件，其他账号和远端持仓不受影响。</p></div></div>
       <div class="settings-subsection">
         <h4>备份配置</h4>
         <label class="settings-auto-backup"><input type="checkbox" data-backup-schedule checked><span><strong>自动备份</strong><small>每天 12:00 和 18:00 执行。暂停后仍可手动备份。</small></span></label>
@@ -428,6 +543,12 @@ export async function openSettingsDialog(email: string, onLogout: () => void, on
   const modelNote = overlay.querySelector<HTMLElement>('[data-model-note]')!;
   const platformSource = overlay.querySelector<HTMLElement>('[data-platform-source]')!;
   const userSource = overlay.querySelector<HTMLElement>('[data-user-source]')!;
+  const translationDomains = Array.from(overlay.querySelectorAll<HTMLInputElement>('[data-translation-domains] input[type="checkbox"]'));
+  const translationMarket = overlay.querySelector<HTMLSelectElement>('[data-translation-market]')!;
+  const translationMode = overlay.querySelector<HTMLSelectElement>('[data-translation-mode]')!;
+  const translationContext = overlay.querySelector<HTMLTextAreaElement>('[data-translation-context]')!;
+  const saveTranslation = overlay.querySelector<HTMLButtonElement>('[data-save-translation]')!;
+  const translationNote = overlay.querySelector<HTMLElement>('[data-translation-note]')!;
   const backupDirectoryInput = overlay.querySelector<HTMLInputElement>('[data-backup-directory]')!;
   const backupSchedule = overlay.querySelector<HTMLInputElement>('[data-backup-schedule]')!;
   const backupRecords = overlay.querySelector<HTMLElement>('[data-backup-records]')!;
@@ -454,6 +575,7 @@ export async function openSettingsDialog(email: string, onLogout: () => void, on
     backupOperationMessage.textContent = text;
     backupOperationMessage.classList.toggle('is-error', error);
   };
+  const stopBackupWatch = window.youju?.onBackupProgress?.(showBackupProgress);
   const setToken = (token: string) => {
     accessToken = token;
     input.value = token.length > 12 ? `${token.slice(0, 6)}••••••••${token.slice(-4)}` : token;
@@ -480,7 +602,7 @@ export async function openSettingsDialog(email: string, onLogout: () => void, on
       ? `${state} API Key 仅在服务端以 AES-256-GCM 加密保存，页面不会回显完整密钥。`
       : `${state} 当前由平台配置控制，用户自有模型编辑已锁定。`;
   };
-  const close = () => overlay.remove();
+  const close = () => { stopBackupWatch?.(); overlay.remove(); };
   const selectCategory = (category: string) => {
     categoryButtons.forEach(button => {
       const selected = button.dataset.settingsCategory === category;
@@ -546,8 +668,8 @@ export async function openSettingsDialog(email: string, onLogout: () => void, on
       backupOperationMessage.hidden = true;
       showBackupProgress({ phase: 'preparing', percent: 0, message: '正在启动备份…' });
       unsubscribe = window.youju.onBackupProgress?.(showBackupProgress);
-      await window.youju.createBackup();
-      showBackupMessage('已创建数据备份。');
+      const result = await window.youju.createBackup();
+      showBackupMessage(result.warning || '备份完成，本地与服务器均已保存。', Boolean(result.warning));
       await refreshBackups();
     } catch (e) {
       showBackupMessage(e instanceof Error ? e.message : String(e), true);
@@ -596,7 +718,12 @@ export async function openSettingsDialog(email: string, onLogout: () => void, on
       if (!remoteToken()) { showNote('请先登录远程账号后再修改密码。'); return; }
       await changeRemotePassword(currentPassword, newPassword);
       form.reset();
-      showNote('远程账号密码已更新。');
+      try {
+        await syncLocalPassword(newPassword);
+        showNote('密码已更新，本机离线凭据已同步。');
+      } catch {
+        showNote('远程账号密码已更新；本机离线凭据同步失败，下次在线登录时会自动更新。');
+      }
     } catch (e) {
       showNote(e instanceof Error ? e.message : String(e));
     }
@@ -628,6 +755,23 @@ export async function openSettingsDialog(email: string, onLogout: () => void, on
       showNote(e instanceof Error ? e.message : String(e));
     }
   });
+  saveTranslation.addEventListener('click', async () => {
+    const domains = translationDomains.filter(input => input.checked).map(input => input.value);
+    if (!domains.length) { translationNote.textContent = '请至少选择一个专业场景。'; return; }
+    if (domains.length > 4) { translationNote.textContent = '最多可选择四个专业场景。'; return; }
+    saveTranslation.disabled = true;
+    try {
+      await office.json('/auth/translation-settings', {
+        method: 'PUT',
+        body: JSON.stringify({ domains, market: translationMarket.value, mode: translationMode.value, context: translationContext.value.trim() }),
+      });
+      translationNote.textContent = '翻译设置已保存，将用于之后的逐页翻译。';
+    } catch (e) {
+      translationNote.textContent = e instanceof Error ? e.message : String(e);
+    } finally {
+      saveTranslation.disabled = false;
+    }
+  });
   const accountAction = overlay.querySelector<HTMLButtonElement>('[data-account-action]')!;
   const signedIn = Boolean(remoteToken());
   accountAction.classList.toggle('settings-nav-logout', signedIn);
@@ -656,6 +800,13 @@ export async function openSettingsDialog(email: string, onLogout: () => void, on
   void office.json<ModelConfig>('/auth/model-config').then(setModelConfig).catch(e => {
     modelNote.textContent = e instanceof Error ? e.message : String(e);
   });
+  void office.json<{ domains: string[]; market: string; mode: string; context: string }>('/auth/translation-settings').then(config => {
+    const selected = new Set(config.domains || []);
+    translationDomains.forEach(input => { input.checked = selected.has(input.value); });
+    translationMarket.value = config.market || 'global';
+    translationMode.value = config.mode || 'research';
+    translationContext.value = config.context || '';
+  }).catch(e => { translationNote.textContent = e instanceof Error ? e.message : String(e); });
   void office.json<{ skills: { id: string; name: string; filename: string }[] }>('/auth/skills').then(catalog => {
     skills.push(...catalog.skills);
     for (const skill of skills) {
@@ -695,6 +846,7 @@ export interface NavHandlers {
   onLogin: () => void;
   onOpenCalc: () => void;
   onOpenNotebook: () => void;
+  onOpenTodos: () => void;
   onOpenPortfolio: () => void;
   /** 点 logo：持仓/资讯视图下回到项目工作区 */
   onClosePortfolio: () => void;
@@ -743,6 +895,7 @@ const INFORMATION_VIEWS: Array<{ id: InformationNavView; label: string; icon: st
 ];
 
 function closeMenus(event?: Event) {
+  hidePdfNameBubble();
   if (event?.target instanceof Element && event.target.closest('.split-tab')) return;
   libraryOpenKind = null;
   document.querySelectorAll<HTMLElement>('.menu').forEach(menu => { menu.hidden = true; });
@@ -756,6 +909,8 @@ if (!('officeMenuBound' in document)) {
 let pdfQuery = '';
 let movingPdfId = '';
 let pdfNameBubble: HTMLElement | null = null;
+let documentQuery = '';
+let movingDocumentId = '';
 
 function showPdfNameBubble(anchor: HTMLElement, text: string) {
   if (!pdfNameBubble) {
@@ -840,6 +995,7 @@ function fillPdfMenu(
     const fullName = asset.filename || asset.name;
     button.addEventListener('mouseenter', () => showPdfNameBubble(button, fullName));
     button.addEventListener('mouseleave', hidePdfNameBubble);
+    button.addEventListener('click', hidePdfNameBubble);
     const move = document.createElement('button');
     move.type = 'button';
     move.className = 'menu-edit';
@@ -971,6 +1127,200 @@ function fillPdfMenu(
   menu.append(addFolder);
 }
 
+function reopenDocumentMenu(workspace: Workspace, surface: Kind, handlers: NavHandlers) {
+  libraryOpenKind = 'document';
+  renderNav(workspace, surface, handlers);
+  const menu = document.querySelector<HTMLElement>('.asset-rail .library-menu');
+  const button = document.querySelector<HTMLButtonElement>('[data-rail-kind="document"]');
+  if (!menu || !button) return;
+  menu.hidden = false;
+  menu.style.top = `${button.getBoundingClientRect().top}px`;
+  button.setAttribute('aria-expanded', 'true');
+  const search = menu.querySelector<HTMLInputElement>('.pdf-tree-search');
+  if (search && documentQuery) {
+    search.focus();
+    search.setSelectionRange(search.value.length, search.value.length);
+  }
+}
+
+function fillDocumentMenu(
+  menu: HTMLElement,
+  assets: Asset[],
+  currentId: string,
+  projectId: string,
+  projectName: string,
+  refresh: () => void,
+) {
+  hidePdfNameBubble();
+  void hydrateDocumentFolders(projectId).then(changed => { if (changed) refresh(); });
+  const store = loadDocumentFolders(projectId);
+  const byId = new Map(assets.map(asset => [asset.id, asset]));
+  const assetName = (id: string) => byId.get(id)?.name || '';
+
+  const search = document.createElement('input');
+  search.className = 'pdf-tree-search';
+  search.type = 'search';
+  search.placeholder = '查找文档或文件夹';
+  search.value = documentQuery;
+  search.setAttribute('aria-label', '查找文档或文件夹');
+  search.addEventListener('click', e => e.stopPropagation());
+  search.addEventListener('input', () => {
+    documentQuery = search.value;
+    refresh();
+  });
+  menu.append(search);
+
+  const query = documentQuery.trim().toLowerCase();
+  const visible = (asset: Asset) => !query || asset.name.toLowerCase().includes(query);
+
+  const appendDocument = (parent: HTMLElement, asset: Asset, depth: number, force = false) => {
+    if (!force && !visible(asset)) return;
+    const row = document.createElement('div');
+    row.className = 'menu-row pdf-tree-row';
+    row.style.paddingLeft = `${depth * 14}px`;
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.dataset.assetId = asset.id;
+    button.className = currentId === asset.id ? 'active' : '';
+    button.innerHTML = '<i data-lucide="file-text"></i>';
+    const name = document.createElement('span');
+    name.textContent = asset.name;
+    button.append(name);
+    const scope = document.createElement('small');
+    scope.className = 'asset-visibility';
+    scope.textContent = asset.placement === 'user' ? '我可见' : '项目可见';
+    button.append(scope);
+    button.addEventListener('mouseenter', () => showPdfNameBubble(button, asset.name));
+    button.addEventListener('mouseleave', hidePdfNameBubble);
+    button.addEventListener('click', hidePdfNameBubble);
+    const move = document.createElement('button');
+    move.type = 'button';
+    move.className = 'menu-edit';
+    move.title = '移动到文件夹';
+    move.setAttribute('aria-label', `移动 ${asset.name}`);
+    move.innerHTML = '<i data-lucide="folder-input"></i>';
+    move.addEventListener('click', e => {
+      e.stopPropagation();
+      movingDocumentId = movingDocumentId === asset.id ? '' : asset.id;
+      refresh();
+    });
+    const edit = document.createElement('button');
+    edit.type = 'button';
+    edit.className = 'menu-edit';
+    edit.dataset.renameAsset = asset.id;
+    edit.title = '编辑';
+    edit.setAttribute('aria-label', `编辑 ${asset.name}`);
+    edit.innerHTML = '<i data-lucide="pencil"></i>';
+    const copy = titleCopyButton(`${projectName}-${asset.name}`, `复制 ${LABELS.document}定位标题`);
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'menu-edit menu-delete';
+    remove.dataset.deleteAsset = asset.id;
+    remove.title = '删除';
+    remove.setAttribute('aria-label', `删除 ${asset.name}`);
+    remove.innerHTML = '<i data-lucide="trash-2"></i>';
+    row.append(button, move, edit, copy, remove);
+    parent.append(row);
+    if (movingDocumentId !== asset.id) return;
+    const picker = document.createElement('div');
+    picker.className = 'pdf-tree-move';
+    const choices: { id: string | null; path: string }[] = [
+      { id: null, path: '根目录' },
+      ...documentFolderPaths(store.folders),
+    ];
+    for (const choice of choices) {
+      const item = document.createElement('button');
+      item.type = 'button';
+      item.textContent = choice.path;
+      item.addEventListener('click', e => {
+        e.stopPropagation();
+        const next = loadDocumentFolders(projectId);
+        placeDocument(next, asset.id, choice.id);
+        saveDocumentFolders(projectId, next);
+        movingDocumentId = '';
+        refresh();
+      });
+      picker.append(item);
+    }
+    parent.append(picker);
+  };
+
+  const appendFolder = (parent: HTMLElement, folder: DocumentFolder, depth: number) => {
+    if (query && !documentFolderMatches(folder, query, assetName, store)) return;
+    const named = !query || folder.name.toLowerCase().includes(query);
+    const open = query ? true : !store.collapsed[folder.id];
+    const row = document.createElement('div');
+    row.className = 'menu-row pdf-tree-row pdf-tree-folder';
+    row.style.paddingLeft = `${depth * 14}px`;
+    const toggle = document.createElement('button');
+    toggle.type = 'button';
+    toggle.className = 'pdf-tree-folder-name';
+    toggle.innerHTML = `<i data-lucide="${open ? 'chevron-down' : 'chevron-right'}"></i><i data-lucide="folder"></i>`;
+    const label = document.createElement('span');
+    label.textContent = folder.name;
+    toggle.append(label);
+    toggle.addEventListener('click', e => {
+      e.stopPropagation();
+      if (query) return;
+      const next = loadDocumentFolders(projectId);
+      next.collapsed[folder.id] = !next.collapsed[folder.id];
+      saveDocumentFolders(projectId, next);
+      refresh();
+    });
+    const add = iconButton('folder-plus', `在 ${folder.name} 下新建文件夹`, async () => {
+      const name = await askText('新建文件夹', '文件夹名称');
+      if (!name) return;
+      const next = loadDocumentFolders(projectId);
+      addDocumentFolder(next, folder.id, name);
+      saveDocumentFolders(projectId, next);
+      refresh();
+    });
+    const edit = iconButton('pencil', `重命名 ${folder.name}`, async () => {
+      const name = await askText('重命名文件夹', '文件夹名称', folder.name);
+      if (!name) return;
+      const next = loadDocumentFolders(projectId);
+      renameDocumentFolder(next, folder.id, name);
+      saveDocumentFolders(projectId, next);
+      refresh();
+    });
+    const remove = iconButton('trash-2', `删除文件夹 ${folder.name}`, () => {
+      const next = loadDocumentFolders(projectId);
+      deleteDocumentFolder(next, folder.id);
+      saveDocumentFolders(projectId, next);
+      refresh();
+    });
+    row.append(toggle, add, edit, remove);
+    parent.append(row);
+    if (!open) return;
+    for (const child of folder.children) appendFolder(parent, child, depth + 1);
+    for (const id of documentsInFolder(store, folder.id, assets.map(asset => asset.id))) {
+      const asset = byId.get(id);
+      if (asset) appendDocument(parent, asset, depth + 1, named);
+    }
+  };
+
+  for (const folder of store.folders) appendFolder(menu, folder, 0);
+  for (const id of documentsInFolder(store, null, assets.map(asset => asset.id))) {
+    const asset = byId.get(id);
+    if (asset) appendDocument(menu, asset, 0);
+  }
+
+  const addFolder = document.createElement('button');
+  addFolder.type = 'button';
+  addFolder.className = 'menu-new';
+  addFolder.textContent = '新建文件夹';
+  addFolder.addEventListener('click', async e => {
+    e.stopPropagation();
+    const name = await askText('新建文件夹', '文件夹名称');
+    if (!name) return;
+    const next = loadDocumentFolders(projectId);
+    addDocumentFolder(next, null, name);
+    saveDocumentFolders(projectId, next);
+    refresh();
+  });
+  menu.append(addFolder);
+}
+
 function iconButton(icon: string, label: string, run: () => void) {
   const button = document.createElement('button');
   button.type = 'button';
@@ -1049,6 +1399,7 @@ function titleCopyButton(text: string, label: string) {
 }
 
 export function renderNav(workspace: Workspace, surface: Kind, handlers: NavHandlers, portfolio?: PortfolioNavState, information?: InformationNavState) {
+  hidePdfNameBubble();
   const left = document.querySelector<HTMLElement>('.workspace-nav')!;
   const right = document.querySelector('.account-nav')!;
   const main = document.querySelector('#app > main')!;
@@ -1061,6 +1412,8 @@ export function renderNav(workspace: Workspace, surface: Kind, handlers: NavHand
   }
   const portfolioActive = Boolean(portfolio?.active);
   const informationActive = Boolean(information?.active);
+  let libraryGroupExpanded = libraryExpanded(workspace.user.id);
+  const libraryActive = !portfolioActive && !informationActive && LIBRARY_KINDS.includes(surface);
   // Recent items clip within their own strip; the navigation itself must let menus extend below the header.
   left.style.overflow = 'visible';
   left.innerHTML = portfolioActive
@@ -1081,7 +1434,9 @@ export function renderNav(workspace: Workspace, surface: Kind, handlers: NavHand
   const brand = portfolioActive || informationActive
     ? `<button type="button" class="asset-rail-brand is-link" id="brand-home" title="返回项目视图" aria-label="返回项目视图"><img src="/brand/youju-logo.png" alt="youjulab"></button>`
     : `<div class="asset-rail-brand" role="img" aria-label="youjulab"><img src="/brand/youju-logo.png" alt="youjulab"></div>`;
-  rail.innerHTML = `${brand}<div class="asset-rail-items">${LIBRARY_KINDS.map(kind => { const label = kind === 'project_plan' ? '计划' : LABELS[kind]; return `<button type="button" class="asset-rail-item" data-rail-kind="${kind}" title="${LABELS[kind]}" aria-label="${LABELS[kind]}" aria-haspopup="menu" aria-expanded="false"><i data-lucide="${kindIcon(kind)}"></i><span>${label}</span></button>`; }).join('')}</div>
+  rail.innerHTML = `${brand}<div class="asset-rail-library">
+    <button type="button" id="library-group-toggle" class="asset-rail-item library-group-toggle${libraryActive && !libraryGroupExpanded ? ' is-current' : ''}" title="${libraryGroupExpanded ? '折叠' : '展开'}资料库" aria-label="资料库" aria-controls="library-group-items" aria-expanded="${libraryGroupExpanded}"><i data-lucide="library-big"></i><span>资料库</span><i class="library-group-caret" data-lucide="chevron-right" aria-hidden="true"></i></button>
+    <div class="asset-rail-items" id="library-group-items" role="group" aria-label="资料库资产类型"${libraryGroupExpanded ? '' : ' hidden'}>${LIBRARY_KINDS.map(kind => { const label = kind === 'project_plan' ? '计划' : LABELS[kind]; return `<button type="button" class="asset-rail-item" data-rail-kind="${kind}" title="${LABELS[kind]}" aria-label="${LABELS[kind]}" aria-haspopup="menu" aria-expanded="false"${libraryActive && surface === kind ? ' aria-current="page"' : ''}><i data-lucide="${kindIcon(kind)}"></i><span>${label}</span></button>`; }).join('')}</div></div>
     <div class="split-tab library-tab"><div class="menu library-menu" role="menu" hidden></div></div>
     <div class="asset-rail-tools">
       <button id="information-btn" type="button" class="asset-rail-item" title="资讯" aria-label="资讯" aria-pressed="${informationActive}"><i data-lucide="newspaper"></i><span>资讯</span></button>
@@ -1130,6 +1485,11 @@ export function renderNav(workspace: Workspace, surface: Kind, handlers: NavHand
         libraryMenu, items, current?.id || '', workspace.project.id, workspace.project.name,
         () => reopenPdfMenu(workspace, surface, handlers), id => handlers.onDeletePdf(id),
       );
+    } else if (kind === 'document') {
+      fillDocumentMenu(
+        libraryMenu, items, current?.id || '', workspace.project.id, workspace.project.name,
+        () => reopenDocumentMenu(workspace, surface, handlers),
+      );
     } else {
       items.forEach(asset => {
         const row = document.createElement('div');
@@ -1147,21 +1507,22 @@ export function renderNav(workspace: Workspace, surface: Kind, handlers: NavHand
         edit.type = 'button';
         edit.className = 'menu-edit';
         edit.dataset.renameAsset = asset.id;
-        const editLabel = (kind === 'document' || kind === 'diagram' || kind === 'project_plan') ? '编辑' : '重命名';
+        const scoped = kind === 'sheet' || kind === 'diagram' || kind === 'project_plan' || kind === 'research' || kind === 'strategy';
+        const editLabel = scoped ? '编辑' : '重命名';
         edit.title = editLabel;
         edit.setAttribute('aria-label', `${editLabel} ${asset.name}`);
         edit.innerHTML = '<i data-lucide="pencil"></i>';
-        const copy = (kind === 'sheet' || kind === 'document' || kind === 'mindmap' || kind === 'project_plan')
+        const copy = (kind === 'sheet' || kind === 'diagram' || kind === 'mindmap' || kind === 'project_plan' || kind === 'strategy')
           ? titleCopyButton(`${workspace.project.name}-${asset.name}`, `复制 ${LABELS[kind]}定位标题`)
           : null;
-        if (kind === 'document' || kind === 'diagram' || kind === 'project_plan') {
+        if (scoped) {
           const scope = document.createElement('small');
           scope.className = 'asset-visibility';
           scope.textContent = asset.placement === 'user' ? '我可见' : '项目可见';
           button.append(scope);
           row.append(button, edit);
           if (copy) row.append(copy);
-          if (kind === 'document') {
+          if (kind === 'strategy' || kind === 'diagram') {
             const remove = document.createElement('button');
             remove.type = 'button';
             remove.className = 'menu-edit menu-delete';
@@ -1187,7 +1548,29 @@ export function renderNav(workspace: Workspace, surface: Kind, handlers: NavHand
     libraryMenu.hidden = false;
     createIcons({ icons });
   };
-  if (libraryOpenKind) showLibraryKind(libraryOpenKind); else showLibraryRoot();
+  if (libraryGroupExpanded && libraryOpenKind) showLibraryKind(libraryOpenKind); else showLibraryRoot();
+  const groupToggle = rail.querySelector<HTMLButtonElement>('#library-group-toggle')!;
+  const groupItems = rail.querySelector<HTMLElement>('#library-group-items')!;
+  const setGroupExpanded = (expanded: boolean) => {
+    if (libraryGroupExpanded === expanded) return;
+    showLibraryRoot();
+    hidePdfNameBubble();
+    libraryGroupExpanded = expanded;
+    groupItems.hidden = !expanded;
+    groupToggle.setAttribute('aria-expanded', String(expanded));
+    groupToggle.title = `${expanded ? '折叠' : '展开'}资料库`;
+    groupToggle.classList.toggle('is-current', libraryActive && !expanded);
+    saveLibraryExpanded(workspace.user.id, expanded);
+  };
+  groupToggle.onclick = event => {
+    event.stopPropagation();
+    setGroupExpanded(!libraryGroupExpanded);
+  };
+  groupToggle.onkeydown = event => {
+    if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+    event.preventDefault();
+    setGroupExpanded(event.key === 'ArrowRight');
+  };
   libraryMenu.addEventListener('click', event => {
     const button = (event.target as Element).closest<HTMLButtonElement>('[data-asset-id], [data-new], [data-rename-asset], [data-delete-asset]');
     if (!button) return;
@@ -1231,7 +1614,7 @@ export function renderNav(workspace: Workspace, surface: Kind, handlers: NavHand
   let suppressRecentClick = false;
   const recent = left.querySelector<HTMLElement>('.recent-assets');
   if (recent) {
-  const recentAssets = workspace.recentAssets;
+  const recentAssets = workspace.recentAssets.filter(asset => asset.kind !== 'strategy');
   recent.setAttribute('role', 'tablist');
   recentAssets.slice(0, 8).forEach(asset => {
     const selected = workspace.selected[surface]?.id === asset.id;
@@ -1295,7 +1678,12 @@ export function renderNav(workspace: Workspace, surface: Kind, handlers: NavHand
     window.setTimeout(() => { suppressRecentClick = false; }, 160);
   });
   }
-  right.innerHTML = '<span class="nav-divider" aria-hidden="true"></span><div class="tool-group"><button type="button" id="open-calc" title="计算器" aria-label="计算器"><i data-lucide="calculator"></i></button><button type="button" id="open-calendar" title="日历" aria-label="日历" aria-selected="' + (surface === 'calendar') + '"><i data-lucide="calendar-days"></i></button><button type="button" id="open-notebook" title="笔记本" aria-label="笔记本"><i data-lucide="notebook-pen"></i></button></div>';
+  right.innerHTML = '<span class="nav-divider" aria-hidden="true"></span><div class="tool-group"><button type="button" id="open-calc" title="计算器" aria-label="计算器"><i data-lucide="calculator"></i></button><button type="button" id="open-calendar" title="日历" aria-label="日历" aria-selected="' + (surface === 'calendar') + '"><i data-lucide="calendar-days"></i></button><button type="button" id="open-todos" title="待办事项" aria-label="待办事项"><i data-lucide="list-todo"></i></button><button type="button" id="open-notebook" title="笔记本" aria-label="笔记本"><i data-lucide="notebook-pen"></i></button></div>';
+  right.querySelector<HTMLButtonElement>('#open-todos')!.onclick = event => {
+    event.stopPropagation();
+    closeMenus();
+    handlers.onOpenTodos();
+  };
   right.querySelector<HTMLButtonElement>('#open-notebook')!.onclick = event => {
     event.stopPropagation();
     closeMenus();

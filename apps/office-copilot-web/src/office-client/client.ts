@@ -154,6 +154,17 @@ function officeApiBase() {
   return '/office';
 }
 
+/** 大 PDF 用这个地址按页拉取，请求头与普通接口一致。 */
+export function pdfFileRequest(id: string, revision?: number) {
+  const headers: Record<string, string> = {};
+  const current = token();
+  if (current) headers.Authorization = `Bearer ${current}`;
+  const remote = remoteToken();
+  if (remote) headers['X-Remote-Token'] = remote;
+  const query = revision == null ? '' : `?revision=${revision}`;
+  return { url: `${officeApiBase()}/assets/${id}/file${query}`, headers };
+}
+
 export const office = {
   token,
   signedIn: () => Boolean(token()),
@@ -240,11 +251,47 @@ export const office = {
       entry.waiters.delete(opts);
     }
   },
-  async upload<T extends { id?: string; revision?: number } = { id: string; revision: number }>(id: string, file: File) {
+  upload<T extends { id?: string; revision?: number } = { id: string; revision: number }>(
+    id: string,
+    file: File,
+    onProgress?: (progress: PdfFileProgress) => void,
+  ) {
+    clearPdfFileCache(id);
     const body = new FormData();
     body.append('file', file);
-    clearPdfFileCache(id);
-    return this.json<T>(`/assets/${id}/file`, { method: 'PUT', body });
+    return new Promise<T>((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('PUT', `${officeApiBase()}/assets/${id}/file`);
+      const current = token();
+      if (current) xhr.setRequestHeader('Authorization', `Bearer ${current}`);
+      const remote = remoteToken();
+      if (remote) xhr.setRequestHeader('X-Remote-Token', remote);
+      xhr.upload.onprogress = (event) => {
+        if (!onProgress) return;
+        const total = event.lengthComputable && event.total > 0 ? event.total : file.size;
+        onProgress({ loaded: event.loaded, total, source: 'network' });
+      };
+      xhr.onerror = () => reject(new Error('无法连接工作区服务，请检查 office-backend 是否启动。'));
+      xhr.onload = () => {
+        if (xhr.status === 401) {
+          this.setToken(null);
+          reject(new AuthError());
+          return;
+        }
+        let data: any = {};
+        if (xhr.responseText) {
+          try { data = JSON.parse(xhr.responseText); }
+          catch { reject(new Error('工作区服务返回了无法解析的响应。')); return; }
+        }
+        if (xhr.status < 200 || xhr.status >= 300) {
+          reject(new Error(errorMessage(data, xhr.status)));
+          return;
+        }
+        resolve(data as T);
+      };
+      onProgress?.({ loaded: 0, total: file.size, source: 'network' });
+      xhr.send(body);
+    });
   },
   async stream(path: string, body: unknown, onEvent: (event: Record<string, any>) => void) {
     const headers = new Headers({ 'Content-Type': 'application/json' });

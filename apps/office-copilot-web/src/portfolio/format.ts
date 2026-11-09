@@ -81,3 +81,12 @@ export function localDateInputValue(date = new Date()): string {
   const pad = (n: number) => String(n).padStart(2, '0');
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
 }
+
+/** 按本地 15:30 记账，保证落在交易日内。今天尚未到该时刻时改用当前时间，避免被判成未来。 */
+export function bookedOccurredAt(dateValue: string, now = new Date()): string | undefined {
+  if (!dateValue) return undefined;
+  const booked = new Date(`${dateValue}T15:30:00`);
+  if (Number.isNaN(booked.getTime())) return undefined;
+  const moment = dateValue === localDateInputValue(now) && booked.getTime() > now.getTime() ? now : booked;
+  return moment.toISOString();
+}

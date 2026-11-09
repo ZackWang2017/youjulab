@@ -1,6 +1,8 @@
 import { createIcons, icons } from 'lucide';
 import { download, type EditorAdapter, type Patch } from '../../context/types';
 import './style.css';
+import { mountAccounts } from './accounts';
+import { normalizeAccounts, type AccountsDiagram } from './accounts-model';
 
 type ResearchEvent = { id: string; date: string; title: string; detail?: string; source?: string };
 type FishboneItem = { id: string; label: string; evidence?: string; source?: string };
@@ -18,7 +20,7 @@ type FishboneDiagram = {
   problem: string;
   categories: FishboneCategory[];
 };
-type ResearchDiagram = TimelineDiagram | FishboneDiagram;
+type ResearchDiagram = TimelineDiagram | FishboneDiagram | AccountsDiagram;
 
 const FORMAT = 'invp-research-diagram-v1' as const;
 
@@ -38,21 +40,6 @@ function defaultTimeline(): TimelineDiagram {
   };
 }
 
-function defaultFishbone(): FishboneDiagram {
-  return {
-    format: FORMAT,
-    type: 'fishbone',
-    title: '核心问题归因',
-    problem: '利润增速低于预期',
-    categories: [
-      { id: uid('category'), label: '收入', items: [{ id: uid('cause'), label: '销量变化', evidence: '', source: '' }] },
-      { id: uid('category'), label: '成本', items: [{ id: uid('cause'), label: '原材料价格', evidence: '', source: '' }] },
-      { id: uid('category'), label: '费用', items: [{ id: uid('cause'), label: '销售投入', evidence: '', source: '' }] },
-      { id: uid('category'), label: '外部因素', items: [{ id: uid('cause'), label: '行业需求', evidence: '', source: '' }] },
-    ],
-  };
-}
-
 function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
@@ -65,6 +52,7 @@ function normalize(content: unknown): ResearchDiagram {
   if (!content || typeof content !== 'object' || Array.isArray(content)) return defaultTimeline();
   const raw = content as Record<string, unknown>;
   if (raw.format !== FORMAT) return defaultTimeline();
+  if (raw.type === 'financial_accounts') return normalizeAccounts(raw);
   if (raw.type === 'fishbone') {
     const categories = Array.isArray(raw.categories) ? raw.categories.map((entry, categoryIndex) => {
       const category = entry && typeof entry === 'object' ? entry as Record<string, unknown> : {};
@@ -81,7 +69,7 @@ function normalize(content: unknown): ResearchDiagram {
     }) : [];
     return { format: FORMAT, type: 'fishbone', title: stringValue(raw.title), problem: stringValue(raw.problem), categories };
   }
-  if (raw.type !== 'timeline') throw new Error('研究图类型必须是 timeline 或 fishbone。');
+  if (raw.type !== 'timeline') throw new Error('研究图类型必须是 timeline、fishbone 或 financial_accounts。');
   const events = Array.isArray(raw.events) ? raw.events.map((entry, index) => {
     const event = entry && typeof entry === 'object' ? entry as Record<string, unknown> : {};
     return {
@@ -188,24 +176,18 @@ export function mountResearchDiagram(
   let model: ResearchDiagram = defaultTimeline();
   let renderToken = 0;
   let history: ResearchDiagram[] = [];
+  let accountsView: ReturnType<typeof mountAccounts> | null = null;
 
   container.innerHTML = `<div class="research-shell">
-    <div class="research-toolbar">
-      <div class="research-types" role="group" aria-label="研究图类型">
-        <button type="button" data-type="timeline"><i data-lucide="milestone"></i><span>时间轴</span></button>
-        <button type="button" data-type="fishbone"><i data-lucide="git-branch"></i><span>鱼骨图</span></button>
-      </div>
-      <label class="research-title"><span>标题</span><input data-model-title maxlength="80"></label>
-      <button type="button" data-export title="导出 JSON" aria-label="导出 JSON"><i data-lucide="download"></i></button>
-    </div>
     <div class="research-body">
       <aside class="research-inspector" aria-label="研究图内容"></aside>
       <div class="research-canvas"><div class="research-preview"></div></div>
     </div>
+    <div class="research-accounts-host" hidden></div>
   </div>`;
   const inspector = container.querySelector<HTMLElement>('.research-inspector')!;
   const preview = container.querySelector<HTMLElement>('.research-preview')!;
-  const titleInput = container.querySelector<HTMLInputElement>('[data-model-title]')!;
+  const accountsHost = container.querySelector<HTMLElement>('.research-accounts-host')!;
 
   const snapshot = () => clone(model);
   const remember = () => {
@@ -233,6 +215,7 @@ export function mountResearchDiagram(
   };
 
   const paintPreview = () => {
+    if (model.type === 'financial_accounts') { accountsView?.refresh(); return; }
     if (model.type === 'fishbone') {
       ++renderToken;
       preview.innerHTML = fishboneSvg(model);
@@ -242,6 +225,7 @@ export function mountResearchDiagram(
   };
 
   const renderInspector = () => {
+    if (model.type === 'financial_accounts') return;
     if (model.type === 'timeline') {
       inspector.innerHTML = `<div class="research-inspector-head"><div><strong>事件</strong><span>${model.events.length} 项</span></div><button type="button" data-add-event><i data-lucide="plus"></i><span>添加事件</span></button></div>
         <div class="research-list">${model.events.map((event, index) => `<article class="research-item" data-event="${index}">
@@ -251,7 +235,7 @@ export function mountResearchDiagram(
           ${field('影响与判断', event.detail || '', `data-event-index="${index}" data-field="detail" maxlength="400"`, true)}
           ${field('来源', event.source || '', `data-event-index="${index}" data-field="source" maxlength="500" placeholder="链接或文档位置"`)}
         </article>`).join('')}</div>`;
-    } else {
+    } else if (model.type === 'fishbone') {
       inspector.innerHTML = `${field('核心问题', model.problem, 'data-problem maxlength="120"')}
         <div class="research-inspector-head"><div><strong>原因分类</strong><span>${model.categories.length} 项</span></div><button type="button" data-add-category><i data-lucide="plus"></i><span>添加分类</span></button></div>
         <div class="research-list">${model.categories.map((category, categoryIndex) => `<article class="research-item" data-category="${categoryIndex}">
@@ -269,31 +253,14 @@ export function mountResearchDiagram(
   };
 
   const renderAll = () => {
-    container.querySelectorAll<HTMLButtonElement>('[data-type]').forEach(button => {
-      const active = button.dataset.type === model.type;
-      button.classList.toggle('is-active', active);
-      button.setAttribute('aria-pressed', String(active));
-    });
-    titleInput.value = model.title;
+    const financial = model.type === 'financial_accounts';
+    container.querySelector('.research-shell')!.classList.toggle('is-accounts', financial);
+    accountsHost.hidden = !financial;
+    if (accountsView) { accountsView.destroy(); accountsView = null; }
+    if (financial) accountsView = mountAccounts(accountsHost, () => model as AccountsDiagram, next => { remember(); model = next; emitDirty(); });
     renderInspector();
     paintPreview();
   };
-
-  container.querySelector('.research-types')!.addEventListener('click', event => {
-    const button = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-type]');
-    if (!button || button.dataset.type === model.type) return;
-    remember();
-    model = button.dataset.type === 'fishbone' ? defaultFishbone() : defaultTimeline();
-    renderAll();
-    emitDirty();
-  });
-
-  titleInput.addEventListener('input', () => {
-    model.title = titleInput.value;
-    paintPreview();
-    emitDirty();
-  });
-  titleInput.addEventListener('focus', remember);
 
   inspector.addEventListener('focusin', event => {
     if ((event.target as HTMLElement).matches('input, textarea')) remember();
@@ -325,7 +292,7 @@ export function mountResearchDiagram(
       if (target.closest('[data-add-event]')) model.events.push({ id: uid('event'), date: '', title: '', detail: '', source: '' });
       const remove = target.closest<HTMLElement>('[data-remove-event]');
       if (remove) model.events.splice(Number(remove.dataset.removeEvent), 1);
-    } else {
+    } else if (model.type === 'fishbone') {
       if (target.closest('[data-add-category]')) model.categories.push({ id: uid('category'), label: '新分类', items: [] });
       const removeCategory = target.closest<HTMLElement>('[data-remove-category]');
       if (removeCategory) model.categories.splice(Number(removeCategory.dataset.removeCategory), 1);
@@ -341,9 +308,6 @@ export function mountResearchDiagram(
     emitDirty();
   });
 
-  container.querySelector('[data-export]')!.addEventListener('click', () => {
-    download('research-diagram.json', JSON.stringify(model, null, 2));
-  });
   createIcons({ icons });
 
   return {

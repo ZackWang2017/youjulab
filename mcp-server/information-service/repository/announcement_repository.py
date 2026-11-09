@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import re
+import ssl
+import time
 from datetime import date, datetime, timedelta
 from html import unescape
 from typing import Any
@@ -21,6 +23,7 @@ _SEC_UA = "youjulab research bot contact@youjulab.local"
 _SHANGHAI = ZoneInfo("Asia/Shanghai")
 _TAGS = re.compile(r"<[^>]+>")
 _TIMEOUT = httpx.Timeout(20.0, read=30.0)
+_RETRIES = 4
 _CNINFO_ORG: dict[str, str] = {}
 _SEC_CIK: dict[str, str] = {}
 _SEC_CLASS: dict[str, str] = {}
@@ -28,6 +31,45 @@ _SEC_COMPANY_LOADED = False
 _SEC_MF_LOADED = False
 _SEC_COMPANY_FORMS = "8-K,10-Q,10-K,6-K,20-F"
 _SEC_FUND_FORMS = "N-CSR,N-CSRS,NPORT-P,N-PORT,485BPOS,497,497K,N-CEN,8-K"
+
+
+def _ssl(*, tls12: bool = False) -> ssl.SSLContext:
+    context = ssl.create_default_context()
+    # SEC / 港交所偶发不发 close_notify 就掐连接，OpenSSL 3 会报 UNEXPECTED_EOF。
+    if hasattr(ssl, "OP_IGNORE_UNEXPECTED_EOF"):
+        context.options |= ssl.OP_IGNORE_UNEXPECTED_EOF
+    if tls12:
+        context.maximum_version = ssl.TLSVersion.TLSv1_2
+    return context
+
+
+def _request(method: str, url: str, **kwargs: Any) -> httpx.Response:
+    """公告源 TLS 偶发提前断开；忽略 EOF，失败后降到 TLS 1.2，并绕过系统代理。"""
+    last: Exception | None = None
+    headers = kwargs.pop("headers", None)
+    timeout = kwargs.pop("timeout", _TIMEOUT)
+    verb = method.upper()
+    caller = httpx.get if verb == "GET" else httpx.post if verb == "POST" else httpx.request
+    for attempt in range(_RETRIES):
+        try:
+            args = (url,) if verb in ("GET", "POST") else (verb, url)
+            response = caller(
+                *args,
+                headers=headers,
+                timeout=timeout,
+                verify=_ssl(tls12=attempt >= 2),
+                trust_env=False,
+                follow_redirects=True,
+                **kwargs,
+            )
+            response.raise_for_status()
+            return response
+        except httpx.TransportError as exc:
+            last = exc
+            if attempt < _RETRIES - 1:
+                time.sleep(0.35 * (attempt + 1))
+    assert last is not None
+    raise last
 
 
 def reset_caches() -> None:
@@ -69,14 +111,12 @@ def fetch_cninfo(ticker_code: str, name: str = "") -> list[dict[str, str]]:
         "sortType": "",
         "isHLtitle": "true",
     }
-    response = httpx.post(
+    data = _request(
+        "POST",
         "https://www.cninfo.com.cn/new/hisAnnouncement/query",
         data=payload,
         headers={**_HEADERS, "Referer": "https://www.cninfo.com.cn/", "Content-Type": "application/x-www-form-urlencoded"},
-        timeout=_TIMEOUT,
-    )
-    response.raise_for_status()
-    data = response.json()
+    ).json()
     items = []
     for row in data.get("announcements") or []:
         title = _plain(row.get("announcementTitle"))
@@ -97,7 +137,8 @@ def fetch_sse(ticker_code: str, name: str = "") -> list[dict[str, str]]:
     code, market = _split(ticker_code)
     if market != "SH" or not code:
         raise ValueError("上交所公告只支持沪市代码。")
-    response = httpx.get(
+    data = _request(
+        "GET",
         "https://query.sse.com.cn/security/stock/queryCompanyBulletinNew.do",
         params={
             "isPagination": "true",
@@ -109,10 +150,7 @@ def fetch_sse(ticker_code: str, name: str = "") -> list[dict[str, str]]:
             "SECURITY_CODE": code,
         },
         headers={**_HEADERS, "Referer": "https://www.sse.com.cn/disclosure/listedinfo/announcement/"},
-        timeout=_TIMEOUT,
-    )
-    response.raise_for_status()
-    data = response.json()
+    ).json()
     items = []
     for row in _sse_rows(data):
         title = _plain(row.get("TITLE") or row.get("title"))
@@ -136,14 +174,12 @@ def fetch_szse(ticker_code: str, name: str = "") -> list[dict[str, str]]:
     code, market = _split(ticker_code)
     if market != "SZ" or not code:
         raise ValueError("深交所公告只支持深市代码。")
-    response = httpx.post(
+    data = _request(
+        "POST",
         "https://www.szse.cn/api/disc/announcement/annList",
         json={"seDate": ["", ""], "stock": [code], "channelCode": ["listedNotice_disc"], "pageSize": 20, "pageNum": 1},
         headers={**_HEADERS, "Referer": "https://www.szse.cn/disclosure/listed/notice/index.html", "Content-Type": "application/json"},
-        timeout=_TIMEOUT,
-    )
-    response.raise_for_status()
-    data = response.json()
+    ).json()
     items = []
     for row in data.get("data") or []:
         title = _plain(row.get("title"))
@@ -164,14 +200,12 @@ def fetch_eastmoney_fund(ticker_code: str, name: str = "") -> list[dict[str, str
     code, _market = _split(ticker_code)
     if not code:
         return []
-    response = httpx.get(
+    payload = _request(
+        "GET",
         "https://api.fund.eastmoney.com/f10/JJGG",
         params={"fundcode": code, "pageIndex": "1", "pageSize": "20", "type": "0"},
         headers={**_HEADERS, "Referer": f"https://fundf10.eastmoney.com/jjgg_{code}.html"},
-        timeout=_TIMEOUT,
-    )
-    response.raise_for_status()
-    payload = response.json()
+    ).json()
     if not isinstance(payload, dict) or payload.get("ErrCode") not in (None, 0, "0"):
         return []
     items = []
@@ -204,14 +238,12 @@ def fetch_sec(ticker_code: str, name: str = "") -> list[dict[str, str]]:
         params = {"q": class_id, "dateRange": "1y", "forms": _SEC_FUND_FORMS}
     else:
         params = {"ciks": cik, "dateRange": "1y", "forms": _SEC_COMPANY_FORMS}
-    response = httpx.get(
+    data = _request(
+        "GET",
         "https://efts.sec.gov/LATEST/search-index",
         params=params,
         headers=headers,
-        timeout=_TIMEOUT,
-    )
-    response.raise_for_status()
-    data = response.json()
+    ).json()
     hits = ((data.get("hits") or {}).get("hits")) or []
     items = []
     for hit in hits[:20]:
@@ -253,14 +285,12 @@ def _sse_rows(data: dict) -> list[dict]:
 def _cninfo_org_id(code: str) -> str:
     if code in _CNINFO_ORG:
         return _CNINFO_ORG[code]
-    response = httpx.post(
+    rows = _request(
+        "POST",
         "https://www.cninfo.com.cn/new/information/topSearch/query",
         params={"keyWord": code, "maxNum": 10},
         headers={**_HEADERS, "Referer": "https://www.cninfo.com.cn/"},
-        timeout=_TIMEOUT,
-    )
-    response.raise_for_status()
-    rows = response.json()
+    ).json()
     if isinstance(rows, dict):
         rows = rows.get("data") or rows.get("list") or []
     for row in rows or []:
@@ -298,13 +328,11 @@ def _load_sec_companies() -> None:
     global _SEC_COMPANY_LOADED
     if _SEC_COMPANY_LOADED:
         return
-    response = httpx.get(
+    for row in (_request(
+        "GET",
         "https://www.sec.gov/files/company_tickers.json",
         headers={**_HEADERS, "User-Agent": _SEC_UA},
-        timeout=_TIMEOUT,
-    )
-    response.raise_for_status()
-    for row in (response.json() or {}).values():
+    ).json() or {}).values():
         if not isinstance(row, dict):
             continue
         ticker = str(row.get("ticker") or "").upper()
@@ -318,13 +346,11 @@ def _load_sec_funds() -> None:
     global _SEC_MF_LOADED
     if _SEC_MF_LOADED:
         return
-    response = httpx.get(
+    payload = _request(
+        "GET",
         "https://www.sec.gov/files/company_tickers_mf.json",
         headers={**_HEADERS, "User-Agent": _SEC_UA},
-        timeout=_TIMEOUT,
-    )
-    response.raise_for_status()
-    payload = response.json() or {}
+    ).json() or {}
     rows = payload.get("data") if isinstance(payload, dict) else payload
     for row in rows or []:
         if not isinstance(row, (list, tuple)) or len(row) < 4:

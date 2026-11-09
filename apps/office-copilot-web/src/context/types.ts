@@ -1,4 +1,4 @@
-export type Surface = 'sheet' | 'document' | 'pdf' | 'mindmap' | 'research' | 'diagram' | 'project_plan' | 'calendar';
+export type Surface = 'sheet' | 'document' | 'pdf' | 'strategy' | 'mindmap' | 'research' | 'diagram' | 'project_plan' | 'calendar';
 export interface Context {
   document_id: string;
   surface: Surface;
@@ -47,6 +47,8 @@ export interface EditorAdapter {
     size?: number | null;
   }): Promise<void> | void;
   snapshot?(): unknown;
+  loadedAssetId?(): string;
+  openTodos?(): void;
   persist?: () => Promise<void>;
 }
 export function download(name: string, value: string) {

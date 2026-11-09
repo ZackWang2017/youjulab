@@ -1,0 +1,7 @@
+{% extends 'base.html' %}{% block content %}
+<form method="post" action="/login" class="login">
+<h1>管理员登录</h1><input name="csrf" type="hidden" value="{{ csrf }}">
+<label>账号<input name="username" value="admin" autocomplete="username" required></label>
+<label>密码<input name="password" type="password" autocomplete="current-password" required maxlength="256"></label>
+<button class="primary">登录</button>
+</form>{% endblock %}
