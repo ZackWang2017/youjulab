@@ -12,6 +12,7 @@ import sqlite3
 import tempfile
 
 import sqlite_vec
+from information.backup import TABLES as INFORMATION_TABLES, export_rows, restore_rows, validate_rows
 
 OWNED = {'projects': 'owner_id', 'assets': 'owner_id', 'digest_jobs': 'user_id',
     'document_skills': 'user_id', 'assistant_sessions': 'user_id', 'sheet_cache': 'user_id',
@@ -59,13 +60,14 @@ def export_user(office, vectors, files, email, account_id, destination):
         payload['local_user_id'] = uid
         payload['preferences'] = {k: v for k, v in local.items() if k not in ('password_hash', 'access_token', 'id', 'email')}
         known = tables(conn)
-        unknown = known - set(OWNED) - {'users', 'quant_runs', 'sqlite_sequence', 'local_backup_records'}
+        unknown = known - set(OWNED) - set(INFORMATION_TABLES) - {'users', 'quant_runs', 'sqlite_sequence', 'local_backup_records'}
         if unknown:
             raise ValueError(f'未识别的本地数据表，停止备份以避免遗漏：{sorted(unknown)}')
         for table, key in OWNED.items():
             payload['tables'][table] = [{**json.loads(r['data']), '__backup_key': r['id']} for r in conn.execute(f'SELECT id,data FROM {table}')
                 if json.loads(r['data']).get(key) == uid] if table in known else []
         payload['quant_runs'] = [dict(r) for r in conn.execute('SELECT * FROM quant_runs WHERE owner=?', (uid,))] if 'quant_runs' in known else []
+        payload['information'] = export_rows(conn, uid)
     pdfs = {a['id']: a for a in payload['tables']['assets'] if a.get('kind') == 'pdf'}
     project_ids = {p['id'] for p in payload['tables']['projects']}
     for asset in pdfs.values():
@@ -124,6 +126,8 @@ def validate(payload, uid, email, account_id):
                 raise ValueError('备份包含其他账号的数据，已拒绝恢复。')
     if any(row.get('owner') != uid for row in payload.get('quant_runs', [])):
         raise ValueError('研究记录归属异常。')
+    if 'information' in payload:
+        validate_rows(payload['information'], uid, projects=payload['tables']['projects'], assets=payload['tables']['assets'])
     pdfs = {r['id'] for r in payload['tables']['assets'] if r.get('kind') == 'pdf'}
     for table, rows in (payload.get('vectors') or {}).get('rows', {}).items():
         if table not in VECTOR_TABLES or any(r.get('document_id') not in pdfs for r in rows):
@@ -147,6 +151,8 @@ def restore_user(office, vectors, files, email, account_id, source):
         if Path(vectors).exists():
             snapshot(vectors, vector_copy, True)
         with closing(db(office_copy)) as conn:
+            if 'information' in payload:
+                restore_rows(conn, payload['information'], uid)
             current_assets = [json.loads(r['data']) for r in conn.execute('SELECT data FROM assets')]
             old_pdf_ids = {a['id'] for a in current_assets if a.get('owner_id') == uid and a.get('kind') == 'pdf'}
             for table, key in OWNED.items():

@@ -17,7 +17,7 @@ import {
   REPEAT_LABEL,
   type MonthlyEvent,
 } from './monthly-events';
-import { closeTodoList, openTodoList } from './todos';
+import { closeTodoList, openTodoList, refreshTodoList } from './todos';
 
 /** 按日工作计划：key 为 YYYY-MM-DD，value 为 Markdown 正文。 */
 export interface CalendarContent {
@@ -264,10 +264,10 @@ function openDayPlan(
     dialog.querySelector('[data-save]')!.addEventListener('click', () => {
       const weekMarkdown = weekEditor?.getValue() || '';
       const dayMarkdown = dayEditor?.getValue() || '';
-      close();
       onSave(weekMarkdown, dayMarkdown);
+      dialog.querySelector('[data-save]')!.textContent = '已保存';
     });
-    overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
+    sections.addEventListener('input', () => { dialog.querySelector('[data-save]')!.textContent = '保存'; });
   });
 }
 
@@ -604,6 +604,15 @@ export function mountCalendar(
 
   return {
     openTodos,
+    applyRemoteTodos(markdown: string, resave: boolean) {
+      const next = markdown.replace(/^\uFEFF/, '');
+      if (next !== data.todos) {
+        data.todos = next;
+        refreshTodoList(next);
+      }
+      // 本地还有排队未存的周/日计划时，用含最新待办的快照替换，避免旧待办覆盖回去
+      if (resave) emitDirty();
+    },
     async load(asset) {
       // 待办窗口独立挂在 body；先持久化并关闭旧窗口，避免其状态串到新日历资产。
       closeTodoList();

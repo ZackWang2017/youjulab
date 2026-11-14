@@ -25,5 +25,14 @@ export default defineConfig(() => {
       },
     },
     preview: { headers: cspHeaders },
+    build: {
+      rollupOptions: {
+        // quick.html：托盘「记笔记 / 待办事项」小窗，只加载轻量依赖
+        input: {
+          main: resolve(__dirname, 'index.html'),
+          quick: resolve(__dirname, 'quick.html'),
+        },
+      },
+    },
   };
 });

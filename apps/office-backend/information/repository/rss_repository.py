@@ -8,7 +8,7 @@ from html import unescape
 from typing import Any
 from zoneinfo import ZoneInfo
 
-import feed_service
+from ..collectors import feed_service
 import httpx
 
 MAX_ITEMS = 24
@@ -305,3 +305,4 @@ def _stamp(value: Any) -> str:
         return datetime.fromtimestamp(stamp, _SHANGHAI).strftime("%Y-%m-%d %H:%M")
     except (OverflowError, OSError, ValueError):
         return ""
+

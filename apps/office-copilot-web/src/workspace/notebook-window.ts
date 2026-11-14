@@ -5,6 +5,7 @@ import { createIcons, icons } from 'lucide';
 import { assetIndexExtensions } from '../asset-index';
 import { office } from '../office-client/client';
 import { circleBullet, listStack, nestedListTab, nestUnderNumber } from '../editors/rich-text-lists';
+import { mergeAppendedTail } from '../quick/write';
 
 const EMPTY_DOCUMENT = { type: 'doc', content: [{ type: 'paragraph' }] };
 
@@ -23,6 +24,41 @@ let pending: unknown | null = null;
 let saveTimer: ReturnType<typeof setTimeout> | undefined;
 let saving: Promise<void> = Promise.resolve();
 let lastSavedAt: Date | null = null;
+/** 最近一次与服务端一致的内容；托盘快速记录只追加，冲突时据此找出追加的尾部。 */
+let baseContent: unknown = null;
+
+class SaveConflict extends Error {}
+
+async function putNotebook(assetId: string, content: unknown, revision: number) {
+  const response = await office.request(`/assets/${assetId}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ content, revision }),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (response.status === 409) throw new SaveConflict(typeof data.error === 'string' ? data.error : '内容已在其它窗口更新。');
+  if (!response.ok) throw new Error(typeof data.error === 'string' ? data.error : `HTTP ${response.status}`);
+  return data as { revision: number };
+}
+
+/** 本地有未保存修改时撞上快速记录的追加：把追加的尾部接到本地内容后再保存。 */
+async function saveMergingQuickNotes(assetId: string, content: unknown) {
+  try {
+    return { saved: await putNotebook(assetId, content, currentRevision), content };
+  } catch (error) {
+    if (!(error instanceof SaveConflict)) throw error;
+    const latest = await office.json<{ revision: number; content?: unknown }>(`/assets/${assetId}`);
+    const merged = mergeAppendedTail(baseContent, content, latest.content);
+    if (!merged) throw new Error('笔记本已在其它窗口修改，请复制当前内容后重新打开笔记本。');
+    const saved = await putNotebook(assetId, merged, latest.revision);
+    if (editor && currentAssetId === assetId) {
+      loading = true;
+      editor.commands.setContent(merged);
+      loading = false;
+    }
+    return { saved, content: merged };
+  }
+}
 
 function formatSavedAt(at: Date) {
   const pad = (n: number) => String(n).padStart(2, '0');
@@ -53,14 +89,13 @@ function flushSave() {
   setStatus('正在保存…');
   saving = saving.then(async () => {
     try {
-      const saved = await office.json<{ revision: number }>(`/assets/${assetId}`, {
-        method: 'PUT',
-        body: JSON.stringify({ content, revision: currentRevision }),
-      });
-      currentRevision = saved.revision;
+      const result = await saveMergingQuickNotes(assetId, content);
+      currentRevision = result.saved.revision;
+      baseContent = result.content;
       lastSavedAt = new Date();
       statusAfterSave();
       window.dispatchEvent(new CustomEvent('office-saved'));
+      window.youju?.notifyAssetChanged?.({ id: assetId, kind: 'notebook', revision: currentRevision });
     } catch (err) {
       if (!pending) pending = content;
       setStatus('保存失败', err instanceof Error ? err.message : String(err));
@@ -80,6 +115,20 @@ function queueSave(content: unknown) {
 
 export function notebookContainsFocus() {
   return Boolean(windowEl && !windowEl.hidden && windowEl.contains(document.activeElement));
+}
+
+/**
+ * 其它窗口（托盘快速记录）保存了笔记本：没有未保存修改就直接换成最新内容；
+ * 有未保存修改则留到保存时按「追加尾部」合并。
+ */
+export function applyRemoteNotebook(asset: NotebookAsset) {
+  if (!editor || !windowEl || asset.id !== currentAssetId || asset.revision <= currentRevision) return;
+  if (pending) return;
+  loading = true;
+  editor.commands.setContent(asset.content || EMPTY_DOCUMENT);
+  loading = false;
+  currentRevision = asset.revision;
+  baseContent = asset.content || EMPTY_DOCUMENT;
 }
 
 export async function saveNotebookNow() {
@@ -134,9 +183,12 @@ export function openNotebookWindow(asset: NotebookAsset) {
       loading = true;
       currentAssetId = asset.id;
       currentRevision = asset.revision;
+      baseContent = asset.content || EMPTY_DOCUMENT;
       lastSavedAt = null;
       editor.commands.setContent(asset.content || EMPTY_DOCUMENT);
       loading = false;
+    } else {
+      applyRemoteNotebook(asset);
     }
     editor.setEditable(Boolean(asset.id));
     if (!asset.id) setStatus('正在加载');
@@ -174,6 +226,7 @@ export function openNotebookWindow(asset: NotebookAsset) {
   windowEl = win;
   currentAssetId = asset.id;
   currentRevision = asset.revision;
+  baseContent = asset.content || EMPTY_DOCUMENT;
   lastSavedAt = null;
   createIcons({ icons });
 

@@ -291,6 +291,13 @@
 .settings-inline-actions .settings-danger { color: #a23a3a; border-color: #e9c7c4; }
 
 .settings-field { display: grid; gap: 6px; }
+.settings-shortcuts .settings-note { margin: 0 0 12px; }
+.settings-shortcut-row { display: flex; gap: 6px; align-items: center; max-width: 280px; }
+.settings-shortcut-row input { flex: 1; min-width: 0; height: 34px; border: 1px solid #d7e0e2; border-radius: 5px; padding: 0 10px; background: #fff; color: #263238; font: inherit; font-size: 14px; letter-spacing: 1px; cursor: pointer; caret-color: transparent; }
+.settings-shortcut-row input:focus { border-color: #147c6e; box-shadow: 0 0 0 2px rgba(20,124,110,.15); outline: none; }
+.settings-shortcut-row button:not(#sheet button) { min-height: 34px; padding: 4px 8px; }
+.settings-shortcut-row button svg { width: 14px; height: 14px; }
+.settings-shortcuts [data-shortcut-note].is-error { color: #a23a3a; }
 [data-settings-panel="local"] .settings-field { grid-template-columns: 108px minmax(0, 1fr); align-items: center; gap: 12px; margin-bottom: 10px; }
 [data-settings-panel="local"] .settings-field > span { font-size: 13px; color: #4e5961; }
 [data-settings-panel="local"] .settings-field input { width: 100%; min-width: 0; height: 32px; border: 1px solid #e4eaeb; border-radius: 4px; padding: 0 10px; background: #fff; color: #263238; font: inherit; font-size: 13px; box-shadow: none; }
@@ -652,3 +659,11 @@
 .document-create-dialog .web-import-status { margin: 0; font-size: 12px; line-height: 1.65; color: #68777d; }
 .document-create-dialog .web-import-status.is-error { color: #aa3e3e; }
 .document-create-dialog button:disabled { cursor: wait; opacity: .65; }
+.name-dialog.save-conflict-dialog{width:min(520px,calc(100vw - 32px));min-width:0}
+.save-conflict-dialog .save-conflict-options{border:0;padding:0;margin:12px 0 18px;min-width:0;display:flex;flex-direction:column;gap:12px}
+.save-conflict-dialog .save-conflict-options legend{padding:0;margin-bottom:12px}
+.save-conflict-dialog .save-conflict-options label{display:flex;flex-direction:row;align-items:center;gap:8px;margin:0;cursor:pointer;line-height:1.5}
+.save-conflict-dialog .save-conflict-options input[type=radio]{display:block;flex:0 0 16px;width:16px;height:16px;min-height:0;margin:0;padding:0;accent-color:#147c6e}
+.save-conflict-dialog .save-conflict-options span{display:block;min-width:0}
+.save-conflict-dialog .dialog-actions{flex-wrap:wrap;gap:8px}
+.save-conflict-dialog .dialog-actions button{white-space:nowrap}

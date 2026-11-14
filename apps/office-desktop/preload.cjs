@@ -23,4 +23,18 @@ contextBridge.exposeInMainWorld('youju', {
   retryBackupUpload: id => ipcRenderer.invoke('youju:retry-backup-upload', id),
   restoreBackup: payload => ipcRenderer.invoke('youju:restore-backup', payload),
   quitAfterRestore: () => ipcRenderer.invoke('youju:quit-after-restore'),
+  notifyAssetChanged: change => ipcRenderer.send('youju:notify-asset-changed', change),
+  onAssetChanged: listener => {
+    const handler = (_event, change) => listener(change);
+    ipcRenderer.on('youju:asset-changed', handler);
+    return () => ipcRenderer.removeListener('youju:asset-changed', handler);
+  },
+  openMainTool: tool => ipcRenderer.send('youju:open-main-tool', tool || ''),
+  onOpenMainTool: listener => {
+    const handler = (_event, tool) => listener(tool);
+    ipcRenderer.on('youju:open-main-tool', handler);
+    return () => ipcRenderer.removeListener('youju:open-main-tool', handler);
+  },
+  getShortcuts: () => ipcRenderer.invoke('youju:get-shortcuts'),
+  setShortcuts: shortcuts => ipcRenderer.invoke('youju:set-shortcuts', shortcuts),
 });

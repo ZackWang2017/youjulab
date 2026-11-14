@@ -11,19 +11,32 @@ const linkify = (value: string) => esc(value).replace(/https?:\/\/[^\s<]+/g, url
 function overlay(html: string) {
   const el = document.createElement('div');
   el.className = 'dialog-overlay';
+  el.dataset.informationDialog = '';
   el.innerHTML = html;
   document.body.append(el);
   createIcons({ icons });
   return el;
 }
 
-export async function openGroupDialog(existing?: InformationGroup): Promise<InformationGroup | null> {
+export function closeInformationDialogs() {
+  document.querySelectorAll<HTMLElement>('[data-information-dialog]').forEach(el => {
+    el.querySelector<HTMLElement>('[data-cancel]')?.click();
+    el.remove();
+  });
+}
+
+export async function openGroupDialog(projectId: string, existing?: InformationGroup): Promise<InformationGroup | null> {
+  const favorites = existing?.kind === 'favorites';
   const kinds: InformationKind[] = ['wechat', 'finance_api', 'finance_rss', 'holdings_announce'];
   const el = overlay(`<form class="name-dialog info-dialog info-dialog-group">
     <h2>${existing ? '编辑资讯组' : '新建资讯组'}</h2>
     <label class="field-label" for="info-name">名称</label>
-    <input id="info-name" required maxlength="80" value="${esc(existing?.name || '')}" placeholder="如：持仓公告、财经快讯">
-    <fieldset class="info-type-grid"><legend class="field-label">类型</legend>
+    <input id="info-name" required maxlength="80" value="${esc(existing?.name || '')}" ${favorites ? 'readonly' : ''} placeholder="如：持仓公告、财经快讯">
+    <fieldset class="info-type-grid"><legend class="field-label">可见范围</legend>
+      <label><input type="radio" name="visibility" value="project" ${existing?.visibility !== 'user' && !favorites ? 'checked' : existing?.visibility === 'project' ? 'checked' : ''}><span>项目可见</span></label>
+      <label><input type="radio" name="visibility" value="user" ${existing?.visibility === 'user' || (favorites && !existing?.visibility) ? 'checked' : ''}><span>我可见</span></label>
+    </fieldset>
+    <fieldset class="info-type-grid" ${favorites ? 'hidden' : ''}><legend class="field-label">类型</legend>
       ${kinds.map(kind => `<label><input type="radio" name="kind" value="${kind}" ${(!existing && kind === 'finance_api') || existing?.kind === kind ? 'checked' : ''} ${existing ? 'disabled' : ''}><span>${KIND_LABEL[kind]}</span></label>`).join('')}
     </fieldset>
     <div data-fields></div>
@@ -40,6 +53,7 @@ export async function openGroupDialog(existing?: InformationGroup): Promise<Info
   const showError = (text: string) => { error.hidden = !text; error.textContent = text; };
 
   async function renderFields() {
+    if (favorites) { fields.innerHTML = ''; return; }
     if (kind === 'wechat') {
       fields.innerHTML = `<div class="info-fields-body"><div class="info-weread" data-weread><p>正在检查微信读书登录…</p></div></div>`;
       createIcons({ icons });
@@ -80,10 +94,11 @@ export async function openGroupDialog(existing?: InformationGroup): Promise<Info
       const name = nameInput.value.trim();
       if (!name) return;
       try {
+        const visibility = el.querySelector<HTMLInputElement>('input[name="visibility"]:checked')!.value as 'project' | 'user';
         const config = collectConfig(kind, fields, holdings);
         const saved = existing
-          ? await informationApi.update(existing.id, { name, config })
-          : await informationApi.create({ name, kind, config });
+          ? await informationApi.update(existing.id, favorites ? { visibility } : { name, config, visibility })
+          : await informationApi.create({ project_id: projectId, name, kind, config, visibility });
         finish(saved);
       } catch (err) {
         showError(err instanceof Error ? err.message : String(err));
@@ -168,6 +183,7 @@ async function bindWeread(host: HTMLElement): Promise<boolean> {
     const started = Date.now();
     while (Date.now() - started < 5 * 60 * 1000 && host.isConnected) {
       await new Promise(resolve => setTimeout(resolve, 2000));
+      if (!host.isConnected) return false;
       session = await informationApi.wereadLoginStatus(session.session_id);
       paint(session);
       if (session.status === 'authenticated') return true;
@@ -334,7 +350,7 @@ export function openReviewDetail(review: InformationReview) {
 
 export async function confirmClear() {
   return new Promise<boolean>(resolve => {
-    const el = overlay(`<form class="name-dialog"><h2>清理历史信息</h2><p>将删除非今日资讯。今日条目会保留，收藏夹中的条目也会保留。</p><div class="dialog-actions"><button type="button" data-cancel>取消</button><button class="primary" type="submit">清空</button></div></form>`);
+    const el = overlay(`<form class="name-dialog"><h2>清理历史信息</h2><p>将删除当前项目的非今日资讯。今日条目和资讯收藏栏中的条目会保留，其他项目不受影响。</p><div class="dialog-actions"><button type="button" data-cancel>取消</button><button class="primary" type="submit">清空</button></div></form>`);
     const finish = (ok: boolean) => { el.remove(); resolve(ok); };
     el.querySelector('[data-cancel]')!.addEventListener('click', () => finish(false));
     el.addEventListener('click', e => { if (e.target === el) finish(false); });

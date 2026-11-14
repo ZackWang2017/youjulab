@@ -48,6 +48,10 @@ for pkg in (
     "fitz",
     "sqlite_vec",
     "mcp",
+    "feedparser",
+    "qrcode",
+    "bs4",
+    "tzdata",
 ):
     try:
         d, b, h = collect_all(pkg)
@@ -61,6 +65,9 @@ for pkg in (
 hiddenimports += collect_submodules("announcement_intelligence")
 hiddenimports += collect_submodules("agent_tools")
 hiddenimports += collect_submodules("quant_research")
+hiddenimports += collect_submodules("information")
+for prompt in (BACKEND / 'information' / 'skills').glob('*.md'):
+    datas.append((str(prompt), 'information/skills'))
 # 规则包是数据文件，collect_submodules 不会带上；运行时按包目录读取
 for item in (BACKEND / "announcement_intelligence").iterdir():
     if item.is_file() and item.suffix in {".json", ".yaml", ".yml"}:

@@ -36,6 +36,7 @@
       "backup-transfer.mjs",
       "service-url.cjs",
       "background.mjs",
+      "quick-capture.mjs",
       "update-policy.mjs",
       "update-controller.mjs",
       "update-window/**/*",

@@ -1,18 +1,17 @@
-"""资讯 Agent 技能：读 skills/information-skills 提示词，调用模型，结果写回 mcp-server。"""
+"""资讯 Agent 技能：读取本地提示词，调用模型，结果保存到本地资料库。"""
 from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator
 from typing import Any
-
-import httpx
+from pathlib import Path
 
 from assistant import iter_chat_events, strip_thinking
-from config import ROOT, mcp_remote_base
 from model_runtime import model_configuration_error, model_configured, model_name
-from remote_auth import remote_token
+from information.service import information_service as information
+from information.collectors.page_reader import read_page
 
-SKILL_DIR = ROOT / "skills" / "information-skills"
+SKILL_DIR = Path(__file__).resolve().parent / 'information' / 'skills'
 KEYWORD_SKILLS = {
     "finance_api": "finance-api-keywords",
     "finance_rss": "finance-rss-keywords",
@@ -24,29 +23,6 @@ def load_skill(name: str) -> str:
     if not path.is_file():
         raise ValueError(f"未找到资讯技能：{name}")
     return path.read_text(encoding="utf-8")
-
-
-def _remote(method: str, path: str, payload: dict | None = None, params: dict | None = None) -> dict:
-    token = remote_token()
-    if not token:
-        raise ValueError("请先登录远程服务。")
-    try:
-        res = httpx.request(
-            method,
-            f"{mcp_remote_base().rstrip('/')}{path}",
-            json=payload,
-            params=params,
-            headers={"Authorization": f"Bearer {token}"},
-            timeout=60.0,
-        )
-    except httpx.HTTPError as exc:
-        raise ValueError(f"远程服务不可用：{exc}") from exc
-    if res.status_code == 401:
-        raise ValueError("请先登录远程服务。")
-    data = res.json() if res.content else {}
-    if res.is_error:
-        raise ValueError(str((data or {}).get("error") or res.text[:300] or f"HTTP {res.status_code}"))
-    return data if isinstance(data, dict) else {}
 
 
 def _parse_json(raw: str) -> dict:
@@ -106,8 +82,8 @@ async def iter_keyword_events(kind: str, description: str, extra: dict | None = 
         yield {"type": "done", "keywords": keywords, "thinking": event["thinking"], "model_name": model_name() or "模型"}
 
 
-async def iter_impact_events(group_id: int, item_ids: list[int] | None = None) -> AsyncIterator[dict]:
-    listed = _remote("GET", f"/api/information/groups/{int(group_id)}/items", params={"today": "1"})
+async def iter_impact_events(owner_id: str, group_id: int, item_ids: list[int] | None = None) -> AsyncIterator[dict]:
+    listed = information.list_items(owner_id, int(group_id), today_only=True)
     items = listed.get("items") or []
     if item_ids:
         wanted = {int(item_id) for item_id in item_ids}
@@ -131,23 +107,27 @@ async def iter_impact_events(group_id: int, item_ids: list[int] | None = None) -
         data = _parse_json(event["raw"])
         rows = data.get("items") if isinstance(data.get("items"), list) else []
         saved = []
+        allowed = {int(item['id']) for item in items}
         for row in rows:
             if not isinstance(row, dict) or not row.get("id"):
+                continue
+            if int(row['id']) not in allowed:
                 continue
             impact = str(row.get("impact") or "").strip()
             if not impact:
                 continue
-            saved.append(_remote("PUT", f"/api/information/items/{int(row['id'])}/impact", {"impact": impact}))
+            saved.append(information.save_impact(owner_id, int(row['id']), impact))
         yield {"type": "done", "items": saved, "thinking": event["thinking"], "model_name": model_name() or "模型"}
 
 
-async def iter_analyze_events(item_id: int) -> AsyncIterator[dict]:
-    item = _find_item(int(item_id))
+async def iter_analyze_events(owner_id: str, item_id: int) -> AsyncIterator[dict]:
+    item = information.get_item(owner_id, int(item_id))
     url = str(item.get("url") or "").strip()
     page: dict[str, Any] = {"error": "没有原文链接。", "title": "", "sections": []}
     if url:
         try:
-            page = _remote("POST", "/api/local-tools/read-page", {"url": url})
+            import asyncio
+            page = await asyncio.to_thread(read_page, url)
         except ValueError as exc:
             page = {"error": str(exc), "title": "", "sections": []}
     payload = {
@@ -167,7 +147,7 @@ async def iter_analyze_events(item_id: int) -> AsyncIterator[dict]:
             "performance": str(data.get("performance") or ""),
             "financial": str(data.get("financial") or ""),
         }
-        saved = _remote("PUT", f"/api/information/items/{int(item_id)}/analysis", analysis)
+        saved = information.save_analysis(owner_id, int(item_id), analysis)
         yield {"type": "done", "item": saved, "analysis": analysis, "thinking": event["thinking"], "model_name": model_name() or "模型"}
 
 
@@ -203,10 +183,10 @@ def _review_item_refs(rows: list, items: list[dict]) -> list[dict]:
     return refs
 
 
-async def iter_review_events(group_id: int) -> AsyncIterator[dict]:
+async def iter_review_events(owner_id: str, group_id: int) -> AsyncIterator[dict]:
     gid = int(group_id)
-    listed = _remote("GET", f"/api/information/groups/{gid}/items", params={"today": "1", "review": "1"})
-    summary = _remote("GET", f"/api/information/groups/{gid}/summary")
+    listed = information.list_items(owner_id, gid, today_only=True, for_review=True)
+    summary = information.today_summary(owner_id, gid)
     items = listed.get("items") or []
     payload = {
         "date": summary.get("date"),
@@ -233,7 +213,7 @@ async def iter_review_events(group_id: int) -> AsyncIterator[dict]:
         if sentiment not in {"利好", "利空", "中性"}:
             sentiment = "中性"
         refs = _review_item_refs(data.get("items") if isinstance(data.get("items"), list) else [], items)
-        saved = _remote("POST", f"/api/information/groups/{gid}/reviews", {
+        saved = information.save_review(owner_id, gid, {
             "review_date": summary.get("date"),
             "success_count": len(items),
             "fail_count": 0,
@@ -242,7 +222,3 @@ async def iter_review_events(group_id: int) -> AsyncIterator[dict]:
             "item_refs": refs,
         })
         yield {"type": "done", "review": saved, "thinking": event["thinking"], "model_name": model_name() or "模型"}
-
-
-def _find_item(item_id: int) -> dict:
-    return _remote("GET", f"/api/information/items/{int(item_id)}")

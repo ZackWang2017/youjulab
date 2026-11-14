@@ -11,7 +11,7 @@ from uuid import uuid4
 
 from config import mongo_db, mongo_url
 
-KINDS = ("sheet", "document", "pdf", "strategy", "mindmap", "research", "diagram", "project_plan", "calendar", "calc", "notebook", "outline_template")
+KINDS = ("sheet", "document", "pdf", "strategy", "mindmap", "research", "diagram", "project_plan", "calendar", "calc", "notebook", "outline_template", "information")
 # 每种只保留一份的用户资产。大纲模板可以有多份。
 USER_SINGLETON_KINDS = frozenset({"calendar", "calc", "notebook"})
 USER_KINDS = USER_SINGLETON_KINDS | frozenset({"outline_template"})
@@ -30,7 +30,11 @@ RECENT_ASSET_LIMIT = 8
 
 
 def empty_last_assets() -> dict:
-    return {"sheet": None, "document": None, "pdf": None, "strategy": None, "mindmap": None, "research": None, "diagram": None, "project_plan": None, "calendar": None}
+    return {"sheet": None, "document": None, "pdf": None, "strategy": None, "mindmap": None, "research": None, "diagram": None, "project_plan": None, "calendar": None, "information": None}
+
+
+def default_information(group_id: int) -> dict:
+    return {"format": "invp-information-group-v1", "group_id": group_id}
 
 
 def recent_asset_ids(doc: dict, project_id: str, opened_id: str | None = None) -> list[str]:
@@ -452,6 +456,8 @@ class MemoryStore(Store):
     def asset(self, owner_id: str, asset_id: str) -> dict | None:
         found = self._assets.get(asset_id)
         if not found or found["owner_id"] != owner_id:
+            return None
+        if found.get("kind") == "information" and not self.project(owner_id, found.get("project_id") or ""):
             return None
         return copy.deepcopy(found)
 

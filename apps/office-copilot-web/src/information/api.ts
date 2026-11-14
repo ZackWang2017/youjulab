@@ -1,11 +1,13 @@
-import { remoteJson } from '../remote/client';
 import { office } from '../office-client/client';
 
 export type InformationKind = 'wechat' | 'finance_api' | 'finance_rss' | 'holdings_announce' | 'favorites';
 export type InformationView = 'today' | 'review';
 
 export interface InformationGroup {
+  visibility?: 'project' | 'user';
   id: number;
+  project_id: string;
+  asset_id: string;
   name: string;
   kind: InformationKind;
   config: InformationConfig;
@@ -105,35 +107,35 @@ export const KIND_LABEL: Record<InformationKind, string> = {
   finance_api: '财经 API',
   finance_rss: '财经 RSS',
   holdings_announce: '持仓公告',
-  favorites: '收藏夹',
+  favorites: '资讯收藏栏',
 };
 
 export const informationApi = {
-  list: () => remoteJson<{ groups: InformationGroup[] }>(`${base}/groups`).then(r => r.groups),
-  create: (body: { name: string; kind: InformationKind; config?: InformationConfig }) =>
-    remoteJson<InformationGroup>(`${base}/groups`, { method: 'POST', body: JSON.stringify(body) }),
-  update: (id: number, body: { name?: string; config?: InformationConfig }) =>
-    remoteJson<InformationGroup>(`${base}/groups/${id}`, { method: 'PUT', body: JSON.stringify(body) }),
-  remove: (id: number) => remoteJson<{ ok: boolean }>(`${base}/groups/${id}`, { method: 'DELETE' }),
+  list: (projectId: string) => office.json<{ groups: InformationGroup[] }>(`${base}/groups?project_id=${encodeURIComponent(projectId)}`).then(r => r.groups.map(group => group.kind === 'favorites' ? { ...group, name: '资讯收藏栏' } : group)),
+  create: (body: { project_id: string; name: string; kind: InformationKind; config?: InformationConfig; visibility?: 'project' | 'user' }) =>
+    office.json<InformationGroup>(`${base}/groups`, { method: 'POST', body: JSON.stringify(body) }),
+  update: (id: number, body: { name?: string; config?: InformationConfig; visibility?: 'project' | 'user' }) =>
+    office.json<InformationGroup>(`${base}/groups/${id}`, { method: 'PUT', body: JSON.stringify(body) }),
+  remove: (id: number) => office.json<{ ok: boolean }>(`${base}/groups/${id}`, { method: 'DELETE' }),
   items: (id: number, today = true, opts?: { review?: boolean }) =>
-    remoteJson<{ group: InformationGroup; items: InformationItem[] }>(
+    office.json<{ group: InformationGroup; items: InformationItem[] }>(
       `${base}/groups/${id}/items?today=${today ? 1 : 0}${opts?.review ? '&review=1' : ''}`,
     ),
   fetchToday: (id: number) =>
-    remoteJson<FetchResult>(`${base}/groups/${id}/fetch`, { method: 'POST' }),
-  summary: (id: number) => remoteJson<TodaySummary>(`${base}/groups/${id}/summary`),
+    office.json<FetchResult>(`${base}/groups/${id}/fetch`, { method: 'POST' }),
+  summary: (id: number) => office.json<TodaySummary>(`${base}/groups/${id}/summary`),
   reviews: (id: number) =>
-    remoteJson<{ group: InformationGroup; reviews: InformationReview[] }>(`${base}/groups/${id}/reviews`).then(r => r.reviews),
-  review: (id: number) => remoteJson<InformationReview>(`${base}/reviews/${id}`),
-  clear: () => remoteJson<{ deleted: number }>(`${base}/clear`, { method: 'POST' }),
+    office.json<{ group: InformationGroup; reviews: InformationReview[] }>(`${base}/groups/${id}/reviews`).then(r => r.reviews),
+  review: (id: number) => office.json<InformationReview>(`${base}/reviews/${id}`),
+  clear: (projectId: string) => office.json<{ deleted: number }>(`${base}/clear?project_id=${encodeURIComponent(projectId)}`, { method: 'POST' }),
   favorite: (id: number, favorited = true) =>
-    remoteJson<InformationItem>(`${base}/items/${id}/favorite`, { method: 'POST', body: JSON.stringify({ favorited }) }),
-  hide: (id: number) => remoteJson<InformationItem>(`${base}/items/${id}`, { method: 'DELETE' }),
-  adapters: (kind: string) => remoteJson<{ adapters: Adapter[] }>(`${base}/adapters?kind=${encodeURIComponent(kind)}`).then(r => r.adapters),
-  holdings: () => remoteJson<{ holdings: HoldingPick[] }>(`${base}/holdings`).then(r => r.holdings),
-  wereadStatus: () => remoteJson<WereadSession>(`${base}/weread/status`),
-  wereadLogin: () => remoteJson<WereadSession>(`${base}/weread/login`, { method: 'POST' }),
-  wereadLoginStatus: (sessionId: string) => remoteJson<WereadSession>(`${base}/weread/login/${encodeURIComponent(sessionId)}`),
+    office.json<InformationItem>(`${base}/items/${id}/favorite`, { method: 'POST', body: JSON.stringify({ favorited }) }),
+  hide: (id: number) => office.json<InformationItem>(`${base}/items/${id}`, { method: 'DELETE' }),
+  adapters: (kind: string) => office.json<{ adapters: Adapter[] }>(`${base}/adapters?kind=${encodeURIComponent(kind)}`).then(r => r.adapters),
+  holdings: () => office.json<{ holdings: HoldingPick[] }>(`${base}/holdings`).then(r => r.holdings),
+  wereadStatus: () => office.json<WereadSession>(`${base}/weread/status`),
+  wereadLogin: () => office.json<WereadSession>(`${base}/weread/login`, { method: 'POST' }),
+  wereadLoginStatus: (sessionId: string) => office.json<WereadSession>(`${base}/weread/login/${encodeURIComponent(sessionId)}`),
 };
 
 export const informationSkills = {

@@ -17,8 +17,8 @@ export interface InformationController {
 
 export function mountInformation(
   section: HTMLElement,
-  onError: (error: unknown) => void,
-  handlers?: { onOpenFavorites?: () => void },
+  reportError: (error: unknown) => void,
+  handlers?: { onOpenFavorites?: () => void; onView?: (view: InformationView) => void },
 ): InformationController {
   section.innerHTML = '<div class="info-shell" data-shell></div>';
   const shell = section.querySelector<HTMLElement>('[data-shell]')!;
@@ -32,15 +32,19 @@ export function mountInformation(
   let notice = '';
   let fetchNotice: { success: number; failed: string[] } | null = null;
   let seq = 0;
+  let destroyed = false;
+  const onError = (error: unknown) => { if (!destroyed) reportError(error); };
 
   async function load() {
-    if (groupId === null) { render(); return; }
+    if (destroyed) return;
     const current = ++seq;
+    if (groupId === null) { render(); return; }
     loading = true;
     render();
     try {
       if (view === 'today') {
         const listed = await informationApi.items(groupId, true);
+        if (current !== seq) return;
         group = listed.group;
         items = listed.items;
       } else {
@@ -49,6 +53,7 @@ export function mountInformation(
           informationApi.items(groupId, true, { review: true }),
           informationApi.reviews(groupId),
         ]);
+        if (current !== seq) return;
         summary = s;
         group = listed.group;
         items = listed.items;
@@ -62,8 +67,9 @@ export function mountInformation(
   }
 
   function render() {
+    if (destroyed) return;
     if (groupId === null) {
-      shell.innerHTML = `<div class="info-empty"><i data-lucide="newspaper"></i><h2>还没有资讯组</h2><p>在上方下拉菜单里新建一个资讯组。系统会默认保留「收藏夹」。</p></div>`;
+      shell.innerHTML = `<div class="info-empty"><i data-lucide="newspaper"></i><h2>还没有资讯组</h2><p>在上方下拉菜单里新建一个资讯组。系统会默认保留「资讯收藏栏」。</p></div>`;
       createIcons({ icons });
       return;
     }
@@ -72,14 +78,19 @@ export function mountInformation(
     bind();
   }
 
+  function viewTabs() {
+    return `<div class="info-view-tabs" role="tablist" aria-label="资讯功能">${(['today', 'review'] as const).map(mode => `<button type="button" role="tab" data-info-view="${mode}" aria-selected="${view === mode}"><i data-lucide="${mode === 'today' ? 'newspaper' : 'scan-search'}"></i>${mode === 'today' ? '今日资讯' : '深入点评'}</button>`).join('')}</div>`;
+  }
+
   function todayHtml() {
     const favorites = group?.kind === 'favorites';
     const head = `<header class="info-head">
       <div>
-        <h1>${esc(group?.name || (favorites ? '收藏夹' : '今日资讯'))}</h1>
+        <h1>${esc(favorites ? '资讯收藏栏' : group?.name || '今日资讯')}</h1>
         ${notice || fetchNotice ? `<p class="info-notice">${noticeMarkup()}</p>` : ''}
       </div>
-      <div class="info-head-actions">
+      <div class="info-head-actions" role="toolbar" aria-label="资讯工具栏">
+        ${viewTabs()}
         <button type="button" data-clear ${loading ? 'disabled' : ''}><i data-lucide="eraser"></i>清理历史信息</button>
         ${group?.kind === 'wechat' ? `<button type="button" data-weread-login ${loading ? 'disabled' : ''}><i data-lucide="qr-code"></i>登录微信读书</button>` : ''}
         ${favorites ? '' : `<button type="button" class="primary" data-fetch ${loading ? 'disabled' : ''}><i data-lucide="download" class="${loading ? 'is-spinning' : ''}"></i>获取今日信息</button>`}
@@ -126,9 +137,10 @@ export function mountInformation(
     const citeRow = `<p class="info-review-cites">今日点评引用 ${count} 条</p>`;
     const head = `<header class="info-head is-review">
       <div class="info-head-title"><h1>深入点评</h1>${citeRow}</div>
-      <div class="info-head-actions">
+      <div class="info-head-actions" role="toolbar" aria-label="资讯工具栏">
+        ${viewTabs()}
         <div class="info-review-action">
-          <button type="button" class="primary" data-review ${loading ? 'disabled' : ''}><i data-lucide="scan-search"></i>深入点评</button>
+          <button type="button" class="primary" data-review ${loading ? 'disabled' : ''}><i data-lucide="sparkles"></i>生成点评</button>
         </div>
       </div>
       <div data-review-thinking hidden></div>
@@ -136,7 +148,7 @@ export function mountInformation(
     if (loading && !summary) return `${head}<div class="info-state"><p>正在加载点评…</p></div>`;
     const list = reviews.length
       ? `<div class="info-review-list">${reviews.map(row => `<button type="button" class="info-review-row" data-review-id="${row.id}"><div><h3>${esc(row.review_date)}</h3><p>引用 ${row.item_refs?.length ?? 0} 条${row.sentiment ? ` · ${esc(row.sentiment)}` : ''}</p></div><i data-lucide="chevron-right"></i></button>`).join('')}</div>`
-      : '<div class="info-state"><p>还没有点评。获取今日资讯后，点击「深入点评」。</p></div>';
+      : '<div class="info-state"><p>还没有点评。获取今日资讯后，点击「生成点评」。</p></div>';
     return `${head}<div class="info-body">${list}</div>`;
   }
 
@@ -154,6 +166,13 @@ export function mountInformation(
   }
 
   function bind() {
+    shell.querySelectorAll<HTMLButtonElement>('[data-info-view]').forEach(button => {
+      button.addEventListener('click', () => {
+        const next = button.dataset.infoView as InformationView;
+        if (handlers?.onView) handlers.onView(next);
+        else { view = next; void load(); }
+      });
+    });
     shell.querySelector<HTMLButtonElement>('[data-fetch]')?.addEventListener('click', () => void runFetch());
     shell.querySelectorAll<HTMLButtonElement>('[data-weread-login]').forEach(button => {
       button.addEventListener('click', () => void runWereadLogin());
@@ -180,6 +199,7 @@ export function mountInformation(
 
   async function runWereadLogin(thenFetch = false) {
     const ok = await openWereadLoginDialog();
+    if (destroyed) return;
     if (ok && thenFetch) await runFetch(true);
     else if (ok) {
       notice = '微信读书已登录，可以获取今日信息。';
@@ -189,12 +209,13 @@ export function mountInformation(
   }
 
   async function runFetch(retried = false) {
-    if (!groupId) return;
+    if (destroyed || !groupId) return;
     loading = true;
     render();
     let needLogin = false;
     try {
       const result = await informationApi.fetchToday(groupId);
+      if (destroyed) return;
       if (result.login_required) {
         fetchNotice = null;
         notice = '微信读书未登录或已过期。';
@@ -219,9 +240,12 @@ export function mountInformation(
   }
 
   async function runClear() {
+    const projectId = group?.project_id;
+    if (!projectId) return;
     if (!await confirmClear()) return;
+    if (destroyed) return;
     try {
-      await informationApi.clear();
+      await informationApi.clear(projectId);
       await load();
     } catch (error) {
       onError(error);
@@ -234,6 +258,7 @@ export function mountInformation(
     const next = !item.favorited;
     try {
       await informationApi.favorite(id, next);
+      if (destroyed) return;
       if (next && group?.kind !== 'favorites' && handlers?.onOpenFavorites) {
         handlers.onOpenFavorites();
         return;
@@ -261,7 +286,7 @@ export function mountInformation(
   }
 
   async function runReview() {
-    if (!groupId) return;
+    if (destroyed || !groupId) return;
     const host = shell.querySelector<HTMLElement>('[data-review-thinking]');
     if (!host) return;
     host.hidden = false;
@@ -269,6 +294,7 @@ export function mountInformation(
     thinking.begin();
     try {
       await informationSkills.review({ group_id: groupId }, event => {
+        if (destroyed) return;
         if (event.type === 'thinking' && event.text) thinking.append(String(event.text));
         if (event.type === 'done') {
           thinking.finish();
@@ -284,13 +310,17 @@ export function mountInformation(
 
   return {
     show: async (id, nextView) => {
-      if (id !== groupId) { notice = ''; fetchNotice = null; }
+      if (destroyed) return;
+      if (id !== groupId) {
+        notice = ''; fetchNotice = null;
+        group = null; items = []; reviews = []; summary = null;
+      }
       groupId = id;
       view = nextView;
       await load();
     },
     refresh: load,
-    destroy: () => { section.replaceChildren(); },
+    destroy: () => { destroyed = true; seq++; section.replaceChildren(); },
   };
 }
 

@@ -445,6 +445,19 @@
   outline: none;
 }
 
+.plan-md-live-input .tiptap {
+  min-height: 100%;
+  outline: none;
+  counter-reset: calendar-item;
+}
+.plan-md-live-input .tiptap > ol { list-style: none; }
+.plan-md-live-input .tiptap > ol > li { counter-increment: calendar-item; position: relative; }
+.plan-md-live-input .tiptap > ol > li::before { content: counter(calendar-item) "."; position: absolute; right: calc(100% + 5px); }
+.plan-md-live-input .tiptap li > p { margin: 0; }
+.plan-md-live-input .tiptap ul { list-style-type: disc; }
+.plan-md-live-input .tiptap ul ul,
+.plan-md-live-input .tiptap ul[data-marker="circle"] { list-style-type: circle; }
+
 .plan-md-live-input:empty::before {
   content: attr(data-placeholder);
   color: #88929c;
@@ -964,6 +977,15 @@
   font-size: 14px;
   color: #21433c;
 }
+
+.calendar-todo-window .cal-todo-tabs{display:flex;align-items:center;gap:2px;margin-left:6px}
+.calendar-todo-window .cal-todo-tabs button:not(#sheet button){min-height:28px;min-width:52px;padding:3px 8px;border:0;border-radius:4px;background:transparent;color:#68767d;font-size:12px;white-space:nowrap}
+.calendar-todo-window .cal-todo-tabs button[aria-selected="true"]:not(#sheet button){background:#e4f2ed;color:#137565;font-weight:600}
+.calendar-todo-window .cal-todo-archive:not(#sheet button),.calendar-todo-window .cal-todo-delete:not(#sheet button){flex:0 0 28px;align-self:flex-start;width:28px;height:32px;min-height:32px;padding:0;border:0;background:transparent;border-radius:4px;color:#6d7e7b}
+.calendar-todo-window .cal-todo-delete:not(#sheet button){color:#986969}
+.calendar-todo-window .cal-todo-archive:not(#sheet button):hover{background:#e5f1ed;color:#147c6e}
+.calendar-todo-window .cal-todo-delete:not(#sheet button):hover{background:#f9ecec;color:#b23434}
+.calendar-todo-window .cal-todo-archive svg,.calendar-todo-window .cal-todo-delete svg{width:16px;height:16px}
 
 .calendar-todo-window .cal-todo-close {
   margin-left: auto;

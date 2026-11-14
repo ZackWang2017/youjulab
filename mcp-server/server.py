@@ -66,9 +66,6 @@ for _layer in (
     "account-service/endpoints",
     "embedding-service/service",
     "embedding-service/endpoints",
-    "information-service/repository",
-    "information-service/service",
-    "information-service/endpoints",
 ):
     sys.path.insert(0, str(HERE / _layer))
 
@@ -85,7 +82,6 @@ import wechat_article_endpoint  # noqa: E402
 import preset_news_endpoint  # noqa: E402
 import feed_endpoint  # noqa: E402
 import portfolio_endpoint  # noqa: E402
-import information_endpoint  # noqa: E402
 from access_token import bearer_matches, bearer_token  # noqa: E402
 from account_jwt import reset_claims, set_claims, verify  # noqa: E402
 from dotenv import load_dotenv  # noqa: E402
@@ -151,7 +147,6 @@ def _run_http() -> None:
     }
     _JWT_PREFIXES = (
         "/api/portfolio",
-        "/api/information",
         "/api/embeddings",
         "/api/scheduler",
         "/api/account/me",
@@ -208,7 +203,6 @@ def _run_http() -> None:
     feed_endpoint.register_routes(app, _CORS)
     portfolio_endpoint.register_routes(app, _CORS)
     portfolio_endpoint.mount_scheduler(app)
-    information_endpoint.register_routes(app, _CORS)
     import account_endpoint  # noqa: E402
     import embedding_endpoint  # noqa: E402
     account_endpoint.register_routes(app, _CORS)
@@ -233,7 +227,6 @@ def _run_http() -> None:
     print(f"account: http://{host}:{port}/api/account/{{health,register,login}}", file=sys.stderr)
     print(f"embeddings: POST http://{host}:{port}/api/embeddings", file=sys.stderr)
     print(f"portfolio: GET/POST http://{host}:{port}/api/portfolio/portfolios (Authorization: Bearer JWT)", file=sys.stderr)
-    print(f"information: GET/POST http://{host}:{port}/api/information/groups (Authorization: Bearer JWT)", file=sys.stderr)
     print(f"scheduler: GET http://{host}:{port}/api/scheduler/tasks, POST /api/scheduler/tasks/{{name}}/run", file=sys.stderr)
     uvicorn.run(app, host=host, port=port, log_level="info")
 

@@ -5,6 +5,9 @@ python-dotenv>=1.0,<2
 python-multipart>=0.0.9
 httpx>=0.27
 beautifulsoup4>=4.12,<5
+feedparser>=6.0,<7
+qrcode>=7.4,<9
+tzdata>=2024.1
 # 2.x 强制依赖 onnxruntime / pymupdf4llm / pymupdf-layout 等版面分析包（桌面包多 ~100MB，未使用）
 pymupdf>=1.24,<2
 # 仅 OFFICE_VECTOR_BACKEND=pg 时使用；桌面 sidecar 不打包

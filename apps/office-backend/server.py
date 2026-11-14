@@ -46,6 +46,7 @@ from web_document import import_web_document
 from quant_research.schema import default_strategy, strategy_content
 from quant_research.endpoints import register_routes as register_quant_routes
 from information_skills import iter_analyze_events, iter_impact_events, iter_keyword_events, iter_review_events  # noqa: E402
+from information.endpoints.information_endpoint import register_routes as register_information_routes
 from config import (  # noqa: E402
     mcp_remote_base,
     api_host,
@@ -247,6 +248,21 @@ class EncryptionBody(BaseModel):
     password: str = Field(min_length=1)
     password_confirm: str | None = None
     new_password: str | None = None
+
+
+class CopyAssetBody(BaseModel):
+    content: dict | list
+
+
+class ScreenLockPreferencesBody(BaseModel):
+    background: Literal['orbit', 'stars', 'lake'] = 'stars'
+    password_enabled: bool = False
+    current_password: str = Field(default='', max_length=128)
+    new_password: str = Field(default='', max_length=128)
+
+
+class ScreenUnlockBody(BaseModel):
+    password: str = Field(default='', max_length=128)
 
 
 class HistoryTurn(BaseModel):
@@ -453,6 +469,8 @@ def get_store(request: Request) -> Store:
 
 
 async def user_from(request: Request, store: Store = Depends(get_store)) -> dict:
+    from information.service.information_service import active_store
+    active_store.set(store)
     set_remote_token(request.headers.get("x-remote-token"))
     header = request.headers.get("authorization") or ""
     if not header.lower().startswith("bearer "):
@@ -513,7 +531,16 @@ def assets_of(store: Store, user: dict, project_id: str, kind: str | None = None
 
 
 def asset_of(store: Store, user: dict, asset_id: str) -> dict | None:
-    return store.asset(workspace_user_id(user), asset_id)
+    asset = store.asset(workspace_user_id(user), asset_id)
+    if asset and asset.get("kind") == "information":
+        from information.repository import information_repository as information_repo
+        group = information_repo.group_for_asset(workspace_user_id(user), asset_id)
+        content = asset.get("content")
+        if (not group or group.get("project_id") != asset.get("project_id")
+                or not isinstance(content, dict) or content.get("group_id") != group["id"]
+                or content.get("format") != "invp-information-group-v1"):
+            return None
+    return asset
 
 
 def file_password_of(request: Request, body_password: str | None = None) -> str:
@@ -605,6 +632,7 @@ def refresh_last_assets(
         "diagram": store.assets(user_id, project_id, "diagram"),
         "project_plan": store.assets(user_id, project_id, "project_plan"),
         "calendar": store.assets(user_id, project_id, "calendar"),
+        "information": store.assets(user_id, project_id, "information"),
     }
     prev = last or {}
     owner = user_doc if isinstance(user_doc, dict) else (store.user_by_id(user_id) or {})
@@ -868,6 +896,7 @@ def create_app(store: Store | None = None) -> FastAPI:
 
     app = FastAPI(title="office-backend", lifespan=lifespan)
     app.state.store = app_store
+    register_information_routes(app, user_from, get_store)
 
     # Electron 打包态用本机 HTTP 托管前端；同源访问远程 mcp，并避开 /assets API 路由抢静态资源。
     desktop = os.environ.get("OFFICE_DESKTOP", "").strip() in {"1", "true", "yes"}
@@ -938,6 +967,21 @@ def create_app(store: Store | None = None) -> FastAPI:
             "pdf_dir": str(file_root()),
             "pdf_dir_default": str(default_file_root()),
         }
+
+    @app.get('/local/screen-lock')
+    def get_screen_lock(user: dict = Depends(user_from)):
+        from screen_lock import preferences
+        return preferences(user['id'])
+
+    @app.put('/local/screen-lock')
+    def set_screen_lock(body: ScreenLockPreferencesBody, user: dict = Depends(user_from)):
+        from screen_lock import update_preferences
+        return update_preferences(user['id'], **body.model_dump())
+
+    @app.post('/local/screen-lock/unlock')
+    def unlock_screen(body: ScreenUnlockBody, user: dict = Depends(user_from)):
+        from screen_lock import unlock
+        return unlock(user['id'], body.password)
 
     @app.put("/local/preferences")
     def put_local_preferences(body: LocalPreferencesBody):
@@ -1241,6 +1285,8 @@ def create_app(store: Store | None = None) -> FastAPI:
         removed = store.delete_project(user["id"], project_id)
         if removed is None:
             raise HTTPException(404, "项目不存在。")
+        from information.repository import information_repository as information_repo
+        information_repo.delete_project_groups(user["id"], project_id)
         root = file_root()
         for asset in removed:
             if asset.get("kind") == "pdf":
@@ -1295,6 +1341,23 @@ def create_app(store: Store | None = None) -> FastAPI:
             raise HTTPException(400, "资产类型无效。")
         store.promote_user_assets(workspace_user_id(user))
         return {"assets": [public_asset(a) for a in assets_of(store, user, project_id, kind)]}
+
+    @app.get("/user-tools")
+    def user_tools(user: dict = Depends(user_from), store: Store = Depends(get_store)):
+        """托盘快速记录用：笔记本与日历（待办）挂在用户下，不依赖当前项目。"""
+        owner = workspace_user_id(user)
+        store.ensure_user_tools(owner)
+
+        def best(kind: str) -> dict | None:
+            listed = store.assets(owner, None, kind)
+            if not listed:
+                return None
+            # 历史绑定可能堆积多本；与前端 loadUserTool 一致取 revision 最高的
+            chosen = max(listed, key=lambda item: int(item.get("revision") or 0))
+            full = store.asset(owner, chosen["id"]) or chosen
+            return public_asset(full, include_content=True)
+
+        return {"notebook": best("notebook"), "calendar": best("calendar")}
 
     @app.get("/projects/{project_id}/pdf-folders")
     def get_pdf_folders(project_id: str, user: dict = Depends(user_from), store: Store = Depends(get_store)):
@@ -1355,6 +1418,28 @@ def create_app(store: Store | None = None) -> FastAPI:
             raise HTTPException(404, "项目不存在。")
         if body.kind not in KINDS:
             raise HTTPException(400, "资产类型无效。")
+        if body.kind == "information":
+            from information.service import information_service as information_service
+            token = information_service.active_store.set(store)
+            config = body.content if isinstance(body.content, dict) else {}
+            try:
+                group = information_service.create_group(user["id"], {
+                    "project_id": project_id, "name": body.name.strip(),
+                    "visibility": body.visibility,
+                    "kind": config.get("kind", "wechat"), "config": config.get("config", {}),
+                })
+            except information_service.InformationError as exc:
+                raise HTTPException(exc.status, str(exc)) from exc
+            finally:
+                information_service.active_store.reset(token)
+            asset = store.asset(user["id"], group["asset_id"])
+            owner = store.user_by_id(user["id"])
+            if owner:
+                last = {**empty_last_assets(), **dict(owner.get("last_assets") or {})}
+                last["information"] = asset["id"]
+                store.update_user(user["id"], last_project_id=project_id, last_assets=last,
+                                  recent_assets_by_project=recent_asset_histories(owner, project_id, asset["id"]))
+            return public_asset(asset, include_content=True)
         if body.source_url is not None and body.kind != "document":
             raise HTTPException(400, "来自互联网仅支持文档资产。")
         if body.kind == "sheet":
@@ -1427,7 +1512,7 @@ def create_app(store: Store | None = None) -> FastAPI:
             raise HTTPException(404, "项目不存在。")
         rows: list[dict] = []
         for asset_id in recent_asset_ids(owner, scope_project_id):
-            asset = store.asset(user["id"], asset_id)
+            asset = asset_of(store, user, asset_id)
             if not asset or asset.get("kind") not in KINDS:
                 continue
             asset_project_id = asset.get("project_id")
@@ -1448,7 +1533,7 @@ def create_app(store: Store | None = None) -> FastAPI:
 
         available: list[str] = []
         for asset_id in recent_asset_ids(owner, body.project_id):
-            asset = store.asset(user["id"], asset_id)
+            asset = asset_of(store, user, asset_id)
             if not asset or asset.get("kind") not in KINDS:
                 continue
             asset_project_id = asset.get("project_id")
@@ -1494,6 +1579,8 @@ def create_app(store: Store | None = None) -> FastAPI:
         if not asset:
             raise HTTPException(404, "文件不存在。")
         # meta=1 只回版本等元数据，供浏览器本地缓存命中时跳过整份 JSON。
+        if asset["kind"] == "information" and not project_of(store, user, asset.get("project_id") or ""):
+            raise HTTPException(404, "文件不存在。")
         include = meta != 1
         if include and is_encrypted(asset.get("content")):
             password = file_password_of(request)
@@ -1501,6 +1588,56 @@ def create_app(store: Store | None = None) -> FastAPI:
                 return public_asset(asset, include_content=True)
             return public_asset(asset, include_content=True, plaintext=unlock_sheet_content(asset, password))
         return public_asset(asset, include_content=include)
+
+    @app.post('/assets/{asset_id}/copy')
+    def copy_asset(asset_id: str, body: CopyAssetBody, request: Request,
+                   user: dict = Depends(user_from), store: Store = Depends(get_store)):
+        from copy import deepcopy
+        import shutil
+        source = asset_of(store, user, asset_id)
+        if not source:
+            raise HTTPException(404, '文件不存在。')
+        if source['kind'] not in {'sheet', 'document', 'pdf', 'mindmap', 'diagram', 'research', 'project_plan', 'strategy'}:
+            raise HTTPException(400, '该资产不支持另存副本。')
+        password = file_password_of(request)
+        encrypted = is_encrypted(source.get('content'))
+        if encrypted:
+            if not password:
+                raise HTTPException(403, LOCKED_MESSAGE)
+            unlock_sheet_content(source, password)
+        owner = source['owner_id']
+        existing = {item['name'] for item in store.assets(owner, source.get('project_id'), source['kind'])}
+        base = source['name'][:65]
+        name = f'{base}（副本）'
+        count = 2
+        while name in existing:
+            name = f'{base}（副本 {count}）'
+            count += 1
+        asset = store.create_asset(owner, source.get('project_id'), source['kind'], name)
+        path = None
+        try:
+            content = deepcopy(body.content)
+            if source['kind'] == 'sheet' and isinstance(content, dict):
+                content['id'] = asset['id']
+            result = save_asset(asset['id'], SaveAssetBody(content=content, revision=0), request, user, store)
+            fields = {'visibility': source.get('visibility', 'project')}
+            if encrypted:
+                fields['content'] = encrypt_sheet(content, password, asset_id=asset['id'])
+            if source['kind'] == 'pdf' and source.get('file_path'):
+                original = resolve_asset_file_path(source['file_path'], source['id'])
+                if not original or not Path(original).is_file():
+                    raise HTTPException(404, 'PDF 原文件不存在，无法另存副本。')
+                path = file_root() / owner / (source.get('project_id') or 'personal') / f"{asset['id']}.pdf"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(original, path)
+                fields.update(file_path=str(path), filename=source.get('filename'), size=path.stat().st_size, index_status='pending')
+            updated = store.update_asset(owner, asset['id'], **fields)
+            return public_asset(updated, include_content=True, **({'plaintext': content} if encrypted else {}))
+        except Exception:
+            store.delete_asset(owner, asset['id'])
+            if path:
+                path.unlink(missing_ok=True)
+            raise
 
     @app.put("/assets/{asset_id}")
     def save_asset(
@@ -1513,15 +1650,27 @@ def create_app(store: Store | None = None) -> FastAPI:
         asset = asset_of(store, user, asset_id)
         if not asset:
             raise HTTPException(404, "文件不存在。")
+        if asset["kind"] == "information":
+            if not project_of(store, user, asset.get("project_id") or ""):
+                raise HTTPException(404, "文件不存在。")
+            from information.repository import information_repository as information_repo
+            group = information_repo.group_for_asset(asset["owner_id"], asset_id)
+            if group and group["kind"] == "favorites" and body.name is not None:
+                raise HTTPException(400, "资讯收藏栏不能修改。")
+            if body.content is not None:
+                raise HTTPException(400, "资讯资产内容由资讯组管理。")
         if body.revision is not None and body.revision != asset.get("revision", 0):
             raise HTTPException(409, "内容已在其他会话更新，请重新打开。")
         fields: dict = {"revision": asset.get("revision", 0) + 1}
         if body.name is not None:
             fields["name"] = body.name.strip()
         if body.visibility is not None:
-            if not supports_scoped_visibility(str(asset.get("kind") or "")):
+            if asset['kind'] == 'information':
+                fields['visibility'] = body.visibility
+                fields['information_scope_version'] = 1
+            elif not supports_scoped_visibility(str(asset.get("kind") or "")):
                 raise HTTPException(400, "该资产不支持修改可见范围。")
-            if body.visibility == "user":
+            elif body.visibility == "user":
                 fields["visibility"] = "user"
                 fields["project_id"] = None
             else:
@@ -1579,12 +1728,14 @@ def create_app(store: Store | None = None) -> FastAPI:
                 plaintext = body.content
             else:
                 fields["content"] = body.content
-        if asset['kind'] in ('diagram', 'sheet'):
-            updated = store.update_asset(asset['owner_id'], asset_id, expected_revision=asset.get('revision', 0), **fields)
-            if not updated:
-                raise HTTPException(409, '内容已更新，请重新读取后合并修改。')
-        else:
-            updated = store.update_asset(asset["owner_id"], asset_id, **fields)
+        updated = store.update_asset(asset['owner_id'], asset_id, expected_revision=asset.get('revision', 0), **fields)
+        if not updated:
+            raise HTTPException(409, '内容已更新，请重新读取后合并修改。')
+        if asset["kind"] == "information" and body.name is not None:
+            from information.repository import information_repository as information_repo
+            group = information_repo.group_for_asset(asset["owner_id"], asset_id)
+            if group:
+                information_repo.update_group(asset["owner_id"], group["id"], fields["name"], information_repo.public_group(group)["config"])
         if plaintext is not None:
             return public_asset(updated, include_content=True, plaintext=plaintext)
         if is_encrypted((updated or {}).get("content")):
@@ -1645,7 +1796,20 @@ def create_app(store: Store | None = None) -> FastAPI:
             raise HTTPException(404, "文件不存在。")
         visible_project = asset.get("project_id") or user.get("last_project_id")
         same = store.assets(user["id"], visible_project, asset["kind"])
-        if asset["kind"] not in ("pdf", "outline_template", "strategy", "diagram") and len(same) <= 1:
+        if asset["kind"] == "information":
+            from information.service import information_service as information_service
+            from information.repository import information_repository as information_repo
+            group = information_repo.group_for_asset(user["id"], asset_id)
+            if not group:
+                raise HTTPException(404, "资讯组不存在。")
+            token = information_service.active_store.set(store)
+            try:
+                information_service.delete_group(user["id"], group["id"])
+            except information_service.InformationError as exc:
+                raise HTTPException(exc.status, str(exc)) from exc
+            finally:
+                information_service.active_store.reset(token)
+        if asset["kind"] not in ("pdf", "outline_template", "strategy", "diagram", "information") and len(same) <= 1:
             raise HTTPException(400, "该类型至少保留一份。")
         store.delete_asset(user["id"], asset_id)
         if asset["kind"] == "sheet":
@@ -1668,6 +1832,7 @@ def create_app(store: Store | None = None) -> FastAPI:
         store.update_user(user["id"], last_assets=last, recent_assets_by_project=recent)
         return {"ok": True}
 
+    @app.post("/assets/{asset_id}/open")
     @app.post("/assets/{asset_id}/select")
     def select_asset(
         asset_id: str,
@@ -1675,8 +1840,10 @@ def create_app(store: Store | None = None) -> FastAPI:
         user: dict = Depends(user_from),
         store: Store = Depends(get_store),
     ):
-        asset = store.asset(user["id"], asset_id)
+        asset = asset_of(store, user, asset_id)
         if not asset:
+            raise HTTPException(404, "文件不存在。")
+        if asset["kind"] == "information" and not project_of(store, user, asset.get("project_id") or ""):
             raise HTTPException(404, "文件不存在。")
         last = dict(store.user_by_id(user["id"])["last_assets"])
         last[asset["kind"]] = asset["id"]
@@ -2074,7 +2241,7 @@ def create_app(store: Store | None = None) -> FastAPI:
 
         async def events():
             try:
-                async for event in iter_impact_events(body.group_id, body.item_ids):
+                async for event in iter_impact_events(_user['id'], body.group_id, body.item_ids):
                     yield sse_pack(event)
             except ValueError as exc:
                 yield sse_pack({"type": "error", "error": str(exc)})
@@ -2093,7 +2260,7 @@ def create_app(store: Store | None = None) -> FastAPI:
 
         async def events():
             try:
-                async for event in iter_analyze_events(body.item_id):
+                async for event in iter_analyze_events(_user['id'], body.item_id):
                     yield sse_pack(event)
             except ValueError as exc:
                 yield sse_pack({"type": "error", "error": str(exc)})
@@ -2112,7 +2279,7 @@ def create_app(store: Store | None = None) -> FastAPI:
 
         async def events():
             try:
-                async for event in iter_review_events(body.group_id):
+                async for event in iter_review_events(_user['id'], body.group_id):
                     yield sse_pack(event)
             except ValueError as exc:
                 yield sse_pack({"type": "error", "error": str(exc)})

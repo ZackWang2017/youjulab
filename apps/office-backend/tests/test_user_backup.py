@@ -85,6 +85,46 @@ class UserBackupTests(unittest.TestCase):
         self.assertEqual(list((self.out/'office-files').iterdir()),[self.out/'office-files/a'])
         self.assertEqual(payload['tables']['user_model_configs'][0]['user_id'],'a')
 
+    def add_information(self):
+        from information.repository.information_repository import initialize_schema
+        with sqlite3.connect(self.office) as conn:
+            initialize_schema(conn)
+            for index, uid in enumerate(('a', 'b'), 1):
+                conn.execute('INSERT INTO information_groups (id,owner_id,name,kind) VALUES (?,?,?,?)',
+                             (index, uid, 'news-'+uid, 'finance_api'))
+                conn.execute('INSERT INTO information_items (id,owner_id,group_id,source_kind,source_name,title,fetched_date) VALUES (?,?,?,?,?,?,?)',
+                             (index, uid, index, 'finance_api', 'source', 'news-item-'+uid, '2026-11-11'))
+
+    def test_information_backed_up_and_restored_per_user(self):
+        self.add_information()
+        payload = self.export()
+        self.assertEqual(len(payload['information']['information_groups']), 1)
+        self.assertEqual(payload['information']['information_items'][0]['title'], 'news-item-a')
+        self.assertNotIn('news-item-b', json.dumps(payload))
+        with sqlite3.connect(self.office) as conn:
+            conn.execute("UPDATE information_items SET title='changed-' || owner_id")
+        self.restore()
+        with sqlite3.connect(self.office) as conn:
+            self.assertEqual(conn.execute('SELECT title FROM information_items ORDER BY id').fetchall(),
+                             [('news-item-a',), ('changed-b',)])
+
+    def test_old_backup_keeps_current_information(self):
+        self.add_information()
+        payload = self.export()
+        del payload['information']
+        (self.out/'user-data.json').write_text(json.dumps(payload))
+        self.restore()
+        with sqlite3.connect(self.office) as conn:
+            self.assertEqual(conn.execute('SELECT count(*) FROM information_items').fetchone()[0], 2)
+
+    def test_foreign_information_restore_is_rejected(self):
+        self.add_information()
+        payload = self.export()
+        payload['information']['information_items'][0]['owner_id'] = 'b'
+        (self.out/'user-data.json').write_text(json.dumps(payload))
+        with self.assertRaisesRegex(ValueError, '其他账号'):
+            self.restore()
+
     def test_restore_only_changes_selected_user(self):
         self.export()
         with sqlite3.connect(self.office) as conn:

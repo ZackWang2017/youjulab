@@ -1,4 +1,4 @@
-export type Surface = 'sheet' | 'document' | 'pdf' | 'strategy' | 'mindmap' | 'research' | 'diagram' | 'project_plan' | 'calendar';
+export type Surface = 'sheet' | 'document' | 'pdf' | 'strategy' | 'mindmap' | 'research' | 'diagram' | 'project_plan' | 'calendar' | 'information';
 export interface Context {
   document_id: string;
   surface: Surface;
@@ -49,6 +49,8 @@ export interface EditorAdapter {
   snapshot?(): unknown;
   loadedAssetId?(): string;
   openTodos?(): void;
+  /** 托盘快速记录改了日历待办：只替换 todos；resave 表示本地有排队未存的修改需要重新快照。 */
+  applyRemoteTodos?(markdown: string, resave: boolean): void;
   persist?: () => Promise<void>;
 }
 export function download(name: string, value: string) {

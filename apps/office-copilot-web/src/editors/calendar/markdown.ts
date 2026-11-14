@@ -1,6 +1,9 @@
 import { getProcessor } from 'bytemd';
 import type { BytemdPlugin } from 'bytemd';
 import gfm from '@bytemd/plugin-gfm';
+import { Editor } from '@tiptap/core';
+import StarterKit from '@tiptap/starter-kit';
+import { circleBullet, nestedListTab } from '../rich-text-lists';
 
 const plugins: BytemdPlugin[] = [gfm()];
 
@@ -106,91 +109,26 @@ function mountLiveMarkdownEditor(target: HTMLElement, initial: string, placehold
   root.className = 'plan-md-editor plan-md-live';
   const input = document.createElement('div');
   input.className = 'plan-md plan-md-live-input';
-  input.contentEditable = 'true';
-  input.dataset.placeholder = placeholder || '写下今天的内容…';
-  fillPlanLines(input, initial);
-  refreshPlanNumbers(input);
   root.append(input);
   target.replaceChildren(root);
-
-  const onKeydown = (e: KeyboardEvent) => {
-    if (e.isComposing) return;
-    const line = currentPlanLine(input);
-    if (e.key === 'Tab') {
-      e.preventDefault();
-      if (!line) return;
-      const level = planLevel(line);
-      const next = e.shiftKey
-        ? Math.max(0, level < 0 ? 0 : level - 1)
-        : (level < 0 ? 0 : Math.min(2, level + 1));
-      line.dataset.level = String(next);
-      if (!line.textContent) line.innerHTML = '<br>';
-      refreshPlanNumbers(input);
-      placeCaretEnd(line);
-      return;
-    }
-    if (e.key !== 'Enter' || e.shiftKey) return;
-    e.preventDefault();
-    const current = line || ensurePlanLine(input);
-    const level = planLevel(current);
-    if (!(current.textContent || '').trim()) {
-      if (level > 0) current.dataset.level = String(level - 1);
-      else delete current.dataset.level;
-      refreshPlanNumbers(input);
-      placeCaretEnd(current);
-      return;
-    }
-    const next = createPlanLine(level < 0 ? '' : String(level));
-    current.after(next);
-    refreshPlanNumbers(input);
-    placeCaretEnd(next);
-  };
-  const onInput = () => {
-    const line = currentPlanLine(input);
-    if (!line || planLevel(line) >= 0) return;
-    const raw = line.textContent || '';
-    if (!/^\d+\.\s?/.test(raw) || caretOffset(line) > (raw.match(/^\d+\./)?.[0].length || 0)) return;
-    line.dataset.level = '0';
-    line.textContent = raw.replace(/^\d+\.\s?/, '');
-    if (!line.textContent) line.innerHTML = '<br>';
-    refreshPlanNumbers(input);
-    placeCaretEnd(line);
-  };
-  const onCopy = (event: ClipboardEvent) => {
-    writePlanClipboard(event, rowsFromEditorSelection(input));
-  };
-  const onCut = (event: ClipboardEvent) => {
-    const rows = rowsFromEditorSelection(input);
-    if (!writePlanClipboard(event, rows)) return;
-    removeEditorSelection(input);
-  };
-  const onPaste = (event: ClipboardEvent) => {
-    const rows = rowsFromClipboard(event.clipboardData);
-    if (!rows) return;
-    event.preventDefault();
-    insertPlanRows(input, rows);
-  };
-  input.addEventListener('keydown', onKeydown);
-  input.addEventListener('input', onInput);
-  input.addEventListener('copy', onCopy);
-  input.addEventListener('cut', onCut);
-  input.addEventListener('paste', onPaste);
-
+  const editor = new Editor({
+    element: input,
+    extensions: [StarterKit.configure({ bulletList: false }), circleBullet, nestedListTab],
+    content: renderMarkdown(initial),
+    editorProps: {
+      attributes: { 'aria-label': placeholder || '事项内容', 'data-placeholder': placeholder || '写下今天的内容…' },
+    },
+  });
   return {
-    getValue: () => planLinesToMarkdown(input),
-    focus: () => {
-      const last = input.querySelector<HTMLElement>('.plan-line:last-child') || ensurePlanLine(input);
-      last.focus();
-      placeCaretEnd(last);
+    getValue: () => {
+      const html = document.createElement('div');
+      html.innerHTML = editor.getHTML();
+      const lines = document.createElement('div');
+      lines.replaceChildren(...flattenPlan(html).map(row => createPlanLine(row.level, row.text)));
+      return planLinesToMarkdown(lines);
     },
-    destroy: () => {
-      input.removeEventListener('keydown', onKeydown);
-      input.removeEventListener('input', onInput);
-      input.removeEventListener('copy', onCopy);
-      input.removeEventListener('cut', onCut);
-      input.removeEventListener('paste', onPaste);
-      root.remove();
-    },
+    focus: () => { editor.commands.focus('end'); },
+    destroy: () => { editor.destroy(); root.remove(); },
   };
 }
 
@@ -203,12 +141,6 @@ export function bindRenderedPlanCopy(root: HTMLElement) {
   });
 }
 
-function fillPlanLines(input: HTMLElement, markdown: string) {
-  const tmp = document.createElement('div');
-  tmp.innerHTML = renderMarkdown(markdown);
-  const rows = flattenPlan(tmp);
-  input.replaceChildren(...(rows.length ? rows.map(row => createPlanLine(row.level, row.text)) : [createPlanLine('')]));
-}
 
 function flattenPlan(root: HTMLElement): { level: string; text: string }[] {
   const rows: { level: string; text: string }[] = [];
@@ -239,44 +171,14 @@ function createPlanLine(level: string, text = '') {
   return line;
 }
 
-function ensurePlanLine(input: HTMLElement) {
-  const line = createPlanLine('');
-  input.append(line);
-  return line;
-}
 
-function currentPlanLine(input: HTMLElement) {
-  const node = window.getSelection()?.anchorNode;
-  const el = node instanceof Element ? node : node?.parentElement;
-  const line = el?.closest('.plan-line');
-  return line && input.contains(line) ? line as HTMLElement : null;
-}
 
-function refreshPlanNumbers(input: HTMLElement) {
-  let number = 0;
-  input.querySelectorAll<HTMLElement>(':scope > .plan-line').forEach(line => {
-    if (line.dataset.level !== '0') {
-      delete line.dataset.num;
-      return;
-    }
-    number += 1;
-    line.dataset.num = String(number);
-  });
-}
 
 function planLevel(line: HTMLElement) {
   const level = line.dataset.level;
   return level === '0' || level === '1' || level === '2' ? Number(level) : -1;
 }
 
-function caretOffset(line: HTMLElement) {
-  const sel = window.getSelection();
-  if (!sel?.anchorNode || !line.contains(sel.anchorNode)) return 0;
-  const range = sel.getRangeAt(0).cloneRange();
-  range.selectNodeContents(line);
-  range.setEnd(sel.anchorNode, sel.anchorOffset);
-  return range.toString().length;
-}
 
 function planLinesToMarkdown(input: HTMLElement) {
   const chunks: string[] = [];
@@ -314,103 +216,10 @@ function writePlanClipboard(event: ClipboardEvent, rows: PlanRow[] | null) {
   return true;
 }
 
-function rowsFromEditorSelection(input: HTMLElement): PlanRow[] | null {
-  const range = selectionRange();
-  if (!range || range.collapsed || !input.contains(range.commonAncestorContainer)) return null;
-  const lines = planLineElements(input).filter(line => range.intersectsNode(line));
-  if (!lines.length) return null;
-  if (lines.length === 1 && !lineFullySelected(lines[0], range)) return null;
-  const rows = lines.map(line => ({
-    level: line.dataset.level || '',
-    text: selectedLineText(line, range),
-    num: line.dataset.num,
-  })).filter(row => row.text);
-  return rows.length ? rows : null;
-}
 
-function removeEditorSelection(input: HTMLElement) {
-  const range = selectionRange();
-  if (!range) return;
-  const lines = planLineElements(input).filter(line => range.intersectsNode(line));
-  if (!lines.length) return;
-  const next = lines[lines.length - 1].nextSibling;
-  lines.forEach(line => line.remove());
-  const empty = createPlanLine('');
-  if (next) input.insertBefore(empty, next);
-  else input.append(empty);
-  if (planLineElements(input).length > 1 && !(empty.textContent || '').trim()) empty.remove();
-  if (!planLineElements(input).length) input.append(empty);
-  refreshPlanNumbers(input);
-  placeCaretEnd(planLineElements(input).at(-1) || empty);
-}
 
-function rowsFromClipboard(data: DataTransfer | null): PlanRow[] | null {
-  if (!data) return null;
-  const html = data.getData('text/html');
-  if (/<(ol|ul)\b/i.test(html)) {
-    const tmp = document.createElement('div');
-    tmp.innerHTML = html;
-    const rows = flattenPlan(tmp).filter(row => row.text);
-    if (rows.length) return rows;
-  }
-  return rowsFromPlain(data.getData('text/plain'));
-}
 
-function rowsFromPlain(text: string): PlanRow[] | null {
-  const lines = text.replace(/\r\n/g, '\n').replace(/\n$/, '').split('\n');
-  if (!lines.some(line => /^\s*(?:\d+[.)]|[-*•◦])\s+/.test(line))) return null;
-  return lines.map(line => {
-    const numbered = line.match(/^\s*\d+[.)]\s+(.*)$/);
-    if (numbered) return { level: '0', text: numbered[1] };
-    const bullet = line.match(/^(\s*)(?:[-*]|•|◦)\s+(.*)$/);
-    if (bullet) {
-      const indent = bullet[1].replace(/\t/g, '    ').length;
-      return { level: indent >= 8 ? '2' : '1', text: bullet[2] };
-    }
-    return { level: '', text: line.trim() };
-  }).filter((row, index, all) => row.text || (index > 0 && index < all.length - 1));
-}
 
-function insertPlanRows(input: HTMLElement, rows: PlanRow[]) {
-  const cleaned = rows.filter((row, index) => row.text || (index > 0 && index < rows.length - 1));
-  if (!cleaned.length) return;
-  const created = cleaned.map(row => createPlanLine(row.level, row.text));
-  const range = selectionRange();
-  const lines = planLineElements(input);
-  const hit = range && !range.collapsed ? lines.filter(line => range.intersectsNode(line)) : [];
-  const replace = hit.length > 1 || (hit.length === 1 && range != null && lineFullySelected(hit[0], range));
-  if (replace) {
-    const next = hit[hit.length - 1].nextSibling;
-    hit.forEach(line => line.remove());
-    const fragment = document.createDocumentFragment();
-    created.forEach(line => fragment.append(line));
-    if (next) input.insertBefore(fragment, next);
-    else input.append(fragment);
-    refreshPlanNumbers(input);
-    placeCaretEnd(created[created.length - 1]);
-    return;
-  }
-  const line = currentPlanLine(input) || ensurePlanLine(input);
-  if (!(line.textContent || '').trim()) {
-    line.replaceWith(...created);
-    refreshPlanNumbers(input);
-    placeCaretEnd(created[created.length - 1]);
-    return;
-  }
-  const offset = caretOffset(line);
-  const raw = line.textContent || '';
-  if (offset <= 0) line.before(...created);
-  else if (offset >= raw.length) line.after(...created);
-  else {
-    const kept = planLevel(line);
-    line.textContent = raw.slice(0, offset);
-    const tail = createPlanLine(kept < 0 ? '' : String(kept), raw.slice(offset));
-    line.after(tail);
-    tail.before(...created);
-  }
-  refreshPlanNumbers(input);
-  placeCaretEnd(created[created.length - 1]);
-}
 
 function rowsToPlain(rows: PlanRow[]) {
   return rows.map(row => {
@@ -528,9 +337,6 @@ function visibleNumber(li: HTMLElement) {
   return String(siblings.indexOf(li) + 1);
 }
 
-function planLineElements(input: HTMLElement) {
-  return [...input.querySelectorAll<HTMLElement>(':scope > .plan-line')];
-}
 
 function selectionRange() {
   const sel = window.getSelection();
@@ -538,17 +344,7 @@ function selectionRange() {
   return sel.getRangeAt(0);
 }
 
-function lineFullySelected(line: HTMLElement, range: Range) {
-  const probe = document.createRange();
-  probe.selectNodeContents(line);
-  return range.compareBoundaryPoints(Range.START_TO_START, probe) <= 0
-    && range.compareBoundaryPoints(Range.END_TO_END, probe) >= 0;
-}
 
-function selectedLineText(line: HTMLElement, range: Range) {
-  if (lineFullySelected(line, range)) return (line.textContent || '').trim();
-  return selectedNodeText(line, range);
-}
 
 function selectedNodeText(node: Node, range: Range) {
   const probe = document.createRange();
@@ -561,14 +357,4 @@ function selectedNodeText(node: Node, range: Range) {
 
 function escapeHtml(text: string) {
   return text.replace(/[&<>"]/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[char] || char));
-}
-
-function placeCaretEnd(el: HTMLElement) {
-  const sel = window.getSelection();
-  if (!sel) return;
-  const range = document.createRange();
-  range.selectNodeContents(el);
-  range.collapse(false);
-  sel.removeAllRanges();
-  sel.addRange(range);
 }

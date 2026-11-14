@@ -15,7 +15,7 @@ import { office, AuthError } from './office-client/client';
 import {
   offlineMode, remoteBase, remoteEmail, remoteHealthy, remoteLogin, remoteRegister,
   remoteToken, setOfflineMode, setRemoteBase, setRemoteEmail, setRemoteToken,
-  RemoteAuthError, RemoteDownError,
+  RemoteAuthError, RemoteDownError, type AssetChange,
 } from './remote/client';
 import { renderPatch } from './patches/preview';
 import type { Context, EditorAdapter, Patch, Surface } from './context/types';
@@ -23,21 +23,22 @@ import { persist, saved } from './context/types';
 import {
   assetNeedsUnlock, bindLocalAccount, bootstrap, createAsset, createProject, discardSave, flushSave, getAsset, hasUnsavedWork, logout, openAsset, queueSave,
   dismissRecentAsset, loadRecentAssets, lockEncryptedAsset, rememberRevision, renameAsset, renameProject, reorderRecentAssets, retrySave, selectProject, updateAsset, uploadPdf,
-  clearFilePassword, setFilePassword, cacheAsset, login as localLogin,
+  clearFilePassword, setFilePassword, cacheAsset, login as localLogin, hasQueuedSave, knownRevision, resolveSaveConflict,
   type Asset, type Kind, type Workspace,
 } from './workspace/session';
 import { promptSheetPassword } from './editors/sheet/encryption-dialog';
 import {
-  alertSaveError, askConfirm, askDiagramCreate, askDocumentCreate, askProjectPlanCreate, askScopedAssetEdit, askSheetCreate, askStrategyCreate, askText,
+  alertSaveError, askSaveConflict, askConfirm, askDiagramCreate, askDocumentCreate, askProjectPlanCreate, askScopedAssetEdit, askSheetCreate, askStrategyCreate, askText,
   renderAuth, renderChrome, renderNav, type InformationNavState, type InformationNavView, type PortfolioNavState, type PortfolioNavView,
 } from './workspace/nav';
 import { mountPortfolio, type PortfolioController } from './portfolio';
 import { ALL_PORTFOLIOS_ID, ALL_PORTFOLIOS_NAME, portfolioApi } from './portfolio/api';
 import { mountInformation, type InformationController } from './information';
 import { informationApi } from './information/api';
-import { openGroupDialog } from './information/dialogs';
+import { closeInformationDialogs, openGroupDialog } from './information/dialogs';
 import { openCalcWindow } from './workspace/calc-window';
-import { openNotebookWindow, showNotebookLoadError, notebookContainsFocus, saveNotebookNow } from './workspace/notebook-window';
+import { showScreenLock } from './workspace/screen-lock';
+import { applyRemoteNotebook, openNotebookWindow, showNotebookLoadError, notebookContainsFocus, saveNotebookNow } from './workspace/notebook-window';
 import { loadPdfFolders, placePdf, savePdfFolders } from './workspace/pdf-folders';
 import { loadDocumentFolders, placeDocument, saveDocumentFolders } from './workspace/document-folders';
 import {
@@ -415,6 +416,43 @@ window.addEventListener('office-document-replaced', event => {
   void showWrittenDocument(detail.id, detail.archived_name ? `文档已归档为${detail.archived_name}` : '已换新文档');
 });
 
+window.addEventListener('office-save-conflict', event => {
+  const id = (event as CustomEvent<{ id: string }>).detail.id;
+  const owner = workspace;
+  if (!owner) return;
+  noteSaved('等待处理保存冲突');
+  void (async () => {
+    while (workspace === owner) {
+      const action = await askSaveConflict();
+      let resolved = false;
+      const busy = document.createElement('div');
+      busy.className = 'dialog-overlay';
+      busy.innerHTML = '<div class="name-dialog" role="status" aria-live="polite">正在处理，请稍候…</div>';
+      document.body.append(busy);
+      try {
+        const asset = await resolveSaveConflict(id, action);
+        resolved = true;
+        if (workspace !== owner) return;
+        const kind = asset.kind as Kind;
+        owner.assets[kind] = action === 'copy'
+          ? [...owner.assets[kind], asset]
+          : owner.assets[kind].map(item => item.id === id ? asset : item);
+        if (action === 'copy') await chooseAsset(kind, asset.id);
+        else {
+          owner.selected[kind] = asset;
+          await loadEditor(kind);
+          paintNav(); refresh();
+        }
+        noteSaved(action === 'copy' ? '已另存副本' : action === 'discard' ? '已加载其他会话内容' : '已保存');
+        return;
+      } catch (error) {
+        fail(error instanceof Error ? error.message : String(error));
+        if (resolved) return;
+      } finally { busy.remove(); }
+    }
+  })();
+});
+
 window.addEventListener('office-save-error', e => {
   const detail = String((e as CustomEvent).detail || '无法写入工作区服务。');
   noteSaved('保存失败');
@@ -479,6 +517,80 @@ function run(action: () => Promise<void>) {
   });
 }
 
+function openTodosTool() {
+  void run(async () => {
+    const owner = workspace;
+    const asset = owner?.selected.calendar;
+    if (!asset || !editors) throw new Error('日历尚未加载，请稍后重试。');
+    if (editors.calendar.loadedAssetId?.() !== asset.id) await loadEditor('calendar');
+    if (workspace !== owner || editors.calendar.loadedAssetId?.() !== asset.id) return;
+    editors.calendar.openTodos?.();
+  });
+}
+
+function openNotebookTool() {
+  void run(async () => {
+    if (!workspace) return;
+    let notebook = workspace.notebook;
+    if (!notebook) {
+      openNotebookWindow({ id: '', revision: 0 });
+      try {
+        const response = await office.json<{ assets: Asset[] }>(
+          `/projects/${workspace.project.id}/assets?kind=notebook`,
+        );
+        let listed = response.assets.reduce<Asset | undefined>((best, item) => (
+          !best || (item.revision || 0) > (best.revision || 0) ? item : best
+        ), undefined);
+        if (!listed) {
+          listed = await office.json<Asset>(`/projects/${workspace.project.id}/assets`, {
+            method: 'POST',
+            body: JSON.stringify({ kind: 'notebook', name: '笔记本', visibility: 'user' }),
+          });
+        }
+        notebook = await getAsset(listed.id);
+        workspace.notebook = notebook;
+      } catch (error) {
+        showNotebookLoadError(error instanceof Error ? error.message : String(error));
+        throw error;
+      }
+    }
+    openNotebookWindow(notebook);
+  });
+}
+
+/** 托盘快速记录（或另一个窗口）保存了笔记本 / 日历：拉最新版本并局部刷新，不打断当前编辑。 */
+async function applyRemoteAssetChange(change: AssetChange) {
+  const owner = workspace;
+  if (!owner || change.revision <= knownRevision(change.id)) return;
+  if (change.kind === 'notebook') {
+    if (owner.notebook && owner.notebook.id !== change.id) return;
+    const fresh = await getAsset(change.id, { force: true });
+    if (workspace !== owner) return;
+    owner.notebook = fresh;
+    applyRemoteNotebook(fresh);
+    return;
+  }
+  const calendar = owner.selected.calendar;
+  if (!calendar || calendar.id !== change.id) return;
+  const pendingLocal = hasQueuedSave(change.id);
+  const fresh = await getAsset(change.id, { force: true });
+  if (workspace !== owner) return;
+  owner.selected.calendar = fresh;
+  const todos = (fresh.content as { todos?: unknown } | undefined)?.todos;
+  if (editors?.calendar.loadedAssetId?.() === change.id) {
+    editors.calendar.applyRemoteTodos?.(typeof todos === 'string' ? todos : '', pendingLocal);
+  }
+}
+
+window.youju?.onAssetChanged?.(change => {
+  void applyRemoteAssetChange(change).catch(error => console.warn('[office] 同步快速记录失败', error));
+});
+window.youju?.onOpenMainTool?.(tool => {
+  if (!ready) return;
+  if (tool === 'notebook') openNotebookTool();
+  else openTodosTool();
+});
+
 async function showWrittenDocument(id: string, note: string) {
   const asset = await getAsset(id);
   if (workspace) {
@@ -494,6 +606,7 @@ async function showWrittenDocument(id: string, note: string) {
 
 function paintNav() {
   if (!workspace) return;
+  const informationOwner = workspace;
   renderNav(workspace, surface, {
     onSurface: kind => { void switchSurface(kind); },
     onSelectAsset: (kind, id) => { void run(() => chooseAsset(kind, id)); },
@@ -520,45 +633,8 @@ function paintNav() {
       const calc = workspace?.calc;
       openCalcWindow(calc, calc ? content => queueSave(calc.id, content) : undefined);
     },
-    onOpenTodos: () => {
-      void run(async () => {
-        const owner = workspace;
-        const asset = owner?.selected.calendar;
-        if (!asset || !editors) throw new Error('日历尚未加载，请稍后重试。');
-        if (editors.calendar.loadedAssetId?.() !== asset.id) await loadEditor('calendar');
-        if (workspace !== owner || editors.calendar.loadedAssetId?.() !== asset.id) return;
-        editors.calendar.openTodos?.();
-      });
-    },
-    onOpenNotebook: () => {
-      void run(async () => {
-        if (!workspace) return;
-        let notebook = workspace.notebook;
-        if (!notebook) {
-          openNotebookWindow({ id: '', revision: 0 });
-          try {
-            const response = await office.json<{ assets: Asset[] }>(
-              `/projects/${workspace.project.id}/assets?kind=notebook`,
-            );
-            let listed = response.assets.reduce<Asset | undefined>((best, item) => (
-              !best || (item.revision || 0) > (best.revision || 0) ? item : best
-            ), undefined);
-            if (!listed) {
-              listed = await office.json<Asset>(`/projects/${workspace.project.id}/assets`, {
-                method: 'POST',
-                body: JSON.stringify({ kind: 'notebook', name: '笔记本', visibility: 'user' }),
-              });
-            }
-            notebook = await getAsset(listed.id);
-            workspace.notebook = notebook;
-          } catch (error) {
-            showNotebookLoadError(error instanceof Error ? error.message : String(error));
-            throw error;
-          }
-        }
-        openNotebookWindow(notebook);
-      });
-    },
+    onOpenTodos: openTodosTool,
+    onOpenNotebook: openNotebookTool,
     onOpenPortfolio: () => { void run(() => enterPortfolio()); },
     onClosePortfolio: () => { if (appView === 'portfolio' || appView === 'information') void run(() => switchSurface(surface)); },
     onSelectPortfolio: id => { void run(() => showPortfolio(id, portfolioNav.view)); },
@@ -594,16 +670,22 @@ function paintNav() {
     onSelectInformation: id => { void run(() => showInformation(id, informationNav.view)); },
     onInformationView: view => { void run(() => showInformation(informationNav.currentId, view)); },
     onNewInformation: () => { void run(async () => {
-      const created = await openGroupDialog();
-      if (!created) return;
-      informationNav.items = await informationApi.list();
+      const created = await openGroupDialog(informationOwner.project.id);
+      if (!created || workspace !== informationOwner) return;
+      const items = await informationApi.list(informationOwner.project.id);
+      if (workspace !== informationOwner) return;
+      informationNav.items = items;
       await showInformation(created.id, 'today');
     }); },
     onRenameInformation: id => { void run(async () => {
-      const groups = await informationApi.list();
+      const groups = await informationApi.list(informationOwner.project.id);
+      if (workspace !== informationOwner) return;
       const full = groups.find(group => group.id === id);
-      if (!full || !await openGroupDialog(full)) return;
-      informationNav.items = await informationApi.list();
+      if (!full || !await openGroupDialog(informationOwner.project.id, full)) return;
+      if (workspace !== informationOwner) return;
+      const items = await informationApi.list(informationOwner.project.id);
+      if (workspace !== informationOwner) return;
+      informationNav.items = items;
       paintNav(); footer();
       await informationController?.refresh();
     }); },
@@ -611,8 +693,12 @@ function paintNav() {
       const item = informationNav.items.find(group => group.id === id);
       if (!item) return;
       if (!await askConfirm(`删除资讯组「${item.name}」？该组下未收藏的资讯会一并删除。`)) return;
+      if (workspace !== informationOwner) return;
       await informationApi.remove(id);
-      informationNav.items = await informationApi.list();
+      if (workspace !== informationOwner) return;
+      const items = await informationApi.list(informationOwner.project.id);
+      if (workspace !== informationOwner) return;
+      informationNav.items = items;
       const next = informationNav.currentId === id ? (informationNav.items[0]?.id ?? null) : informationNav.currentId;
       await showInformation(next, informationNav.view);
     }); },
@@ -684,26 +770,12 @@ async function showPortfolio(id: number | null, view: PortfolioNavView) {
   await portfolioController?.show(id, view);
 }
 
-async function enterInformation() {
+async function enterInformation(requestedId?: number, trackRecent = false) {
   closeAllMenus();
-  if (offlineMode()) {
-    openRemoteLogin(async () => { await enterInformation(); });
-    return;
-  }
-  if (!(await remoteHealthy())) {
-    fail(new RemoteDownError('服务器不可用。'));
-    return;
-  }
-  let items;
-  try {
-    items = await informationApi.list();
-  } catch (e) {
-    if (e instanceof RemoteAuthError) {
-      openRemoteLogin(async () => { await enterInformation(); });
-      return;
-    }
-    throw e;
-  }
+  const owner = workspace;
+  if (!owner) return;
+  const items = await informationApi.list(owner.project.id);
+  if (!owner || workspace !== owner) return;
   informationNav.items = items;
   appView = 'information';
   persist('office-view', 'information');
@@ -714,22 +786,49 @@ async function enterInformation() {
         const favorites = informationNav.items.find(item => item.kind === 'favorites');
         if (favorites) void run(() => showInformation(favorites.id, 'today'));
       },
+      onView: view => { void run(() => showInformation(informationNav.currentId, view, false)); },
     });
   }
-  const remembered = Number(saved('office-information-id'));
+  const remembered = Number(saved(`office-information-id:${workspace.user.id}:${workspace.project.id}`));
   const valid = (id: number | null) => id !== null && informationNav.items.some(item => item.id === id);
-  const currentId = valid(informationNav.currentId) ? informationNav.currentId
+  const currentId = requestedId !== undefined && valid(requestedId) ? requestedId : valid(informationNav.currentId) ? informationNav.currentId
     : valid(remembered) ? remembered
     : (informationNav.items[0]?.id ?? null);
-  const view = saved('office-information-view');
-  await showInformation(currentId, view === 'review' ? 'review' : informationNav.view);
+  const view = saved(`office-information-view:${workspace.user.id}:${workspace.project.id}`);
+  await showInformation(currentId, view === 'review' ? 'review' : 'today', trackRecent);
 }
 
-async function showInformation(id: number | null, view: InformationNavView) {
+async function showInformation(id: number | null, view: InformationNavView, trackRecent = true) {
+  if (!workspace) return;
+  const owner = workspace;
+  const group = informationNav.items.find(item => item.id === id);
+  if (group) {
+    const opened = await openAsset(group.asset_id, trackRecent);
+    if (workspace !== owner) return;
+    workspace.selected.information = opened.asset;
+    const listed = await office.json<{ assets: Asset[] }>(`/projects/${owner.project.id}/assets?kind=information`);
+    if (workspace !== owner) return;
+    workspace.assets.information = listed.assets.map(asset => ({
+      ...asset, name: informationNav.items.find(item => item.asset_id === asset.id)?.name || asset.name,
+      information_kind: informationNav.items.find(item => item.asset_id === asset.id)?.kind,
+    }));
+    if (trackRecent) {
+      const recent = await loadRecentAssets(owner.project.id);
+      if (workspace !== owner) return;
+      workspace.recentAssets = recent;
+    }
+  }
+  if (workspace !== owner) return;
+  appView = 'information';
+  surface = 'information';
+  persist('office-view', 'information');
+  persist('office-surface', surface);
+  document.querySelectorAll<HTMLElement>('.surface').forEach(el => { el.hidden = el.id !== 'information'; });
   informationNav.currentId = id;
   informationNav.view = view;
-  persist('office-information-id', id);
-  persist('office-information-view', view);
+  persist(`office-information-id:${workspace.user.id}:${workspace.project.id}`, id);
+  persist(`office-information-view:${workspace.user.id}:${workspace.project.id}`, view);
+  syncTaskModes();
   paintNav(); footer();
   window.dispatchEvent(new Event('resize'));
   await informationController?.show(id, view);
@@ -740,6 +839,7 @@ function closeAllMenus() {
 }
 
 async function switchSurface(kind: Kind) {
+  if (kind === 'information') { await enterInformation(); return; }
   if (appView === 'portfolio' || appView === 'information') {
     appView = 'workspace';
     persist('office-view', 'workspace');
@@ -794,6 +894,7 @@ function beginEditorRequest(kind: Kind) {
 }
 
 async function loadEditor(kind: Kind) {
+  if (kind === 'information') return;
   const currentRequest = beginEditorRequest(kind);
   const meta = workspace?.selected[kind];
   if (!editors || !meta) {
@@ -822,6 +923,15 @@ async function loadEditor(kind: Kind) {
 
 async function chooseAsset(kind: Kind, id: string, trackRecent = true) {
   if (!workspace || !editors) return;
+  if (kind === 'information') {
+    const owner = workspace;
+    const groups = await informationApi.list(owner.project.id);
+    if (workspace !== owner) return;
+    const group = groups.find(item => item.asset_id === id);
+    if (!group) throw new Error('资讯组已不存在或不在当前项目中。');
+    await enterInformation(group.id, trackRecent);
+    return;
+  }
   const currentRequest = beginEditorRequest(kind);
   // 已是当前打开的文件：只切到对应工作区，不再重新拉取/装载。
   if (kind !== 'research' && workspace.selected[kind]?.id === id && editors[kind].loadedAssetId?.() === id && !(kind === 'sheet' && assetNeedsUnlock(workspace.selected[kind]))) {
@@ -924,6 +1034,12 @@ async function closeRecentAsset(id: string) {
 
 async function addAsset(kind: Kind) {
   if (!workspace) return;
+  if (kind === 'information') {
+    const owner = workspace;
+    const created = await openGroupDialog(owner.project.id);
+    if (created && workspace === owner) await enterInformation(created.id, true);
+    return;
+  }
   if (kind === 'pdf') {
     document.querySelector<HTMLInputElement>('#pdf-file-input')?.click();
     return;
@@ -956,6 +1072,20 @@ async function addAsset(kind: Kind) {
 }
 
 async function deleteAsset(kind: Kind, id: string) {
+  if (kind === 'information' && workspace) {
+    const owner = workspace;
+    const group = (await informationApi.list(owner.project.id)).find(item => item.asset_id === id);
+    if (!group || workspace !== owner) return;
+    if (!await askConfirm(`删除资讯组「${group.name}」？`)) return;
+    if (workspace !== owner) return;
+    await informationApi.remove(group.id);
+    const recent = await loadRecentAssets(owner.project.id);
+    if (workspace !== owner) return;
+    workspace.recentAssets = recent;
+    workspace.selected.information = null;
+    await enterInformation(undefined, false);
+    return;
+  }
   if (!workspace || !editors || (kind !== 'document' && kind !== 'strategy' && kind !== 'diagram')) return;
   const current = workspace.assets[kind].find(item => item.id === id);
   if (!current) return;
@@ -1046,6 +1176,18 @@ async function deletePdf(id: string) {
 
 async function editAsset(kind: Kind, id: string) {
   if (!workspace) return;
+  if (kind === 'information') {
+    const owner = workspace;
+    const group = (await informationApi.list(owner.project.id)).find(item => item.asset_id === id);
+    if (!group || group.kind === 'favorites' || workspace !== owner) return;
+    const edited = await openGroupDialog(owner.project.id, group);
+    if (!edited || workspace !== owner) return;
+    const recent = await loadRecentAssets(owner.project.id);
+    if (workspace !== owner) return;
+    workspace.recentAssets = recent;
+    await enterInformation(edited.id, false);
+    return;
+  }
   const current = workspace.assets[kind].find(item => item.id === id);
   if (!current) return;
   const currentVisibility = current.placement === 'user' ? 'user' as const : 'project' as const;
@@ -1226,7 +1368,7 @@ async function openAssetFromIndex(assetId: string) {
   });
 }
 
-const KINDS_OPENABLE = new Set<Kind>(['sheet', 'document', 'pdf', 'strategy', 'mindmap', 'research', 'diagram', 'project_plan', 'calendar']);
+const KINDS_OPENABLE = new Set<Kind>(['sheet', 'document', 'pdf', 'strategy', 'mindmap', 'research', 'diagram', 'project_plan', 'calendar', 'information']);
 
 function bindWorkspace() {
   ready = true;
@@ -1238,6 +1380,12 @@ function bindWorkspace() {
   intentEditor = attachIntentEditor($('#intent'));
   intentEditor.setPlaceholder('请输入您的任务描述');
   editors = {
+    information: {
+      context: () => null, anchor: () => null,
+      apply: () => {}, undo: () => {}, export: () => {},
+      load: async asset => { if (asset.id) await chooseAsset('information', asset.id, false); },
+      loadedAssetId: () => workspace?.selected.information?.id || '',
+    },
     sheet: mountSheet($('#sheet'), refresh, (id, content) => queueSave(id, content), id => {
       const asset = workspace?.selected.sheet;
       if (!workspace || asset?.id !== id) return undefined;
@@ -1874,6 +2022,12 @@ function bindAuth(afterLogin?: () => Promise<void>) {
 }
 
 async function boot(options?: { forceAuth?: boolean }) {
+  informationController?.destroy();
+  closeInformationDialogs();
+  informationController = null;
+  informationNav.items = [];
+  informationNav.currentId = null;
+  informationNav.view = 'today';
   ready = false;
   editors = null;
   workspace = null;
@@ -1925,14 +2079,16 @@ async function boot(options?: { forceAuth?: boolean }) {
   migrateLegacy(workspace);
   await flushSave().catch(() => {});
   renderChrome(root);
+  root.querySelector<HTMLButtonElement>('#screen-lock-button')!.onclick = () => { void showScreenLock().catch(fail); };
   createIcons({ icons });
   bindWorkspace();
   const last = saved('office-surface');
+  const lastView = saved('office-view');
   const lastSurface = ALL_KINDS.includes(last as Kind) ? last as Kind : 'sheet';
   await switchSurface(lastSurface);
   // 离线进入时不自动打开远程页面，避免一启动就弹登录窗。
   if (!offlineMode() && saved('office-view') === 'portfolio') await enterPortfolio().catch(fail);
-  if (!offlineMode() && saved('office-view') === 'information') await enterInformation().catch(fail);
+  if (lastView === 'information') await enterInformation().catch(fail);
   await Promise.all(ALL_KINDS.map(kind => loadEditor(kind).catch(fail)));
   if (sessionController && isStructuredAssistant() && workspace?.selected[surface]) {
     await sessionController.refreshList();

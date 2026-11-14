@@ -614,6 +614,24 @@ class OfficeApiTests(unittest.TestCase):
         res = self.client.post("/auth/login", json={"email": "a@example.com", "password": "wrong12"})
         self.assertEqual(res.status_code, 401)
 
+    def test_user_tools_returns_user_notebook_and_calendar_without_project(self):
+        data = self.auth("tools@example.com")
+        headers = {"Authorization": f"Bearer {data['token']}"}
+        self.assertEqual(self.client.get("/user-tools").status_code, 401)
+        tools = self.client.get("/user-tools", headers=headers).json()
+        self.assertEqual(tools["notebook"]["kind"], "notebook")
+        self.assertIsNone(tools["notebook"]["project_id"])
+        self.assertEqual(tools["calendar"]["kind"], "calendar")
+        self.assertIn("todos", tools["calendar"]["content"])
+        saved = self.client.put(
+            f"/assets/{tools['calendar']['id']}", headers=headers,
+            json={"content": {**tools["calendar"]["content"], "todos": "- [ ] 快速待办"}, "revision": tools["calendar"]["revision"]},
+        )
+        self.assertEqual(saved.status_code, 200, saved.text)
+        again = self.client.get("/user-tools", headers=headers).json()
+        self.assertEqual(again["calendar"]["content"]["todos"], "- [ ] 快速待办")
+        self.assertEqual(again["calendar"]["id"], tools["calendar"]["id"])
+
     def test_change_password_requires_current_password_and_updates_login(self):
         data = self.auth("a@example.com")
         headers = {"Authorization": f"Bearer {data['token']}"}

@@ -37,12 +37,16 @@ printf '\n[1/5] 退出旧 App 及其本地后台…\n'
 for app in "$TARGET" "$SOURCE"; do
   if running "$app"; then
     [[ -x "$app/Contents/MacOS/youjulab" ]] || fail "无法请求退出：$app"
-    "$app/Contents/MacOS/youjulab" --quit >/dev/null 2>&1 &
-    helper=$!
-    wait "$helper" || true
-    for ((i=0; i<60; i++)); do
+    for ((attempt=1; attempt<=2; attempt++)); do
+      "$app/Contents/MacOS/youjulab" --quit >/dev/null 2>&1 &
+      helper=$!
+      wait "$helper" || true
+      for ((i=0; i<60; i++)); do
+        if ! running "$app"; then break; fi
+        sleep 1
+      done
       if ! running "$app"; then break; fi
-      sleep 1
+      if (( attempt == 1 )); then printf '退出尚未完成，再尝试一次正常退出…\n'; fi
     done
     if running "$app"; then fail 'App 或后台仍在运行，请手动退出后重试，不会强制终止或覆盖。'; fi
   fi

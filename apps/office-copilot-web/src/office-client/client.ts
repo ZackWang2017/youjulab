@@ -202,7 +202,7 @@ export const office = {
     if (text) {
       try { data = JSON.parse(text); } catch { throw new Error('工作区服务返回了无法解析的响应。'); }
     }
-    if (!response.ok) throw new Error(errorMessage(data, response.status));
+    if (!response.ok) throw Object.assign(new Error(errorMessage(data, response.status)), { status: response.status });
     return data as T;
   },
   async download(path: string, fallbackName: string) {

@@ -10,6 +10,11 @@
   are stored and searched locally. Original PDF files are not uploaded for indexing.
 - LLM prompts and embedding text are still sent to the configured remote providers.
 - Desktop clients neither connect to PostgreSQL nor carry its credentials.
+- Library Information groups, articles, favorites and AI reviews use the local
+  `office.sqlite`; retrieval and per-user WeRead login run in the local Office backend.
+  Historical remote Information is imported only by the explicit migration tool;
+  existing remote data is left untouched.
+  Only the holdings picker reads the existing remote portfolio service when requested.
 
 Default MCP address: `http://192.168.0.5:8000`. Change it in the login connection
 settings or Settings. It persists in `app-config.json`, outside the application package.

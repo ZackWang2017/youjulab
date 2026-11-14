@@ -210,8 +210,34 @@ declare global {
       retryBackupUpload?: (id: string) => Promise<BackupRecord>;
       restoreBackup?: (payload: { id: string; token: string }) => Promise<{ ok: boolean; restartRequired: boolean }>;
       quitAfterRestore?: () => Promise<void>;
+      /** 笔记本 / 日历在某个窗口保存后通知其它窗口刷新（托盘快速记录与主窗口互通）。 */
+      notifyAssetChanged?: (change: AssetChange) => void;
+      onAssetChanged?: (listener: (change: AssetChange) => void) => () => void;
+      /** 唤起主窗口；tool 为 notebook / todos 时同时打开对应浮窗。 */
+      openMainTool?: (tool?: 'notebook' | 'todos') => void;
+      onOpenMainTool?: (listener: (tool: 'notebook' | 'todos') => void) => () => void;
+      getShortcuts?: () => Promise<QuickShortcutState>;
+      setShortcuts?: (shortcuts: QuickShortcuts) => Promise<QuickShortcutState>;
     };
   }
+}
+
+export interface AssetChange {
+  id: string;
+  kind: 'notebook' | 'calendar';
+  revision: number;
+}
+
+export interface QuickShortcuts {
+  notebook: string;
+  todos: string;
+}
+
+export interface QuickShortcutState {
+  shortcuts: QuickShortcuts;
+  defaults: QuickShortcuts;
+  /** 注册失败（被其它程序占用或格式无效）的项 */
+  failed: Array<keyof QuickShortcuts>;
 }
 
 export interface BackupRecord {

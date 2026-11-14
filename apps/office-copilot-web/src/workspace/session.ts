@@ -1,6 +1,7 @@
 import { clearPdfFileCache, office, type PdfFileProgress } from '../office-client/client';
 import { remoteToken, setOfflineMode } from '../remote/client';
 import type { Surface } from '../context/types';
+import { informationApi, type InformationKind } from '../information/api';
 
 export type Kind = Surface;
 export interface User {
@@ -23,6 +24,7 @@ export interface Asset {
   placement?: 'user' | 'project';
   encrypted?: boolean;
   locked?: boolean;
+  information_kind?: InformationKind;
 }
 export interface RecentAsset extends Asset {
   project_name: string;
@@ -38,7 +40,7 @@ export interface Workspace {
   recentAssets: RecentAsset[];
 }
 
-const KINDS: Kind[] = ['sheet', 'document', 'pdf', 'strategy', 'mindmap', 'research', 'diagram', 'project_plan', 'calendar'];
+const KINDS: Kind[] = ['sheet', 'document', 'pdf', 'strategy', 'mindmap', 'research', 'diagram', 'project_plan', 'calendar', 'information'];
 const serverRevision = new Map<string, number>();
 /** 已拉取过正文的资产，切换文件时优先直接打开，避免每次重新请求。 */
 const assetCache = new Map<string, Asset>();
@@ -48,6 +50,7 @@ let queued: { id: string; content: unknown } | null = null;
 let saveTimer: ReturnType<typeof setTimeout> | undefined;
 let saving: Promise<void> = Promise.resolve();
 let saveFailed = false;
+let conflictId: string | null = null;
 
 export function cacheAsset(asset: Asset) {
   assetCache.set(asset.id, asset);
@@ -90,6 +93,7 @@ export function discardSave(id?: string) {
   clearTimeout(saveTimer);
   queued = null;
   saveFailed = false;
+  if (!id || conflictId === id) conflictId = null;
 }
 
 function canSaveEncrypted(id: string) {
@@ -132,14 +136,28 @@ export function hasUnsavedWork() {
   return Boolean(queued) || saveFailed;
 }
 
+/** 该资产是否有排队未提交的保存（含上次失败待重试）。 */
+export function hasQueuedSave(id: string) {
+  return queued?.id === id;
+}
+
+export function knownRevision(id: string) {
+  return serverRevision.get(id) ?? 0;
+}
+
 export async function flushSave() {
   clearTimeout(saveTimer);
+  if (conflictId) return saving;
   const job = queued;
   queued = null;
   if (!job) return saving;
   if (!canSaveEncrypted(job.id)) return saving;
   const headers = filePasswordHeader(job.id);
   saving = saving.then(async () => {
+    if (conflictId) {
+      if (!queued || queued.id === job.id) queued = job;
+      return;
+    }
     try {
       const saved = await office.json<Asset & { archived_name?: string }>(`/assets/${job.id}`, {
         method: 'PUT',
@@ -162,10 +180,18 @@ export async function flushSave() {
         return;
       }
       window.dispatchEvent(new CustomEvent('office-saved'));
+      if (saved.kind === 'calendar' || saved.kind === 'notebook') {
+        window.youju?.notifyAssetChanged?.({ id: saved.id, kind: saved.kind, revision: saved.revision });
+      }
     } catch (e) {
       // 没有更新的排队内容时，把失败任务放回，便于重试、避免丢稿
       if (!queued) queued = job;
       saveFailed = true;
+      if ((e as { status?: number }).status === 409) {
+        conflictId = job.id;
+        window.dispatchEvent(new CustomEvent('office-save-conflict', { detail: { id: job.id } }));
+        return;
+      }
       const detail = e instanceof Error ? e.message : String(e);
       window.dispatchEvent(new CustomEvent('office-save-error', { detail }));
       window.dispatchEvent(new CustomEvent('office-error', { detail: `保存失败：${detail}` }));
@@ -176,8 +202,13 @@ export async function flushSave() {
 
 export function queueSave(id: string, content: unknown) {
   if (!canSaveEncrypted(id)) return;
+  if (conflictId && conflictId !== id) {
+    window.dispatchEvent(new CustomEvent('office-error', { detail: '请先处理当前文件的保存冲突，再编辑其他文件。' }));
+    return;
+  }
   if (queued && queued.id !== id) void flushSave();
   queued = { id, content };
+  if (conflictId) return;
   saveFailed = false;
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => { void flushSave(); }, 400);
@@ -188,7 +219,32 @@ export function retrySave() {
   return flushSave();
 }
 
+export async function resolveSaveConflict(id: string, action: 'overwrite' | 'discard' | 'copy') {
+  await saving;
+  if (conflictId !== id || queued?.id !== id) throw new Error('待处理的修改已变化，请重新保存。');
+  const job = queued;
+  const headers = filePasswordHeader(id);
+  const latest = await office.json<Asset>(`/assets/${id}`, { headers });
+  let result = latest;
+  if (action === 'copy') {
+    result = await office.json<Asset>(`/assets/${id}/copy`, {
+      method: 'POST', headers, body: JSON.stringify({ content: job.content }),
+    });
+    const password = filePasswords.get(id);
+    if (password && result.encrypted) setFilePassword(result.id, password);
+  } else if (action === 'overwrite') {
+    result = await office.json<Asset>(`/assets/${id}`, {
+      method: 'PUT', headers, body: JSON.stringify({ content: job.content, revision: latest.revision }),
+    });
+  }
+  // A failed request leaves both the local draft and the paused conflict intact.
+  discardSave(id);
+  cacheAsset(latest);
+  return cacheAsset(result);
+}
+
 async function loadAssets(projectId: string) {
+  const groups = await informationApi.list(projectId);
   const assets = {
     sheet: [] as Asset[],
     document: [] as Asset[],
@@ -199,9 +255,14 @@ async function loadAssets(projectId: string) {
     diagram: [] as Asset[],
     project_plan: [] as Asset[],
     calendar: [] as Asset[],
+    information: [] as Asset[],
   };
   await Promise.all(KINDS.map(async kind => {
     assets[kind] = (await office.json<{ assets: Asset[] }>(`/projects/${projectId}/assets?kind=${kind}`)).assets;
+  }));
+  assets.information = assets.information.map(asset => ({
+    ...asset, name: groups.find(group => group.asset_id === asset.id)?.name || asset.name,
+    information_kind: groups.find(group => group.asset_id === asset.id)?.kind,
   }));
   return assets;
 }
@@ -251,6 +312,7 @@ function selectedFrom(assets: Record<Kind, Asset[]>, last: Record<Kind, string |
     diagram: pick(assets.diagram, last.diagram),
     project_plan: pick(assets.project_plan, last.project_plan),
     calendar: pick(assets.calendar, last.calendar),
+    information: pick(assets.information, last.information),
   };
 }
 
@@ -433,6 +495,7 @@ export function logout() {
   clearTimeout(saveTimer);
   queued = null;
   saveFailed = false;
+  conflictId = null;
   serverRevision.clear();
   assetCache.clear();
   filePasswords.clear();

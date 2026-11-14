@@ -10,6 +10,9 @@
 .info-fail-list li{word-break:break-word}
 .info-fail-list a{color:#2f6fed}
 #information .info-head-actions{display:flex;gap:7px;flex:0 0 auto;flex-wrap:wrap}
+@media(max-width:800px){#information .info-head{flex-wrap:wrap}#information .info-head-actions{flex:1 1 100%;min-width:0}#information .info-shell .info-head.is-review{grid-template-columns:minmax(0,1fr)}#information .info-head-title{overflow-wrap:anywhere}}
+#information .info-view-tabs{display:flex;gap:2px;flex-wrap:wrap}
+#information .info-view-tabs [aria-selected="true"]{background:#e6f3ef;border-color:#77b5a4;color:#126650}
 #information .info-head-actions button:not(#sheet button){min-height:30px;padding:4px 10px;font-size:12px;white-space:nowrap}
 #information .info-head-actions button svg{width:14px;height:14px}
 #information .info-sources{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}

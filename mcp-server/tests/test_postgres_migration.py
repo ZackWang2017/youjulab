@@ -28,6 +28,18 @@ class PostgresMigrationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, '未纳入迁移'):
                 inspect_source(conn)
 
+    def test_news_history_is_explicitly_excluded_from_remote_migration(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'finance.sqlite'
+            with sqlite3.connect(path) as conn:
+                conn.execute('CREATE TABLE information_groups (id INTEGER)')
+                conn.execute('INSERT INTO information_groups VALUES (1)')
+            with patch('db.migrate_sqlite_to_postgres.psycopg.connect') as pg:
+                report = migrate(path, Path(tmp) / 'backups')
+            pg.assert_not_called()
+            self.assertEqual(report['rows'], {})
+            self.assertEqual(report['skipped_local_information'], {'information_groups': 1})
+
     def test_invalid_foreign_keys_abort(self):
         with sqlite3.connect(':memory:') as conn:
             conn.executescript('CREATE TABLE portfolios (id INT PRIMARY KEY);'

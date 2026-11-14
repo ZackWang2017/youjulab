@@ -3,24 +3,20 @@ from __future__ import annotations
 
 import asyncio
 import json
+from functools import wraps
+
+from fastapi import APIRouter, Depends
+from starlette.concurrency import run_in_threadpool
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-import information_service as service
-from information_service import InformationError
+from ..service import information_service as service
+from ..service.information_service import InformationError
 
 
 def _owner(request: Request) -> str:
-    from account_jwt import current_sub, verify_bearer
-
-    owner = current_sub()
-    if not owner:
-        claims = verify_bearer(request.headers.get("authorization", ""))
-        owner = str(claims.get("sub") or "") if claims else ""
-    if not owner:
-        raise InformationError("请先登录。", 401)
-    return owner
+    return str(request.state.information_user["id"])
 
 
 async def _body(request: Request) -> dict:
@@ -44,28 +40,43 @@ def _int(value: str, label: str) -> int:
 
 
 def _handler(fn):
+    @wraps(fn)
     async def route(request: Request):
-        cors = request.app.state.information_cors
         try:
             payload = await fn(request)
         except InformationError as exc:
-            return JSONResponse({"error": str(exc)}, status_code=exc.status, headers=cors)
+            return JSONResponse({"error": str(exc)}, status_code=exc.status)
         except Exception as exc:  # noqa: BLE001
-            return JSONResponse({"error": f"资讯服务错误：{exc}"}, status_code=500, headers=cors)
-        return JSONResponse(payload, headers=cors)
+            return JSONResponse({"error": f"资讯服务错误：{exc}"}, status_code=500)
+        return JSONResponse(payload)
 
     return route
 
 
-def register_routes(app, cors_headers: dict[str, str]) -> None:
-    app.state.information_cors = cors_headers
+def register_routes(app, user_dependency, get_store=None) -> None:
+    def app_store(request: Request):
+        return request.app.state.store
+
+    async def authenticated(request: Request, user: dict = Depends(user_dependency),
+                            store=Depends(get_store or app_store)):
+        request.state.information_user = user
+        token = service.active_store.set(store)
+        try:
+            yield
+        finally:
+            service.active_store.reset(token)
+
+    router = APIRouter(dependencies=[Depends(authenticated)])
 
     @_handler
     async def groups(request: Request):
         owner = _owner(request)
         if request.method == "POST":
             return service.create_group(owner, await _body(request))
-        return {"groups": service.list_groups(owner)}
+        project_id = request.query_params.get("project_id")
+        if not project_id:
+            raise InformationError("project_id 必填。")
+        return {"groups": service.list_groups(owner, project_id)}
 
     @_handler
     async def group_item(request: Request):
@@ -92,7 +103,10 @@ def register_routes(app, cors_headers: dict[str, str]) -> None:
 
     @_handler
     async def clear_history(request: Request):
-        return service.clear_history(_owner(request))
+        project_id = request.query_params.get("project_id")
+        if not project_id:
+            raise InformationError("project_id 必填。")
+        return service.clear_history(_owner(request), project_id)
 
     @_handler
     async def item(request: Request):
@@ -147,34 +161,37 @@ def register_routes(app, cors_headers: dict[str, str]) -> None:
 
     @_handler
     async def holdings(request: Request):
-        return service.list_holdings(_owner(request))
+        return await run_in_threadpool(service.list_holdings, _owner(request))
 
     @_handler
-    async def weread_status(_request: Request):
-        return service.weread_status()
+    async def weread_status(request: Request):
+        return await run_in_threadpool(service.weread_status, _owner(request))
 
     @_handler
-    async def weread_login(_request: Request):
-        return service.weread_login()
+    async def weread_login(request: Request):
+        return await run_in_threadpool(service.weread_login, _owner(request))
 
     @_handler
     async def weread_login_status(request: Request):
-        return service.weread_login_status(request.path_params["session_id"])
+        return await run_in_threadpool(service.weread_login_status, request.path_params["session_id"], _owner(request))
 
-    app.add_route("/api/information/groups", groups, methods=["GET", "POST", "OPTIONS"])
-    app.add_route("/api/information/groups/{gid}", group_item, methods=["PUT", "DELETE", "OPTIONS"])
-    app.add_route("/api/information/groups/{gid}/items", items, methods=["GET", "OPTIONS"])
-    app.add_route("/api/information/groups/{gid}/fetch", fetch_today, methods=["POST", "OPTIONS"])
-    app.add_route("/api/information/groups/{gid}/summary", today_summary, methods=["GET", "OPTIONS"])
-    app.add_route("/api/information/groups/{gid}/reviews", reviews, methods=["GET", "POST", "OPTIONS"])
-    app.add_route("/api/information/reviews/{rid}", review_item, methods=["GET", "OPTIONS"])
-    app.add_route("/api/information/items/{iid}/favorite", favorite, methods=["POST", "OPTIONS"])
-    app.add_route("/api/information/items/{iid}", item, methods=["GET", "DELETE", "OPTIONS"])
-    app.add_route("/api/information/items/{iid}/impact", item_impact, methods=["PUT", "OPTIONS"])
-    app.add_route("/api/information/items/{iid}/analysis", item_analysis, methods=["PUT", "OPTIONS"])
-    app.add_route("/api/information/clear", clear_history, methods=["POST", "OPTIONS"])
-    app.add_route("/api/information/adapters", adapters, methods=["GET", "OPTIONS"])
-    app.add_route("/api/information/holdings", holdings, methods=["GET", "OPTIONS"])
-    app.add_route("/api/information/weread/status", weread_status, methods=["GET", "OPTIONS"])
-    app.add_route("/api/information/weread/login", weread_login, methods=["POST", "OPTIONS"])
-    app.add_route("/api/information/weread/login/{session_id}", weread_login_status, methods=["GET", "OPTIONS"])
+    router.add_api_route("/api/information/groups", groups, methods=["GET", "POST"])
+    router.add_api_route("/api/information/groups/{gid}", group_item, methods=["PUT", "DELETE"])
+    router.add_api_route("/api/information/groups/{gid}/items", items, methods=["GET"])
+    router.add_api_route("/api/information/groups/{gid}/fetch", fetch_today, methods=["POST"])
+    router.add_api_route("/api/information/groups/{gid}/summary", today_summary, methods=["GET"])
+    router.add_api_route("/api/information/groups/{gid}/reviews", reviews, methods=["GET", "POST"])
+    router.add_api_route("/api/information/reviews/{rid}", review_item, methods=["GET"])
+    router.add_api_route("/api/information/items/{iid}/favorite", favorite, methods=["POST"])
+    router.add_api_route("/api/information/items/{iid}", item, methods=["GET", "DELETE"])
+    router.add_api_route("/api/information/items/{iid}/impact", item_impact, methods=["PUT"])
+    router.add_api_route("/api/information/items/{iid}/analysis", item_analysis, methods=["PUT"])
+    router.add_api_route("/api/information/clear", clear_history, methods=["POST"])
+    router.add_api_route("/api/information/adapters", adapters, methods=["GET"])
+    router.add_api_route("/api/information/holdings", holdings, methods=["GET"])
+    router.add_api_route("/api/information/weread/status", weread_status, methods=["GET"])
+    router.add_api_route("/api/information/weread/login", weread_login, methods=["POST"])
+    router.add_api_route("/api/information/weread/login/{session_id}", weread_login_status, methods=["GET"])
+
+    app.include_router(router)
+

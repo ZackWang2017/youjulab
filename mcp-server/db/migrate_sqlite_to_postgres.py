@@ -18,22 +18,20 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 ROOT = Path(__file__).resolve().parents[1]
-for layer in ('account-service/repository', 'portfolio-service/repository',
-              'information-service/repository'):
+for layer in ('account-service/repository', 'portfolio-service/repository'):
     sys.path.insert(0, str(ROOT / layer))
 
 from db.config import load_config
 from db.schema import ALL_DDL
 from account_repository import _DDL as ACCOUNT_DDL
 from portfolio_repository import _DDL as PORTFOLIO_DDL
-from information_repository import _DDL as INFORMATION_DDL
 from scheduler.pg_run_store import _DDL as SCHEDULER_DDL
 
 TABLES = ('accounts', 'securities', 'financial_item_mappings', 'financial_statements',
           'portfolios', 'portfolio_holdings', 'portfolio_transactions',
           'security_close_prices', 'fx_rates_daily', 'portfolio_nav_daily',
-          'scheduled_task_runs', 'external_search_daily', 'information_groups',
-          'information_items', 'information_reviews')
+          'scheduled_task_runs', 'external_search_daily')
+LOCAL_ONLY_TABLES = {'information_groups', 'information_items', 'information_reviews'}
 USAGE_DDL = '''CREATE TABLE IF NOT EXISTS external_search_daily (
     engine TEXT NOT NULL, day DATE NOT NULL, count INT NOT NULL DEFAULT 0,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), PRIMARY KEY (engine, day))'''
@@ -52,14 +50,14 @@ def inspect_source(conn):
     if conn.execute('PRAGMA foreign_key_check').fetchone():
         raise ValueError('源 SQLite 存在外键异常，停止迁移。')
     names = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")}
-    unknown = names - set(TABLES)
+    unknown = names - set(TABLES) - LOCAL_ONLY_TABLES
     if unknown:
         raise ValueError(f'存在未纳入迁移的表：{sorted(unknown)}')
     return {t: conn.execute(f'SELECT count(*) FROM "{t}"').fetchone()[0] for t in TABLES if t in names}
 
 
 def copy_data(source, target, counts):
-    for ddl in (*ALL_DDL, ACCOUNT_DDL, PORTFOLIO_DDL, INFORMATION_DDL, SCHEDULER_DDL, USAGE_DDL):
+    for ddl in (*ALL_DDL, ACCOUNT_DDL, PORTFOLIO_DDL, SCHEDULER_DDL, USAGE_DDL):
         target.execute(ddl)
     # Guard all tables before importing any row. Never overwrite historical data.
     for table in TABLES:
@@ -105,8 +103,11 @@ def migrate(source_path, backup_dir, *, apply=False):
     cfg = load_config()
     with read_source(source_path) as source:
         counts = inspect_source(source)
+        names = {row[0] for row in source.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        skipped = {table: source.execute(f'SELECT count(*) FROM {table}').fetchone()[0]
+                   for table in sorted(LOCAL_ONLY_TABLES & names)}
         if not apply:
-            return {'mode': 'dry-run', 'target': cfg.dbname, 'rows': counts}
+            return {'mode': 'dry-run', 'target': cfg.dbname, 'rows': counts, 'skipped_local_information': skipped}
         stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
         directory = Path(backup_dir).expanduser() / f'pre-postgres-{stamp}'
         directory.mkdir(parents=True, mode=0o700)
@@ -120,7 +121,7 @@ def migrate(source_path, backup_dir, *, apply=False):
             target.execute('SELECT pg_advisory_xact_lock(724946201)')
             copy_data(source, target, counts)
     report = {'mode': 'applied', 'target': cfg.dbname, 'source': str(Path(source_path).expanduser()),
-              'backup': str(snapshot), 'rows': counts}
+              'backup': str(snapshot), 'rows': counts, 'skipped_local_information': skipped}
     (directory / 'migration.json').write_text(json.dumps(report, ensure_ascii=False, indent=2))
     return report
 

@@ -23,3 +23,14 @@ test('tray left click opens; right click exposes only Quit', () => {
   tray.emit('right-click'); assert.equal(tray.menu.length, 1); assert.equal(tray.menu[0].label, '退出程序');
   tray.menu[0].click(); assert.equal(quit, 1);
 });
+test('tray menu rebuilds extra items on every right click, before Quit', () => {
+  class Tray extends EventEmitter { setToolTip() {} popUpContextMenu(menu) { this.menu = menu; } }
+  let label = '记笔记';
+  const tray = createBackgroundTray({ Tray, Menu: { buildFromTemplate: items => items }, image: {},
+    show: () => {}, quit: () => {}, items: () => [{ label }] });
+  tray.emit('right-click');
+  assert.deepEqual(tray.menu.map(item => item.label ?? item.type), ['记笔记', 'separator', '退出程序']);
+  label = '记笔记（快捷键被占用）';
+  tray.emit('right-click');
+  assert.equal(tray.menu[0].label, '记笔记（快捷键被占用）');
+});

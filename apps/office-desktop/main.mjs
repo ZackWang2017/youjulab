@@ -1,4 +1,5 @@
-import { app, BrowserWindow, dialog, ipcMain, nativeImage, safeStorage, Tray, Menu, shell } from 'electron';
+import { app, BrowserWindow, dialog, globalShortcut, ipcMain, nativeImage, safeStorage, screen, Tray, Menu, shell } from 'electron';
+import { DEFAULT_QUICK_SHORTCUTS, QUICK_LABELS, QUICK_MODES, quickMenuItems, readQuickShortcuts, validateQuickShortcuts } from './quick-capture.mjs';
 import { execFile } from 'node:child_process';
 import { ServiceProcesses } from './service-processes.mjs';
 import { DEFAULT_REMOTE, remoteAddress, savedRemoteAddress } from './remote-config.mjs';
@@ -36,6 +37,9 @@ function appIcon() {
 
 let mainWindow = null;
 let tray = null;
+/** 托盘快速记录小窗：mode -> BrowserWindow */
+const quickWindows = new Map();
+let shortcutFailures = [];
 let updateController = null;
 let openingWindow = null;
 let backend = null;
@@ -217,6 +221,7 @@ function readConfig() {
       autoLogin: Boolean(saved.autoLogin),
       autoLoginPassword: String(saved.autoLoginPassword || ''),
       officePort: normalizeOfficePort(saved.officePort),
+      quickShortcuts: readQuickShortcuts(saved.quickShortcuts),
       backupDir: String(saved.backupDir || ''),
       backupEnabled: saved.backupEnabled !== false,
       backupIdentity: saved.backupIdentity && typeof saved.backupIdentity === 'object'
@@ -238,6 +243,7 @@ function readConfig() {
       autoLogin: false,
       autoLoginPassword: '',
       officePort: DEFAULT_OFFICE_PORT,
+      quickShortcuts: { ...DEFAULT_QUICK_SHORTCUTS },
       backupDir: '',
       backupEnabled: true,
       backupIdentity: null,
@@ -277,6 +283,7 @@ function writeConfig(config) {
     // 只由 saveLoginPreference 写入；普通设置保存始终沿用已有密文。
     autoLoginPassword: String(config?.autoLoginPassword ?? prev.autoLoginPassword ?? ''),
     officePort: normalizeOfficePort(config?.officePort ?? prev.officePort),
+    quickShortcuts: readQuickShortcuts(config?.quickShortcuts ?? prev.quickShortcuts),
     backupDir: String(config?.backupDir ?? prev.backupDir ?? '').trim(),
     backupEnabled: config?.backupEnabled !== false,
     backupIdentity: config?.backupIdentity ?? prev.backupIdentity ?? null,
@@ -878,6 +885,132 @@ ipcMain.handle('youju:quit-after-restore', () => {
   app.quit();
 });
 
+// ---- 托盘快速记录：小窗、跨窗口同步、全局快捷键 ----
+
+function quickWindowUrl(mode) {
+  const query = `mode=${encodeURIComponent(mode)}`;
+  return isDev
+    ? `http://127.0.0.1:5173/quick.html?${query}&officePort=${backendPort}`
+    : `http://127.0.0.1:${backendPort}/quick.html?${query}`;
+}
+
+function quickWindowBounds(width, height) {
+  const trayBounds = tray?.getBounds?.();
+  const anchor = trayBounds && trayBounds.width
+    ? { x: trayBounds.x + Math.round(trayBounds.width / 2), y: trayBounds.y + Math.round(trayBounds.height / 2) }
+    : screen.getCursorScreenPoint();
+  const area = screen.getDisplayNearestPoint(anchor).workArea;
+  if (!trayBounds?.width) {
+    return { x: Math.round(area.x + (area.width - width) / 2), y: Math.round(area.y + (area.height - height) / 3) };
+  }
+  // 托盘在顶部（macOS）则窗口贴在图标下方，在底部（Windows）则在上方
+  const below = anchor.y < area.y + area.height / 2;
+  const x = Math.min(Math.max(anchor.x - Math.round(width / 2), area.x + 8), area.x + area.width - width - 8);
+  const y = below ? area.y + 8 : area.y + area.height - height - 8;
+  return { x, y };
+}
+
+function openQuickWindow(mode, { toggle = false } = {}) {
+  if (!app.isReady() || quitRequested || !QUICK_MODES.includes(mode)) return;
+  // 本机服务尚未就绪（启动中或已停止）时先走主程序启动流程
+  if (!backendPort) {
+    showApplication();
+    return;
+  }
+  const existing = quickWindows.get(mode);
+  if (existing && !existing.isDestroyed()) {
+    if (toggle && existing.isVisible() && existing.isFocused()) {
+      existing.close();
+      return;
+    }
+    if (process.platform === 'darwin') app.focus({ steal: true });
+    existing.show();
+    existing.focus();
+    return;
+  }
+  const width = 420;
+  const height = mode === 'todos' ? 520 : 420;
+  const icon = appIcon();
+  const win = new BrowserWindow({
+    width, height, minWidth: 320, minHeight: 280,
+    ...quickWindowBounds(width, height),
+    title: `${QUICK_LABELS[mode]} · 有据`,
+    show: false,
+    alwaysOnTop: true,
+    fullscreenable: false,
+    maximizable: false,
+    minimizable: false,
+    skipTaskbar: true,
+    autoHideMenuBar: true,
+    ...(icon ? { icon } : {}),
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.cjs'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
+    },
+  });
+  if (process.platform === 'darwin') win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  quickWindows.set(mode, win);
+  win.on('closed', () => { if (quickWindows.get(mode) === win) quickWindows.delete(mode); });
+  win.once('ready-to-show', () => {
+    if (process.platform === 'darwin') app.focus({ steal: true });
+    win.show();
+    win.focus();
+  });
+  void win.loadURL(quickWindowUrl(mode)).catch(error => console.error('[youju] quick window failed', error));
+}
+
+function sendToMainWindow(channel, payload) {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  const contents = mainWindow.webContents;
+  if (contents.isLoading()) contents.once('did-finish-load', () => contents.send(channel, payload));
+  else contents.send(channel, payload);
+}
+
+function shortcutState(config = readConfig()) {
+  return { shortcuts: config.quickShortcuts, defaults: { ...DEFAULT_QUICK_SHORTCUTS }, failed: [...shortcutFailures] };
+}
+
+function registerQuickShortcuts(config = readConfig()) {
+  globalShortcut.unregisterAll();
+  const failed = [];
+  for (const mode of QUICK_MODES) {
+    const accelerator = config.quickShortcuts?.[mode];
+    if (!accelerator) continue;
+    let ok = false;
+    try { ok = globalShortcut.register(accelerator, () => openQuickWindow(mode, { toggle: true })); }
+    catch (error) { console.warn('[youju] shortcut register failed', accelerator, error); }
+    if (!ok) failed.push(mode);
+  }
+  shortcutFailures = failed;
+  return shortcutState(config);
+}
+
+function trayQuickItems() {
+  const items = quickMenuItems(readConfig().quickShortcuts, shortcutFailures, mode => openQuickWindow(mode));
+  return [...items, { type: 'separator' }, { label: '打开有据', click: showApplication }];
+}
+
+ipcMain.on('youju:notify-asset-changed', (event, change) => {
+  if (!change || typeof change.id !== 'string' || !['notebook', 'calendar'].includes(change.kind)) return;
+  const payload = { id: change.id, kind: change.kind, revision: Number(change.revision) || 0 };
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (win.isDestroyed() || win.webContents === event.sender) continue;
+    win.webContents.send('youju:asset-changed', payload);
+  }
+});
+ipcMain.on('youju:open-main-tool', (_event, tool) => {
+  showApplication();
+  if (tool === 'notebook' || tool === 'todos') sendToMainWindow('youju:open-main-tool', tool);
+});
+ipcMain.handle('youju:get-shortcuts', () => shortcutState());
+ipcMain.handle('youju:set-shortcuts', (_event, input) => {
+  const quickShortcuts = validateQuickShortcuts(input);
+  writeConfig({ ...readConfig(), quickShortcuts });
+  return registerQuickShortcuts();
+});
+
 
 async function createWindow() {
   if (stoppingServices) await stoppingServices;
@@ -993,7 +1126,8 @@ app.whenReady().then(async () => {
   if (!image) throw new Error('找不到程序图标，无法创建后台托盘入口。');
   tray = createBackgroundTray({ Tray, Menu,
     image: image.resize({ width: process.platform === 'darwin' ? 18 : 24, height: process.platform === 'darwin' ? 18 : 24 }),
-    show: showApplication, quit: () => app.quit() });
+    show: showApplication, quit: () => app.quit(), items: trayQuickItems });
+  registerQuickShortcuts();
   if (process.platform === 'win32') Menu.setApplicationMenu(null);
   else if (process.platform === 'darwin') Menu.setApplicationMenu(Menu.buildFromTemplate([
     { label: '有据', submenu: [{ role: 'about' }, { type: 'separator' }, { role: 'hide' }, { role: 'hideOthers' }, { role: 'unhide' }] },
@@ -1005,6 +1139,8 @@ app.whenReady().then(async () => {
   dialog.showErrorBox('youjulab 启动失败', String(err?.message || err));
   app.quit();
 });
+
+app.on('will-quit', () => globalShortcut.unregisterAll());
 
 app.on('window-all-closed', () => {
   // Closing a window is not quitting. Keep Office and scheduled backups alive.

@@ -12,19 +12,13 @@ import httpx
 
 HERE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(HERE))
-sys.path.insert(0, str(HERE / "information-service" / "repository"))
-sys.path.insert(0, str(HERE / "information-service" / "service"))
-sys.path.insert(0, str(HERE / "local-tools" / "service"))
-sys.path.insert(0, str(HERE / "local-tools" / "repository"))
-sys.path.insert(0, str(HERE / "portfolio-service" / "repository"))
 
-import adapter_catalog as catalog  # noqa: E402
-import announcement_repository as announce  # noqa: E402
-import fetch_service as fetch  # noqa: E402
-import information_service as service  # noqa: E402
-import rss_repository as rss_repo  # noqa: E402
-from information_service import InformationError  # noqa: E402
-
+from information.repository import adapter_catalog as catalog
+from information.repository import announcement_repository as announce
+from information.service import fetch_service as fetch
+from information.service import information_service as service
+from information.repository import rss_repository as rss_repo
+from information.service.information_service import InformationError
 
 class CatalogTests(unittest.TestCase):
     def test_lists_implemented_adapters(self):
@@ -71,7 +65,7 @@ class KeywordTests(unittest.TestCase):
         row = {"title": "腾讯回购", "url": "https://a", "published_at": "2026-10-23 09:00", "summary": ""}
         with patch.object(fetch, "lookup_securities", return_value=[{"ticker_code": "00700.HK", "name": "腾讯控股"}]), \
              patch.object(fetch.preset, "fetch_preset_news", return_value={"results": [row], "error": ""}) as preset:
-            out = fetch.collect_group("finance_api", {"adapters": ["sina"], "keywords": "腾讯"})
+            out = fetch.collect_group("finance_api", {"adapters": ["sina"], "keywords": "腾讯"}, "u1")
         preset.assert_called_once_with("sina", "00700.HK", "腾讯控股")
         self.assertEqual(out["items"][0]["title"], "腾讯回购")
         self.assertEqual(out["failed"], [])
@@ -88,7 +82,7 @@ class KeywordTests(unittest.TestCase):
             out = fetch.collect_group("finance_api", {
                 "adapters": ["sina", "xueqiu", "tencent", "eastmoney", "jisilu"],
                 "keywords": "回购 分红 中报",
-            })
+            }, "u1")
         called = [call.args[0] for call in preset.call_args_list]
         self.assertEqual(called.count("sina"), 0)
         self.assertEqual(called.count("xueqiu"), 0)
@@ -106,7 +100,7 @@ class KeywordTests(unittest.TestCase):
             out = fetch.collect_group("finance_api", {
                 "adapters": ["sina", "xueqiu", "tencent"],
                 "keywords": "AAPL.US",
-            })
+            }, "u1")
         self.assertEqual([call.args for call in preset.call_args_list], [
             ("xueqiu", "AAPL.US", ""),
             ("tencent", "AAPL.US", ""),
@@ -117,7 +111,7 @@ class KeywordTests(unittest.TestCase):
     def test_finance_rss_uses_native_adapter_and_does_not_need_rsshub(self):
         row = {"title": "电报", "url": "https://www.cls.cn/detail/1", "published_at": "2026-10-23 09:00", "summary": "回购"}
         with patch.object(fetch.rss_repo, "fetch_adapter", return_value=[row]) as pulled:
-            out = fetch.collect_group("finance_rss", {"adapters": ["cls"], "keywords": "回购"})
+            out = fetch.collect_group("finance_rss", {"adapters": ["cls"], "keywords": "回购"}, "u1")
         pulled.assert_called_once()
         self.assertEqual(pulled.call_args.args[0]["id"], "cls")
         self.assertEqual(out["items"][0]["title"], "电报")
@@ -129,7 +123,7 @@ class KeywordTests(unittest.TestCase):
             {"title": "午间点评", "url": "https://b", "published_at": "", "summary": ""},
         ]
         with patch.object(fetch.rss_repo, "fetch_adapter", return_value=rows):
-            out = fetch.collect_group("finance_rss", {"adapters": ["cls"], "keywords": "腾讯"})
+            out = fetch.collect_group("finance_rss", {"adapters": ["cls"], "keywords": "腾讯"}, "u1")
         self.assertEqual([item["title"] for item in out["items"]], ["日常经营公告", "午间点评"])
         self.assertEqual(out["failed"], [])
 
@@ -139,12 +133,12 @@ class KeywordTests(unittest.TestCase):
             {"title": "腾讯回购", "url": "https://b", "published_at": "", "summary": ""},
         ]
         with patch.object(fetch.rss_repo, "fetch_adapter", return_value=rows):
-            out = fetch.collect_group("finance_rss", {"adapters": ["cls"], "keywords": "腾讯"})
+            out = fetch.collect_group("finance_rss", {"adapters": ["cls"], "keywords": "腾讯"}, "u1")
         self.assertEqual([item["title"] for item in out["items"]], ["腾讯回购"])
 
     def test_finance_rss_records_adapter_error(self):
         with patch.object(fetch.rss_repo, "fetch_adapter", side_effect=ValueError("站点拒绝")):
-            out = fetch.collect_group("finance_rss", {"adapters": ["36kr"], "keywords": ""})
+            out = fetch.collect_group("finance_rss", {"adapters": ["36kr"], "keywords": ""}, "u1")
         self.assertEqual(out["items"], [])
         self.assertEqual(out["failed"], ["36氪：站点拒绝"])
 
@@ -154,7 +148,7 @@ class KeywordTests(unittest.TestCase):
             out = fetch.collect_group("holdings_announce", {
                 "holdings": [{"ticker_code": "600000.SH", "name": "浦发银行", "market_code": "SH", "adapter": "cninfo"}],
                 "keywords": "回购",
-            })
+            }, "u1")
         pulled.assert_called_once_with("cninfo", "600000.SH", "浦发银行")
         self.assertEqual(out["items"][0]["title"], "日常经营公告")
         self.assertEqual(out["failed"], [])
@@ -224,7 +218,7 @@ class GroupServiceTests(unittest.TestCase):
         with patch.object(service.repo, "clear_past_unfavorited", return_value=3) as clear, \
              patch.object(fetch, "today", return_value=date(2026, 10, 23)):
             out = service.clear_history("u1")
-        clear.assert_called_once_with("u1", date(2026, 10, 23))
+        clear.assert_called_once_with("u1", date(2026, 10, 23), None)
         self.assertEqual(out["deleted"], 3)
 
     def test_favorites_list_only_favorited(self):
@@ -278,7 +272,7 @@ class WechatCollectTests(unittest.TestCase):
         }
         with patch.object(fetch.weread, "list_shelf_articles", return_value=payload), \
              patch.object(fetch, "today", return_value=date(2026, 10, 23)):
-            out = fetch.collect_group("wechat", {})
+            out = fetch.collect_group("wechat", {}, owner_id="u1")
         titles = [item["title"] for item in out["items"]]
         self.assertEqual(titles, ["今日快讯", "最新一条"])
         self.assertFalse(out["login_required"])

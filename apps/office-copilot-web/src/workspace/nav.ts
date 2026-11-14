@@ -10,15 +10,21 @@ import {
   type DocumentFolder,
 } from './document-folders';
 import { office } from '../office-client/client';
-import { changeRemotePassword, DEFAULT_REMOTE_BASE, remoteBase, remoteLogin, remoteToken, setRemoteBase, type BackupProgress, type BackupRecord } from '../remote/client';
+import {
+  changeRemotePassword, DEFAULT_REMOTE_BASE, remoteBase, remoteLogin, remoteToken, setRemoteBase,
+  type BackupProgress, type BackupRecord, type QuickShortcuts, type QuickShortcutState,
+} from '../remote/client';
 import type { Asset, Kind, Workspace } from './session';
 import { syncLocalPassword } from './session';
+import { acceleratorFromEvent, formatAccelerator } from './shortcut-keys';
 import { openCalcWindow } from './calc-window';
+import { bindScreenLockSettings, screenLockSettingsMarkup } from './screen-lock';
 import { libraryExpanded, saveLibraryExpanded } from './library-preference';
+import type { InformationGroup } from '../information/api';
 
-const LABELS: Record<Kind, string> = { sheet: '表格', document: '文档', pdf: 'PDF', strategy: '策略', mindmap: '导图', research: '研究图', diagram: '绘图', project_plan: '项目计划', calendar: '计划' };
-const NEW_LABELS: Record<Kind, string> = { sheet: '新建表格', document: '新建文档', pdf: '新建 PDF', strategy: '新建策略', mindmap: '新建导图', research: '新建研究图', diagram: '新建绘图', project_plan: '新建项目计划', calendar: '新建计划' };
-const LIBRARY_KINDS: Kind[] = ['pdf', 'sheet', 'mindmap', 'document', 'project_plan', 'research', 'diagram'];
+const LABELS: Record<Kind, string> = { sheet: '表格', document: '文档', pdf: 'PDF', strategy: '策略', mindmap: '导图', research: '研究图', diagram: '绘图', project_plan: '项目计划', calendar: '计划', information: '资讯' };
+const NEW_LABELS: Record<Kind, string> = { sheet: '新建表格', document: '新建文档', pdf: '新建 PDF', strategy: '新建策略', mindmap: '新建导图', research: '新建研究图', diagram: '新建绘图', project_plan: '新建项目计划', calendar: '新建计划', information: '新建资讯组' };
+const LIBRARY_KINDS: Kind[] = ['pdf', 'sheet', 'mindmap', 'document', 'project_plan', 'research', 'diagram', 'information'];
 let libraryOpenKind: Kind | null = null;
 
 function appendEncryptedLock(parent: HTMLElement, encrypted?: boolean) {
@@ -32,6 +38,7 @@ function appendEncryptedLock(parent: HTMLElement, encrypted?: boolean) {
 }
 
 function kindIcon(kind: Kind) {
+  if (kind === 'information') return 'newspaper';
   if (kind === 'sheet') return 'table-2';
   if (kind === 'document') return 'file-text';
   if (kind === 'pdf') return 'book-open';
@@ -92,7 +99,7 @@ export function renderChrome(root: HTMLElement) {
       <div id="result" aria-live="polite"><div class="result-meta" id="result-meta"></div><div id="answer" class="assistant-thread"></div><div id="patch-preview"></div><div id="patch-actions" hidden><button class="primary" id="apply"><i data-lucide="check"></i>接受修改</button><button id="discard">放弃</button></div></div>
     </div>
     <form id="ask" class="assistant-composer"><div id="error" role="alert" hidden></div><div class="task-modes" role="radiogroup" aria-label="任务类型"><label class="task-mode"><input type="radio" name="task-mode" id="task-explain" value="explain" checked>选区解释</label><label class="task-mode"><input type="radio" name="task-mode" id="task-generate" value="generate">生成内容</label></div><div class="assistant-composer-row"><div id="intent" class="assistant-intent-editor is-empty" data-placeholder="请输入您的任务描述" role="textbox" aria-multiline="true" aria-label="任务描述"></div><div class="assistant-composer-actions"><button class="primary" id="run" type="submit" title="运行（Ctrl/⌘+Enter）"><i data-lucide="play"></i><span>运行</span></button><button type="button" id="new-assistant-thread" title="新对话"><i data-lucide="message-square-plus"></i><span>新对话</span></button></div></div></form>
-  </aside></main><footer><span class="footer-left"><span id="footer-surface">工作区</span><span id="save-status" hidden></span></span><span class="footer-right"><span id="footer-user">本地工作区</span></span></footer>`;
+  </aside></main><footer><span class="footer-left"><span id="footer-surface">工作区</span><span id="save-status" hidden></span></span><span class="footer-right"><span id="footer-user">本地工作区</span><button type="button" id="screen-lock-button" class="footer-lock-button" title="屏保" aria-label="开启屏保"><i data-lucide="lock-keyhole"></i></button></span></footer>`;
 }
 
 export function askConfirm(title: string, confirmLabel = '删除') {
@@ -289,6 +296,34 @@ export function askScopedAssetEdit(opts: {
 }
 
 /** 保存失败弹窗：阻断式提示，可选重试。 */
+export function askSaveConflict() {
+  return new Promise<'overwrite' | 'discard' | 'copy'>(resolve => {
+    const overlay = document.createElement('div');
+    overlay.className = 'dialog-overlay';
+    overlay.innerHTML = `<form class="name-dialog save-conflict-dialog" role="dialog" aria-modal="true" aria-labelledby="save-conflict-title">
+      <h2 id="save-conflict-title">文件已在其他会话修改</h2>
+      <fieldset class="save-conflict-options">
+        <legend class="field-label">请选择处理方式</legend>
+        <label><input type="radio" name="resolution" value="overwrite" required><span>保存覆盖其他会话内容</span></label>
+        <label><input type="radio" name="resolution" value="discard" required><span>放弃本次修改加载其他会话内容</span></label>
+      </fieldset>
+      <div class="dialog-actions"><button type="button" data-copy>本会话修改另存副本</button><button type="submit" class="primary">确认</button></div>
+    </form>`;
+    const finish = (action: 'overwrite' | 'discard' | 'copy') => { overlay.remove(); resolve(action); };
+    overlay.querySelector('[data-copy]')!.addEventListener('click', () => finish('copy'));
+    overlay.querySelector('form')!.addEventListener('submit', async event => {
+      event.preventDefault();
+      const action = overlay.querySelector<HTMLInputElement>('input[name="resolution"]:checked')!.value as 'overwrite' | 'discard';
+      const confirmed = await askConfirm(action === 'overwrite'
+        ? '将覆盖其他会话内容，是否确认保存本会话修改？'
+        : '将放弃本次修改，并加载其他会话内容。是否继续？', action === 'overwrite' ? '确认覆盖' : '确认放弃');
+      if (confirmed) finish(action);
+    });
+    document.body.append(overlay);
+    overlay.querySelector<HTMLInputElement>('input')!.focus();
+  });
+}
+
 export function alertSaveError(message: string) {
   return new Promise<'retry' | 'dismiss'>(resolve => {
     if (document.querySelector('.save-error-overlay')) {
@@ -437,6 +472,63 @@ export async function openBackupRecordsDialog(email: string) {
   await renderBackupRecords(overlay.querySelector<HTMLElement>('[data-records]')!, email);
 }
 
+/** 桌面端「快速记录快捷键」：录入组合键、保存到主进程并重新注册，被占用时就地提示。 */
+function bindShortcutSettings(overlay: HTMLElement) {
+  const section = overlay.querySelector<HTMLElement>('[data-shortcut-section]');
+  const api = window.youju;
+  if (!section || !api?.getShortcuts || !api.setShortcuts) return;
+  section.hidden = false;
+  const mac = api.platform === 'darwin';
+  const note = section.querySelector<HTMLElement>('[data-shortcut-note]')!;
+  const inputs = Array.from(section.querySelectorAll<HTMLInputElement>('[data-shortcut]'));
+  const labels: Record<keyof QuickShortcuts, string> = { notebook: '记笔记', todos: '待办事项' };
+  let defaults: QuickShortcuts = { notebook: '', todos: '' };
+  const values: QuickShortcuts = { notebook: '', todos: '' };
+  const setValue = (mode: keyof QuickShortcuts, accelerator: string) => {
+    values[mode] = accelerator;
+    const field = inputs.find(item => item.dataset.shortcut === mode);
+    if (field) field.value = formatAccelerator(accelerator, mac);
+  };
+  const showState = (state: QuickShortcutState, saved: boolean) => {
+    (Object.keys(labels) as Array<keyof QuickShortcuts>).forEach(mode => setValue(mode, state.shortcuts[mode] || ''));
+    defaults = state.defaults;
+    note.classList.toggle('is-error', state.failed.length > 0);
+    note.textContent = state.failed.length
+      ? `${state.failed.map(mode => labels[mode]).join('、')}的快捷键已被其它程序占用，请换一个组合。`
+      : (saved ? '快捷键已保存并生效。' : '');
+  };
+  inputs.forEach(field => {
+    const mode = field.dataset.shortcut as keyof QuickShortcuts;
+    field.addEventListener('keydown', event => {
+      if (event.key === 'Tab') return;
+      event.preventDefault();
+      event.stopPropagation();
+      if (event.key === 'Escape') { field.blur(); return; }
+      if ((event.key === 'Backspace' || event.key === 'Delete') && !event.ctrlKey && !event.altKey && !event.metaKey) {
+        setValue(mode, '');
+        return;
+      }
+      const accelerator = acceleratorFromEvent(event, mac);
+      if (accelerator) setValue(mode, accelerator);
+    });
+  });
+  section.querySelectorAll<HTMLButtonElement>('[data-clear-shortcut]').forEach(button => {
+    button.onclick = () => setValue(button.dataset.clearShortcut as keyof QuickShortcuts, '');
+  });
+  const save = async (next: QuickShortcuts) => {
+    try {
+      showState(await api.setShortcuts!(next), true);
+    } catch (error) {
+      note.classList.add('is-error');
+      // Electron 会给 IPC 抛出的错误加前缀，只保留业务提示
+      note.textContent = String(error instanceof Error ? error.message : error).replace(/^Error invoking remote method '[^']+': (Error: )?/, '');
+    }
+  };
+  section.querySelector<HTMLButtonElement>('[data-save-shortcuts]')!.onclick = () => { void save({ ...values }); };
+  section.querySelector<HTMLButtonElement>('[data-reset-shortcuts]')!.onclick = () => { void save({ ...defaults }); };
+  void api.getShortcuts().then(state => showState(state, false)).catch(() => { section.hidden = true; });
+}
+
 export async function openSettingsDialog(email: string, onLogout: () => void, onLogin: () => void) {
   const overlay = document.createElement('div');
   overlay.className = 'dialog-overlay settings-overlay';
@@ -453,14 +545,23 @@ export async function openSettingsDialog(email: string, onLogout: () => void, on
       <button type="button" data-settings-category="model" role="tab" aria-selected="false"><i data-lucide="brain-circuit"></i><span>大模型配置</span></button>
       <button type="button" data-settings-category="translation" role="tab" aria-selected="false"><i data-lucide="languages"></i><span>翻译设置</span></button>
       <button type="button" data-settings-category="data" role="tab" aria-selected="false"><i data-lucide="database-backup"></i><span>数据管理</span></button>
+      <button type="button" data-settings-category="screen-lock" role="tab" aria-selected="false"><i data-lucide="lock-keyhole"></i><span>屏保</span></button>
       <button type="button" class="settings-nav-account" data-account-action><i data-lucide="log-out"></i><span>退出登录</span></button>
     </nav>
     <div class="settings-content">
+    ${screenLockSettingsMarkup()}
     <section class="settings-section" data-settings-panel="local" role="tabpanel" aria-labelledby="settings-local-title">
       <div class="settings-section-title"><i data-lucide="monitor"></i><div><h3 id="settings-local-title">本机</h3><p>不修改则使用默认值。调试默认远程地址是 http://127.0.0.1:8000，部署到服务器后改成服务器地址。embedding 固定走该地址下的 /api/embeddings。</p></div></div>
       <label class="settings-field"><span>远程服务地址</span><input data-remote-base spellcheck="false" placeholder="http://127.0.0.1:8000"></label>
       <label class="settings-field"><span>本地 PDF 目录</span><input data-pdf-dir spellcheck="false" placeholder="留空使用默认目录"></label>
       <div class="settings-inline-actions"><button type="button" data-save-local>保存</button><button type="button" data-reset-local>恢复默认</button></div>
+      <div class="settings-subsection settings-shortcuts" data-shortcut-section hidden>
+        <h4>快速记录快捷键</h4>
+        <p class="settings-note">在任意程序里按下即可弹出小窗，再按一次收起。点击输入框后直接按组合键，需包含 ⌃ / ⌥ / ⌘ 之一；按 Delete 清空表示不使用快捷键。</p>
+        <label class="settings-field"><span>记笔记</span><div class="settings-shortcut-row"><input data-shortcut="notebook" readonly placeholder="未设置"><button type="button" data-clear-shortcut="notebook" title="清空" aria-label="清空记笔记快捷键"><i data-lucide="x"></i></button></div></label>
+        <label class="settings-field"><span>待办事项</span><div class="settings-shortcut-row"><input data-shortcut="todos" readonly placeholder="未设置"><button type="button" data-clear-shortcut="todos" title="清空" aria-label="清空待办事项快捷键"><i data-lucide="x"></i></button></div></label>
+        <div class="settings-inline-actions"><button type="button" data-save-shortcuts>保存快捷键</button><button type="button" data-reset-shortcuts>恢复默认</button><p data-shortcut-note></p></div>
+      </div>
     </section>
     <section class="settings-section" data-settings-panel="account" role="tabpanel" aria-labelledby="settings-account-title" hidden>
       <div class="settings-section-title"><i data-lucide="user-round"></i><div><h3 id="settings-account-title">用户账号</h3><p>登录身份由邮箱唯一确定，用户名不可修改。</p></div></div>
@@ -635,6 +736,8 @@ export async function openSettingsDialog(email: string, onLogout: () => void, on
   };
   overlay.querySelector('[data-save-local]')!.addEventListener('click', () => { void saveLocal(false); });
   overlay.querySelector('[data-reset-local]')!.addEventListener('click', () => { void saveLocal(true); });
+  bindShortcutSettings(overlay);
+  bindScreenLockSettings(overlay);
   const refreshBackups = async () => {
     await renderBackupRecords(backupRecords, email);
   };
@@ -848,7 +951,7 @@ export interface NavHandlers {
   onOpenNotebook: () => void;
   onOpenTodos: () => void;
   onOpenPortfolio: () => void;
-  /** 点 logo：持仓/资讯视图下回到项目工作区 */
+  /** 从资料库入口返回项目工作区。 */
   onClosePortfolio: () => void;
   onSelectPortfolio: (id: number) => void;
   onNewPortfolio: () => void;
@@ -875,7 +978,7 @@ export interface PortfolioNavState {
 export type InformationNavView = 'today' | 'review';
 export interface InformationNavState {
   active: boolean;
-  items: Array<{ id: number; name: string; kind?: string }>;
+  items: InformationGroup[];
   currentId: number | null;
   view: InformationNavView;
 }
@@ -887,11 +990,6 @@ export const ALL_PORTFOLIOS_NAME = '全部持仓统计';
 const PORTFOLIO_VIEWS: Array<{ id: PortfolioNavView; label: string; icon: string }> = [
   { id: 'holdings', label: '实时组合市值', icon: 'table-2' },
   { id: 'stats', label: '净值和收益统计', icon: 'chart-line' },
-];
-
-const INFORMATION_VIEWS: Array<{ id: InformationNavView; label: string; icon: string }> = [
-  { id: 'today', label: '今日资讯', icon: 'sunrise' },
-  { id: 'review', label: '深入点评', icon: 'scan-search' },
 ];
 
 function closeMenus(event?: Event) {
@@ -1413,7 +1511,7 @@ export function renderNav(workspace: Workspace, surface: Kind, handlers: NavHand
   const portfolioActive = Boolean(portfolio?.active);
   const informationActive = Boolean(information?.active);
   let libraryGroupExpanded = libraryExpanded(workspace.user.id);
-  const libraryActive = !portfolioActive && !informationActive && LIBRARY_KINDS.includes(surface);
+  const libraryActive = informationActive || (!portfolioActive && LIBRARY_KINDS.includes(surface));
   // Recent items clip within their own strip; the navigation itself must let menus extend below the header.
   left.style.overflow = 'visible';
   left.innerHTML = portfolioActive
@@ -1421,48 +1519,26 @@ export function renderNav(workspace: Workspace, surface: Kind, handlers: NavHand
     <button id="portfolio-current" type="button" title="当前投资组合" aria-haspopup="menu" aria-expanded="false"><i data-lucide="briefcase-business"></i><span></span><i data-lucide="chevron-down"></i></button>
     <div class="menu" role="menu" hidden></div>
   </div><span class="nav-divider" aria-hidden="true"></span><div class="portfolio-views" role="tablist" aria-label="组合功能"></div>`
-    : informationActive
-    ? `<div class="split-tab project-tab portfolio-tab information-tab">
-    <button id="information-current" type="button" title="当前资讯组" aria-haspopup="menu" aria-expanded="false"><i data-lucide="newspaper"></i><span></span><i data-lucide="chevron-down"></i></button>
-    <div class="menu" role="menu" hidden></div>
-  </div><span class="nav-divider" aria-hidden="true"></span><div class="portfolio-views information-views" role="tablist" aria-label="资讯功能"></div>`
     : `<div class="split-tab project-tab">
     <button id="project-current" type="button" title="当前项目" aria-haspopup="menu" aria-expanded="false"><span></span><i data-lucide="chevron-down"></i></button>
     <div class="menu" role="menu" hidden></div>
   </div><span class="nav-divider" aria-hidden="true"></span><div class="recent-assets" aria-label="最近打开"></div>`;
 
-  const brand = portfolioActive || informationActive
-    ? `<button type="button" class="asset-rail-brand is-link" id="brand-home" title="返回项目视图" aria-label="返回项目视图"><img src="/brand/youju-logo.png" alt="youjulab"></button>`
-    : `<div class="asset-rail-brand" role="img" aria-label="youjulab"><img src="/brand/youju-logo.png" alt="youjulab"></div>`;
+  const brand = `<div class="asset-rail-brand" role="img" aria-label="youjulab"><img src="/brand/youju-logo.png" alt="youjulab"></div>`;
   rail.innerHTML = `${brand}<div class="asset-rail-library">
     <button type="button" id="library-group-toggle" class="asset-rail-item library-group-toggle${libraryActive && !libraryGroupExpanded ? ' is-current' : ''}" title="${libraryGroupExpanded ? '折叠' : '展开'}资料库" aria-label="资料库" aria-controls="library-group-items" aria-expanded="${libraryGroupExpanded}"><i data-lucide="library-big"></i><span>资料库</span><i class="library-group-caret" data-lucide="chevron-right" aria-hidden="true"></i></button>
     <div class="asset-rail-items" id="library-group-items" role="group" aria-label="资料库资产类型"${libraryGroupExpanded ? '' : ' hidden'}>${LIBRARY_KINDS.map(kind => { const label = kind === 'project_plan' ? '计划' : LABELS[kind]; return `<button type="button" class="asset-rail-item" data-rail-kind="${kind}" title="${LABELS[kind]}" aria-label="${LABELS[kind]}" aria-haspopup="menu" aria-expanded="false"${libraryActive && surface === kind ? ' aria-current="page"' : ''}><i data-lucide="${kindIcon(kind)}"></i><span>${label}</span></button>`; }).join('')}</div></div>
     <div class="split-tab library-tab"><div class="menu library-menu" role="menu" hidden></div></div>
     <div class="asset-rail-tools">
-      <button id="information-btn" type="button" class="asset-rail-item" title="资讯" aria-label="资讯" aria-pressed="${informationActive}"><i data-lucide="newspaper"></i><span>资讯</span></button>
       <button id="portfolio-btn" type="button" class="asset-rail-item" title="持仓管理" aria-label="持仓管理" aria-pressed="${portfolioActive}"><i data-lucide="briefcase-business"></i><span>持仓</span></button>
     </div>
     <div class="asset-rail-bottom"><button id="settings-btn" type="button" aria-haspopup="dialog" aria-label="设置"><i data-lucide="settings"></i><span>设置</span></button></div>`;
-  rail.querySelector<HTMLButtonElement>('#information-btn')!.onclick = event => {
-    event.stopPropagation();
-    closeMenus();
-    handlers.onOpenInformation();
-  };
+
   rail.querySelector<HTMLButtonElement>('#portfolio-btn')!.onclick = event => {
     event.stopPropagation();
     closeMenus();
     handlers.onOpenPortfolio();
   };
-  const brandHome = rail.querySelector<HTMLButtonElement>('#brand-home');
-  if (brandHome) {
-    brandHome.onclick = event => {
-      event.stopPropagation();
-      closeMenus();
-      if (informationActive) handlers.onCloseInformation();
-      else handlers.onClosePortfolio();
-    };
-  }
-
   const library = rail.querySelector<HTMLElement>('.library-tab')!;
   const libraryMenu = rail.querySelector<HTMLElement>('.library-menu')!;
   const railButton = (kind: Kind) => rail!.querySelector<HTMLButtonElement>(`[data-rail-kind="${kind}"]`)!;
@@ -1507,12 +1583,12 @@ export function renderNav(workspace: Workspace, surface: Kind, handlers: NavHand
         edit.type = 'button';
         edit.className = 'menu-edit';
         edit.dataset.renameAsset = asset.id;
-        const scoped = kind === 'sheet' || kind === 'diagram' || kind === 'project_plan' || kind === 'research' || kind === 'strategy';
+        const scoped = kind === 'sheet' || kind === 'diagram' || kind === 'project_plan' || kind === 'research' || kind === 'strategy' || kind === 'information';
         const editLabel = scoped ? '编辑' : '重命名';
         edit.title = editLabel;
         edit.setAttribute('aria-label', `${editLabel} ${asset.name}`);
         edit.innerHTML = '<i data-lucide="pencil"></i>';
-        const copy = (kind === 'sheet' || kind === 'diagram' || kind === 'mindmap' || kind === 'project_plan' || kind === 'strategy')
+        const copy = (kind === 'sheet' || kind === 'diagram' || kind === 'mindmap' || kind === 'project_plan' || kind === 'strategy' || kind === 'information')
           ? titleCopyButton(`${workspace.project.name}-${asset.name}`, `复制 ${LABELS[kind]}定位标题`)
           : null;
         if (scoped) {
@@ -1522,7 +1598,7 @@ export function renderNav(workspace: Workspace, surface: Kind, handlers: NavHand
           button.append(scope);
           row.append(button, edit);
           if (copy) row.append(copy);
-          if (kind === 'strategy' || kind === 'diagram') {
+          if (kind === 'strategy' || kind === 'diagram' || kind === 'information') {
             const remove = document.createElement('button');
             remove.type = 'button';
             remove.className = 'menu-edit menu-delete';
@@ -1530,6 +1606,10 @@ export function renderNav(workspace: Workspace, surface: Kind, handlers: NavHand
             remove.title = '删除';
             remove.setAttribute('aria-label', `删除 ${asset.name}`);
             remove.innerHTML = '<i data-lucide="trash-2"></i>';
+            if (kind === 'information' && asset.information_kind === 'favorites') {
+              remove.disabled = true;
+              remove.title = '资讯收藏栏由项目自动维护';
+            }
             row.append(remove);
           }
         } else {
@@ -1564,6 +1644,13 @@ export function renderNav(workspace: Workspace, surface: Kind, handlers: NavHand
   };
   groupToggle.onclick = event => {
     event.stopPropagation();
+    if (portfolioActive || informationActive) {
+      closeMenus();
+      setGroupExpanded(true);
+      if (informationActive) handlers.onCloseInformation();
+      else handlers.onClosePortfolio();
+      return;
+    }
     setGroupExpanded(!libraryGroupExpanded);
   };
   groupToggle.onkeydown = event => {
@@ -1696,8 +1783,7 @@ export function renderNav(workspace: Workspace, surface: Kind, handlers: NavHand
   };
   if (portfolioActive && portfolio) {
     renderPortfolioNav(left, portfolio, handlers);
-  } else if (informationActive && information) {
-    renderInformationNav(left, information, handlers);
+
   } else {
   left.querySelector<HTMLElement>('#project-current span')!.textContent = workspace.project.name;
   const projectMenu = left.querySelector<HTMLElement>('.project-tab .menu')!;
@@ -1889,69 +1975,6 @@ function renderPortfolioNav(left: HTMLElement, state: PortfolioNavState, handler
     link.innerHTML = `<i data-lucide="${item.icon}"></i><span></span>`;
     link.querySelector('span')!.textContent = item.label;
     link.addEventListener('click', () => { closeMenus(); handlers.onPortfolioView(item.id); });
-    views.append(link);
-  });
-}
-
-/** 资讯模式下的顶部导航：资讯组下拉（新建/编辑/删除）+ 今日资讯 / 深入点评。 */
-function renderInformationNav(left: HTMLElement, state: InformationNavState, handlers: NavHandlers) {
-  const current = state.items.find(item => item.id === state.currentId) ?? null;
-  const trigger = left.querySelector<HTMLButtonElement>('#information-current')!;
-  trigger.querySelector('span')!.textContent = current ? current.name : (state.items.length ? '选择资讯组' : '新建资讯组');
-  const menu = left.querySelector<HTMLElement>('.information-tab .menu')!;
-  state.items.forEach(item => {
-    const row = document.createElement('div');
-    row.className = 'menu-row';
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.className = item.id === state.currentId ? 'active' : '';
-    button.textContent = item.name;
-    button.addEventListener('click', () => { closeMenus(); handlers.onSelectInformation(item.id); });
-    row.append(button);
-    if (item.kind !== 'favorites') {
-      const edit = document.createElement('button');
-      edit.type = 'button';
-      edit.className = 'menu-edit';
-      edit.title = '编辑';
-      edit.setAttribute('aria-label', `编辑 ${item.name}`);
-      edit.innerHTML = '<i data-lucide="pencil"></i>';
-      edit.addEventListener('click', e => { e.stopPropagation(); closeMenus(); handlers.onRenameInformation(item.id); });
-      const remove = document.createElement('button');
-      remove.type = 'button';
-      remove.className = 'menu-edit menu-delete';
-      remove.title = '删除';
-      remove.setAttribute('aria-label', `删除 ${item.name}`);
-      remove.innerHTML = '<i data-lucide="trash-2"></i>';
-      remove.addEventListener('click', e => { e.stopPropagation(); closeMenus(); handlers.onDeleteInformation(item.id); });
-      row.append(edit, remove);
-    }
-    menu.append(row);
-  });
-  const add = document.createElement('button');
-  add.type = 'button';
-  add.className = 'menu-new';
-  add.textContent = '新建资讯组';
-  add.addEventListener('click', () => { closeMenus(); handlers.onNewInformation(); });
-  menu.append(add);
-  trigger.onclick = e => {
-    e.stopPropagation();
-    const open = menu.hidden;
-    closeMenus();
-    menu.hidden = !open;
-    trigger.setAttribute('aria-expanded', String(open));
-  };
-
-  const views = left.querySelector<HTMLElement>('.information-views')!;
-  INFORMATION_VIEWS.forEach(item => {
-    const link = document.createElement('button');
-    link.type = 'button';
-    link.className = 'portfolio-view-link recent-link';
-    link.setAttribute('role', 'tab');
-    link.setAttribute('aria-selected', String(state.view === item.id));
-    link.disabled = !current;
-    link.innerHTML = `<i data-lucide="${item.icon}"></i><span></span>`;
-    link.querySelector('span')!.textContent = item.label;
-    link.addEventListener('click', () => { closeMenus(); handlers.onInformationView(item.id); });
     views.append(link);
   });
 }

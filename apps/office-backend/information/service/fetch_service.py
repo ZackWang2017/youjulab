@@ -6,11 +6,11 @@ from datetime import date, datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
-import adapter_catalog as catalog
-import announcement_repository as announce
-import preset_news_service as preset
-import rss_repository as rss_repo
-import weread_session_service as weread
+from ..repository import adapter_catalog as catalog
+from ..repository import announcement_repository as announce
+from ..collectors import preset_news_service as preset
+from ..repository import rss_repository as rss_repo
+from ..collectors import weread_session_service as weread
 
 _SHANGHAI = ZoneInfo("Asia/Shanghai")
 _TICKER = re.compile(r"^[A-Za-z0-9]{1,10}\.[A-Za-z]{2,4}$")
@@ -50,7 +50,7 @@ def pick_rss_rows(rows: list[dict], keywords: list[str], keep: int = 8) -> list[
 
 def lookup_securities(query: str) -> list[dict]:
     try:
-        import security_search_service as securities
+        from ..collectors import security_search_service as securities
         return list(securities.search_securities(query, limit=3) or [])
     except Exception:  # noqa: BLE001
         return []
@@ -130,9 +130,9 @@ def is_today(published_at: str, day: date | None = None) -> bool:
     return False
 
 
-def collect_group(kind: str, config: dict) -> dict[str, Any]:
+def collect_group(kind: str, config: dict, owner_id: str) -> dict[str, Any]:
     if kind == "wechat":
-        return _wechat()
+        return _wechat(owner_id)
     if kind == "finance_api":
         return _finance_api(config)
     if kind == "finance_rss":
@@ -142,8 +142,8 @@ def collect_group(kind: str, config: dict) -> dict[str, Any]:
     return {"items": [], "failed": [], "login_required": False}
 
 
-def _wechat() -> dict[str, Any]:
-    fetched = weread.list_shelf_articles(8)
+def _wechat(owner_id: str) -> dict[str, Any]:
+    fetched = weread.list_shelf_articles(8, owner_id)
     if fetched.get("login_required"):
         return {"items": [], "failed": [fetched.get("error") or "微信读书尚未登录。"], "login_required": True}
     if fetched.get("error") and not fetched.get("accounts"):
@@ -273,3 +273,4 @@ def _item(title: str, row: dict, kind: str, source_name: str, icon: str) -> dict
         "summary": summary,
         "impact": guess_impact(title, summary, source_name),
     }
+

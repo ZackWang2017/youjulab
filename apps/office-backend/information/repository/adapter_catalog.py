@@ -68,3 +68,4 @@ def adapters_for_market(market_code: str) -> list[dict[str, Any]]:
 
 def default_announce_adapter(market_code: str) -> str:
     return DEFAULT_ANNOUNCE.get((market_code or "").upper(), "cninfo")
+
